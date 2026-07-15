@@ -19,6 +19,8 @@
 | `telegram-bot` | Telegram bot | hostPath `/code/telegram-bot` |
 
 > **Note:** `backend-v2` runs entirely from its Docker image. Editing source code on the host does **not** affect it unless a new image is built and loaded. Only `cpu-worker` and `wiki-consumer` pick up live host-source changes via `uvicorn --reload` / hostPath.
+>
+> **Secrets:** `k8s/secret.yaml` is gitignored. Use `k8s/secret.example.yaml` as a template, fill in real values, and apply it locally or via your secret management pipeline. Never commit real secrets.
 
 ## Ingress
 - Host: `llm-wiki.local` (add `127.0.0.1 llm-wiki.local` to `/etc/hosts`).
@@ -44,6 +46,7 @@ kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main
 # Deploy full stack
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/configmap.yaml
+# Copy k8s/secret.example.yaml to k8s/secret.yaml, fill in real values, then apply:
 kubectl apply -f k8s/secret.yaml
 kubectl apply -f k8s/
 
