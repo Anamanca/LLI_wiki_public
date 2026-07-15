@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-bot
+  namespace: llm-wiki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telegram-bot
+  template:
+    metadata:
+      labels:
+        app: telegram-bot
+    spec:
+      containers:
+      - name: telegram-bot
+        image: 29_llm_wiki-telegram-bot:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: TZ
+          value: Asia/Ho_Chi_Minh
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: DATABASE_URL
+        - name: OLLAMA_HOST
+          value: http://ollama.llm-wiki.svc.cluster.local:11434
+        - name: LLM_PROVIDER
+          value: auto
+        - name: OPENCODE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: OPENCODE_API_KEY
+        - name: OPENCODE_BASE_URL
+          value: https://opencode.ai/zen/go/v1
+        - name: OPENCODE_PRIMARY_MODEL
+          value: deepseek-v4-flash
+        - name: OPENCODE_FALLBACK_MODEL
+          value: deepseek-v4-flash
+        - name: TELEGRAM_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: TELEGRAM_BOT_TOKEN
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+        volumeMounts:
+        - name: source-code
+          mountPath: /app
+      volumes:
+      - name: source-code
+        hostPath:
+          path: /code/telegram-bot
+          type: Directory

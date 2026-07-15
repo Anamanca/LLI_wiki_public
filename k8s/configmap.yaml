@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-wiki-config
+  namespace: llm-wiki
+data:
+  TZ: "Asia/Ho_Chi_Minh"
+  OLLAMA_HOST: "http://ollama.llm-wiki.svc.cluster.local:11434"
+  REDIS_HOST: "redis.llm-wiki.svc.cluster.local"
+  REDIS_PORT: "6379"
+  LLM_PROVIDER: "auto"
+  OPENCODE_BASE_URL: "https://opencode.ai/zen/go/v1"
+  OPENCODE_PRIMARY_MODEL: "deepseek-v4-flash"
+  OPENCODE_FALLBACK_MODEL: "deepseek-v4-flash"
+  OPENCODE_CHAT_MODEL: "deepseek-v4-flash"
+  GEMINI_BASE_URL: "https://generativelanguage.googleapis.com/v1beta/openai"
+  GEMINI_PRIMARY_MODEL: "gemini-2.5-flash"
+  GEMINI_FALLBACK_MODEL: "gemini-2.5-flash"
+  GEMINI_CHAT_MODEL: "gemini-2.5-flash"
+  RERANKER_ENABLED: "false"
+  CPU_MAX_PERCENT: "85"
+  RAPIDAPI_RPS: "1"
+  NEXT_PUBLIC_API_URL: "/api"
+  HOSTNAME: "0.0.0.0"

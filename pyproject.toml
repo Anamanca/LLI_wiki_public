@@ -1,0 +1,51 @@
+[project]
+name = "llm-wiki"
+version = "2.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "psycopg2-binary>=2.9",
+    "pgvector>=0.3",
+    "redis[hiredis]>=5.0",
+    "httpx",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.5",
+    "dependency-injector>=4.0",
+    "alembic>=1.13",
+    "minio",
+    "python-telegram-bot>=21.0",
+    "yt-dlp>=2024.0",
+    "faster-whisper>=1.0",
+    "ollama>=0.4",
+    "psutil>=5.9",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "pre-commit",
+    "httpx",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.mypy]
+strict = false
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: llm-wiki
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+      - name: minio
+        image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+        args:
+        - server
+        - /data
+        - --console-address
+        - ":9001"
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: minio-user
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: minio-password
+        - name: TZ
+          value: Asia/Ho_Chi_Minh
+        ports:
+        - containerPort: 9000
+          name: api
+        - containerPort: 9001
+          name: console
+        volumeMounts:
+        - name: miniodata
+          mountPath: /data
+        readinessProbe:
+          exec:
+            command: ["mc", "ready", "local"]
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          exec:
+            command: ["mc", "ready", "local"]
+          initialDelaySeconds: 30
+          periodSeconds: 30
+      volumes:
+      - name: miniodata
+        hostPath:
+          path: /data/minio
+          type: DirectoryOrCreate

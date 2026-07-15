@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: llm-wiki
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: pgvector/pgvector:pg16
+        env:
+        - name: POSTGRES_DB
+          value: llm_wiki
+        - name: POSTGRES_USER
+          value: wiki
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: db-password
+        - name: TZ
+          value: Asia/Ho_Chi_Minh
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: pgdata
+          mountPath: /var/lib/postgresql/data
+        - name: dshm
+          mountPath: /dev/shm
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "wiki", "-d", "llm_wiki"]
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          exec:
+            command: ["pg_isready", "-U", "wiki", "-d", "llm_wiki"]
+          initialDelaySeconds: 30
+          periodSeconds: 30
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 256Mi
+  volumeClaimTemplates:
+  - metadata:
+      name: pgdata
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 50Gi

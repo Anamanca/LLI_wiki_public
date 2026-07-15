@@ -1,0 +1,34 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: 30080
+    hostPort: 30080
+    protocol: TCP
+  - containerPort: 9000
+    hostPort: 9000
+    protocol: TCP
+  extraMounts:
+  - hostPath: /home/hieunt/29_LLM_wiki/02_LLM_wiki_data/miniodata
+    containerPath: /data/minio
+  - hostPath: /home/hieunt/29_LLM_wiki/02_LLM_wiki_data/ollamadata
+    containerPath: /data/ollama
+  - hostPath: /home/hieunt/29_LLM_wiki/02_LLM_wiki_data/redis-data
+    containerPath: /data/redis
+  - hostPath: /home/hieunt/29_LLM_wiki/02_LLM_wiki_data/transcripts
+    containerPath: /data/transcripts
+  - hostPath: /home/hieunt/29_LLM_wiki/02_LLM_wiki_data/whisper-cache
+    containerPath: /data/whisper-cache
+  - hostPath: /home/hieunt/29_LLM_wiki/02_LLM_wiki_data/chat_history
+    containerPath: /data/chat-history
+  - hostPath: /home/hieunt/29_LLM_wiki/analyze
+    containerPath: /data/analyze
+  - hostPath: /home/hieunt/29_LLM_wiki/02_LLM_wiki_data/postgres-backups
+    containerPath: /data/postgres-backups
+  - hostPath: /home/hieunt/29_LLM_wiki/backend/app
+    containerPath: /code/backend
+  - hostPath: /home/hieunt/29_LLM_wiki/telegram-bot
+    containerPath: /code/telegram-bot
+  - hostPath: /home/hieunt/32_LLM_wiki_clean_arch/frontend
+    containerPath: /code/frontend

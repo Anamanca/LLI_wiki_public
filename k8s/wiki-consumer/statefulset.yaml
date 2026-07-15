@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wiki-consumer
+  namespace: llm-wiki
+spec:
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: wiki-consumer
+  serviceName: wiki-consumer
+  template:
+    metadata:
+      labels:
+        app: wiki-consumer
+    spec:
+      terminationGracePeriodSeconds: 60
+      initContainers:
+      - name: wait-for-postgres
+        image: busybox:1.36
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for Postgres..."
+          until nc -z postgres.llm-wiki.svc.cluster.local 5432; do sleep 3; done
+          echo "Postgres ready"
+      - name: wait-for-redis
+        image: busybox:1.36
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for Redis..."
+          until nc -z redis.llm-wiki.svc.cluster.local 6379; do sleep 2; done
+          echo "Redis ready"
+      containers:
+      - name: wiki-consumer
+        image: 29_llm_wiki-consumer:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - |
+          export CONSUMER_ID=$((101 + $(echo $HOSTNAME | sed 's/.*-//')))
+          echo "wiki-consumer starting with CONSUMER_ID=$CONSUMER_ID HOSTNAME=$HOSTNAME"
+          exec python3 -m app.ingestion.wiki_consumer_entrypoint
+        env:
+        - name: TZ
+          value: Asia/Ho_Chi_Minh
+        - name: CONSUMER_TYPE
+          value: wiki
+        - name: SERVICE_NAME
+          value: wiki-consumer
+        - name: HEALTH_PORT
+          value: "8201"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: DATABASE_URL
+        - name: MINIO_ENDPOINT
+          value: minio.llm-wiki.svc.cluster.local:9000
+        - name: MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: MINIO_ACCESS_KEY
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: MINIO_SECRET_KEY
+        - name: OLLAMA_HOST
+          value: http://ollama.llm-wiki.svc.cluster.local:11434
+        - name: REDIS_HOST
+          value: redis.llm-wiki.svc.cluster.local
+        - name: REDIS_PORT
+          value: "6379"
+        - name: YOUTUBE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: YOUTUBE_API_KEY
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: GEMINI_API_KEY
+        - name: LLM_PROVIDER
+          value: auto
+        - name: OPENCODE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: OPENCODE_API_KEY
+        - name: OPENCODE_BASE_URL
+          value: https://opencode.ai/zen/go/v1
+        - name: OPENCODE_PRIMARY_MODEL
+          value: deepseek-v4-flash
+        - name: OPENCODE_FALLBACK_MODEL
+          value: deepseek-v4-flash
+        ports:
+        - containerPort: 8201
+        startupProbe:
+          exec:
+            command: ["curl", "-sf", "http://127.0.0.1:8201/"]
+          initialDelaySeconds: 260
+          periodSeconds: 10
+          failureThreshold: 30
+        readinessProbe:
+          exec:
+            command: ["curl", "-sf", "http://127.0.0.1:8201/"]
+          periodSeconds: 15
+        livenessProbe:
+          exec:
+            command: ["curl", "-sf", "http://127.0.0.1:8201/"]
+          initialDelaySeconds: 300
+          periodSeconds: 60
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+        volumeMounts:
+        - name: source-code
+          mountPath: /app/app
+      volumes:
+      - name: source-code
+        hostPath:
+          path: /code/backend
+          type: Directory

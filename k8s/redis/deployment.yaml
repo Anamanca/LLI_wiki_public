@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: llm-wiki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: valkey/valkey:8-alpine
+        args:
+        - valkey-server
+        - --appendonly
+        - "yes"
+        - --appendfsync
+        - everysec
+        - --save
+        - ""
+        ports:
+        - containerPort: 6379
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        readinessProbe:
+          exec:
+            command: ["valkey-cli", "ping"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          exec:
+            command: ["valkey-cli", "ping"]
+          initialDelaySeconds: 15
+          periodSeconds: 30
+      volumes:
+      - name: redis-data
+        hostPath:
+          path: /data/redis
+          type: DirectoryOrCreate

@@ -1,0 +1,139 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cpu-worker
+  namespace: llm-wiki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cpu-worker
+  template:
+    metadata:
+      labels:
+        app: cpu-worker
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: busybox:1.36
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for Postgres..."
+          until nc -z postgres.llm-wiki.svc.cluster.local 5432; do sleep 3; done
+          echo "Postgres ready"
+      containers:
+      - name: cpu-worker
+        image: 29_llm_wiki-worker:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: TZ
+          value: Asia/Ho_Chi_Minh
+        - name: WORKER_TYPE
+          value: cpu
+        - name: WORKER_ID
+          value: "1"
+        - name: SERVICE_NAME
+          value: cpu-worker
+        - name: HEALTH_PORT
+          value: "8101"
+        - name: CPU_MAX_PERCENT
+          value: "85"
+        - name: RAPIDAPI_RPS
+          value: "1"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: DATABASE_URL
+        - name: MINIO_ENDPOINT
+          value: minio.llm-wiki.svc.cluster.local:9000
+        - name: MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: MINIO_ACCESS_KEY
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: MINIO_SECRET_KEY
+        - name: OLLAMA_HOST
+          value: http://ollama.llm-wiki.svc.cluster.local:11434
+        - name: YOUTUBE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: YOUTUBE_API_KEY
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: GEMINI_API_KEY
+        - name: LLM_PROVIDER
+          value: auto
+        - name: OPENCODE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: OPENCODE_API_KEY
+        - name: OPENCODE_BASE_URL
+          value: https://opencode.ai/zen/go/v1
+        - name: OPENCODE_PRIMARY_MODEL
+          value: deepseek-v4-flash
+        - name: OPENCODE_FALLBACK_MODEL
+          value: deepseek-v4-flash
+        - name: REDIS_HOST
+          value: redis.llm-wiki.svc.cluster.local
+        - name: REDIS_PORT
+          value: "6379"
+        - name: RAPIDAPI_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: RAPIDAPI_KEY
+        ports:
+        - containerPort: 8101
+        startupProbe:
+          exec:
+            command: ["curl", "-sf", "http://127.0.0.1:8101/"]
+          initialDelaySeconds: 260
+          periodSeconds: 10
+          failureThreshold: 30
+        readinessProbe:
+          exec:
+            command: ["curl", "-sf", "http://127.0.0.1:8101/"]
+          periodSeconds: 15
+        livenessProbe:
+          exec:
+            command: ["curl", "-sf", "http://127.0.0.1:8101/"]
+          initialDelaySeconds: 300
+          periodSeconds: 60
+        volumeMounts:
+        - name: source-code
+          mountPath: /app/app
+        - name: transcripts
+          mountPath: /app/data/transcripts
+        - name: whisper-cache
+          mountPath: /root/.cache/huggingface
+        resources:
+          requests:
+            cpu: "4"
+            memory: 6Gi
+          limits:
+            cpu: "4"
+            memory: 6Gi
+      volumes:
+      - name: source-code
+        hostPath:
+          path: /code/backend
+          type: Directory
+      - name: transcripts
+        hostPath:
+          path: /data/transcripts
+          type: DirectoryOrCreate
+      - name: whisper-cache
+        hostPath:
+          path: /data/whisper-cache
+          type: DirectoryOrCreate

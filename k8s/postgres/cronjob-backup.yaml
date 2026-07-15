@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: llm-wiki
+spec:
+  schedule: "0 0 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: backup
+            image: pgvector/pgvector:pg16
+            imagePullPolicy: IfNotPresent
+            command:
+            - sh
+            - -c
+            - |
+              echo "[$(date)] Starting pg_dumpall..."
+              PGPASSWORD="$PGPASSWORD" pg_dumpall -h postgres.llm-wiki.svc.cluster.local -U wiki -f /backups/backup-$(date +%Y%m%d-%H%M).sql
+              echo "[$(date)] Backup complete"
+              # Clean backups older than 3 days
+              find /backups -name "backup-*.sql" -mtime +3 -delete
+              ls -lh /backups/
+            env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: llm-wiki-secrets
+                  key: db-password
+            volumeMounts:
+            - name: backups
+              mountPath: /backups
+          volumes:
+          - name: backups
+            hostPath:
+              path: /data/postgres-backups
+              type: DirectoryOrCreate

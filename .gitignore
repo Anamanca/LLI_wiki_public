@@ -1,0 +1,50 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# IDE / local agent dirs
+.claude/
+.claude-*
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.p12
+*.crt
+k8s/secret.yaml
+
+# Logs
+*.log
+logs/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/.env*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data dirs (mounted in kind)
+data/

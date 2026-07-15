@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: youtube-daily-scan
+  namespace: llm-wiki
+spec:
+  schedule: "1 1 * * *"  # 8:00 AM ICT = 1:00 UTC
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: trigger
+            image: busybox:1.36
+            command:
+            - sh
+            - -c
+            - |
+              echo "[$(date)] Triggering daily YouTube scan..."
+              wget -q -O - --post-data="" \
+                http://backend-v2.llm-wiki.svc.cluster.local:8000/api/admin/cron-jobs/youtube-daily-scan/start \
+                2>&1
+              RC=$?
+              if [ $RC -eq 0 ]; then
+                echo "[$(date)] Scan triggered successfully"
+                exit 0
+              else
+                echo "[$(date)] Scan trigger failed with rc=$RC"
+                exit 1
+              fi
+            resources:
+              requests:
+                memory: "16Mi"
+                cpu: "10m"
