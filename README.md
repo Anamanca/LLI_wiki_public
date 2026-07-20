@@ -1,8 +1,9 @@
 # LLM Wiki — Clean Architecture RAG Knowledge System
 
 > **Project version:** backend `2.0.0`, frontend `3.0.0`  
-> **Primary language:** Python 3.11+ (backend), TypeScript / Next.js 14 (frontend)  
-> **Architecture:** Clean Architecture (a.k.a. Onion / Ports & Adapters) with FastAPI.
+> **Primary language:** Python 3.12+ (backend), TypeScript / Next.js 14 (frontend)  
+> **Architecture:** Clean Architecture (a.k.a. Onion / Ports & Adapters) with FastAPI.  
+> **Agent notes:** see root [`AGENTS.md`](AGENTS.md), [`frontend/AGENTS.md`](frontend/AGENTS.md), and [`k8s/AGENTS.md`](k8s/AGENTS.md) for environment-specific gotchas.
 
 ---
 
@@ -13,8 +14,9 @@ LLM Wiki is a knowledge-aggregation system that:
 1. **Ingests** multi-source content (currently YouTube videos via transcript / manual upload).
 2. **Converts** raw content into structured wiki pages (`pages` + `page_sections`).
 3. **Extracts** entities, events, and relations into a knowledge graph.
-4. **Answers** natural-language questions through a RAG pipeline that combines vector search (pgvector) and full-text search (PostgreSQL `tsvector`), then synthesizes an answer via an OpenAI-compatible LLM.
-5. **Exposes** everything through a Next.js 14 admin dashboard: chat, wiki browser, source management, progress monitoring, knowledge graph, and worker administration.
+4. **Answers** natural-language questions through a RAG pipeline that combines vector search (pgvector) and full-text search (PostgreSQL `tsvector`), with optional time-range filtering and recency scoring, then synthesizes an answer via an OpenAI-compatible LLM.
+5. **Observes** pipeline execution via optional LangSmith tracing and evaluation adapters.
+6. **Exposes** everything through a Next.js 14 admin dashboard: chat, wiki browser, source management, progress monitoring, knowledge graph, cron-job administration, and worker administration.
 
 This README is written for **AI agents and future developers**. It explains the architecture, the core patterns, and the rules you must follow when extending the codebase.
 
@@ -60,9 +62,11 @@ This README is written for **AI agents and future developers**. It explains the 
 | **Clean Architecture** | Business logic (`domain` + `application`) is isolated from frameworks (FastAPI, SQLAlchemy, Redis, Ollama). You can swap databases or LLM providers without touching use cases. |
 | **Async-first** | FastAPI + SQLAlchemy async (`asyncpg`) + `httpx` for all external calls. |
 | **Hybrid search** | Vector search alone is brittle; combining `pgvector` cosine similarity with `tsvector` keyword search via Reciprocal Rank Fusion (RRF) improves recall. |
-| **Redis answer cache** | Expensive LLM calls are cached by SHA256 of the question (TTL 3600 s). Cache failures are swallowed (degraded performance, not failure). |
+| **Redis answer cache** | Expensive LLM calls are cached by SHA256 of the question + current date (TTL 3600 s). Cache failures are swallowed (degraded performance, not failure). |
+| **Temporal filtering** | Questions like "trong tháng vừa qua" or "past 2 weeks" are parsed into a `TimeRange` and applied to both vector and keyword search; recency decay boosts newer pages. |
+| **Telemetry** | Optional LangSmith tracing spans every pipeline step (embedding, search, synthesis, cache). Disabled by default via `LANGSMITH_TRACING=false`. |
 | **Ports as abstract classes** | Every external service is hidden behind a port in `application/ports/`. Infrastructure provides concrete adapters. |
-| **Dependency injection** | `dependency-injector` wires singletons (embedder, LLM, cache) and per-request factories (pipeline, use cases). |
+| **Dependency injection** | `dependency-injector` wires singletons (embedder, LLM, cache, telemetry) and per-request factories (pipeline, use cases). |
 
 ---
 
@@ -85,7 +89,8 @@ This README is written for **AI agents and future developers**. It explains the 
 │   │   ├── llm/                         # OpenAI-compatible LLM adapter
 │   │   ├── embedding/                   # Ollama embedding adapter
 │   │   ├── search/                      # pgvector + tsvector search adapters
-│   │   └── entrypoints/                 # Worker/CLI entry points (if any)
+│   │   ├── telemetry/                   # LangSmith / null telemetry adapters
+│   │   └── entrypoints/                 # cpu_worker, wiki_consumer, health_server
 │   ├── presentation/                    # FastAPI layer
 │   │   ├── routes/                      # API routers
 │   │   ├── middleware/                  # Error handling, request logging
@@ -160,6 +165,7 @@ Each use case is a single class with one primary `execute(...)` method.
 | `IntegrateWikiUseCase` | `ingestion/integrate_wiki.py` | Splits markdown into sections, embeds them, persists page + sections. |
 | `ProcessVideoUseCase` | `ingestion/process_video.py` | Takes a `SourceItem` with transcript, runs wiki integration, retries on failure. |
 | `ExtractEventsUseCase` | `ingestion/extract_events.py` | Uses LLM to extract events/entities from a page and stores them in the knowledge graph. |
+| `SummarizeTimeRangeUseCase` | `query/summarize_time_range.py` | Generates a summary of events/pages within a date range. |
 
 **Rule for AI agents:** A use case should only know about **ports** (abstract interfaces) and **domain objects**. It never imports SQLAlchemy or HTTP clients directly.
 
@@ -174,9 +180,11 @@ application/ports/
 │   ├── page_repository.py        # PageRepository, PageSectionRepository
 │   ├── event_repository.py       # EventRepository
 │   └── entity_repository.py      # EntityRepository
-└── search/
-    └── vector_search.py          # VectorSearchPort, KeywordSearchPort,
-                                  # LLMClientPort, EmbeddingServicePort, CacheServicePort
+├── search/
+│   └── vector_search.py          # VectorSearchPort, KeywordSearchPort,
+│                                 # LLMClientPort, EmbeddingServicePort, CacheServicePort
+└── telemetry/
+    └── telemetry_port.py         # TelemetryPort for LangSmith / null tracing
 ```
 
 **Rule for AI agents:** When you add a new external dependency (e.g., a new LLM provider, a new vector DB, a new cache), define a port in `application/ports/` first, then implement the adapter in `infrastructure/`. The use case code should not change.
@@ -200,13 +208,21 @@ Plain dataclasses for crossing the application boundary:
 
 #### 4.3.2 External AI services
 
-- **`llm/openai_adapter.py`** — `OpenAIAdapter` implements `LLMClientPort`. Talks to any OpenAI-compatible endpoint (default: OpenCode Zen API with `deepseek-v4-flash`). Supports streaming.
+- **`llm/openai_adapter.py`** — `OpenAIAdapter` implements `LLMClientPort`. Talks to any OpenAI-compatible endpoint (default: OpenCode Zen API with `deepseek-v4-flash`). Supports streaming and reports token usage.
 - **`embedding/ollama_adapter.py`** — `OllamaEmbeddingAdapter` implements `EmbeddingServicePort`. Uses model `bge-m3` and produces 1024-dim vectors.
+- **`llm/api_key_manager.py`** — Rotates multiple provider keys with rate-limit tracking.
 
 #### 4.3.3 Search
 
-- **`search/pgvector_adapter.py`** — `PgVectorSearchAdapter` implements `VectorSearchPort`. Uses HNSW cosine-distance queries on `page_sections.section_vector` and `event_canonicals.canonical_embedding`.
-- **`search/tsvector_adapter.py`** — `TsVectorSearchAdapter` implements `KeywordSearchPort`. Uses the persisted `fts_vector` on `page_sections`. Query cleaning preserves Vietnamese diacritics.
+- **`search/pgvector_adapter.py`** — `PgVectorSearchAdapter` implements `VectorSearchPort`. Uses HNSW cosine-distance queries on `page_sections.section_vector` and `event_canonicals.canonical_embedding`. Applies optional `TimeRange` filters and recency scoring (`EXP(-λ * days)`).
+- **`search/tsvector_adapter.py`** — `TsVectorSearchAdapter` implements `KeywordSearchPort`. Uses the persisted `fts_vector` on `page_sections`. Query cleaning preserves Vietnamese diacritics. Also supports `TimeRange` filters and recency scoring.
+
+#### 4.3.4 Telemetry
+
+- **`telemetry/langsmith_telemetry_adapter.py`** — Records spans and metadata to LangSmith when `LANGSMITH_TRACING=true`.
+- **`telemetry/langsmith_eval_adapter.py`** — Evaluates RAG outputs against labeled datasets (optional batch workflow).
+- **`telemetry/null_telemetry_adapter.py`** — No-op adapter used when tracing is disabled.
+- **Traced wrappers** (`llm/traced_llm_wrapper.py`, `embedding/traced_embedding_wrapper.py`, `search/traced_search_wrapper.py`, `persistence/redis/traced_cache_wrapper.py`) — Wrap ports to emit spans without changing use-case logic.
 
 ### 4.4 `presentation/` — FastAPI layer
 
@@ -276,40 +292,48 @@ def get_query_pipeline(db: AsyncSession = Depends(get_db)):
 User Question
     │
     ▼
-[1. Cache Check] ──hit──▶ return cached answer
+[1. Time Range Extraction] ──▶ regex patterns (Vietnamese/English) + optional LLM fallback
+    │
+    ▼
+[2. Cache Check] ──hit──▶ return cached answer
     │ miss
     ▼
-[2. Embed Question] ──▶ Ollama bge-m3  ──▶ Embedding(1024)
+[3. Embed Question] ──▶ Ollama bge-m3  ──▶ Embedding(1024)
     │
     ▼
-[3. Vector Search] ──▶ pgvector HNSW cosine on page_sections.section_vector
+[4. Vector Search] ──▶ pgvector HNSW cosine on page_sections.section_vector + time filter + recency
     │
-[4. Keyword Search] ──▶ PostgreSQL tsvector on page_sections.fts_vector
-    │
-    ▼
-[5. Reciprocal Rank Fusion] ──▶ merge + re-rank (k=60)
+[5. Keyword Search] ──▶ PostgreSQL tsvector on page_sections.fts_vector + time filter + recency
     │
     ▼
-[6. Build Context] ──▶ top 20 sections, truncated to 800 chars, cited [1]..[N]
+[6. Reciprocal Rank Fusion] ──▶ merge + re-rank (k=60)
     │
     ▼
-[7. LLM Synthesis] ──▶ OpenAI-compatible /chat/completions, temp=0.3, max_tokens=2048
+[7. Build Context] ──▶ top 20 sections, truncated to 800 chars, cited [1]..[N]
     │
     ▼
-[8. Cache Save] ──▶ Redis TTL 3600
+[8. LLM Synthesis] ──▶ OpenAI-compatible /chat/completions, temp=0.3, max_tokens=4096
     │
     ▼
-Response: {answer, sources, pipeline_steps, cache_hit}
+[9. Telemetry Span] ──▶ LangSmith (if enabled) with latency, tokens, sources
+    │
+    ▼
+[10. Cache Save] ──▶ Redis TTL 3600
+    │
+    ▼
+Response: {answer, sources, pipeline_steps, cache_hit, tokens_used}
 ```
 
 Streaming version (`/api/query/stream`) does the same retrieval but yields SSE events:
 
-- `metadata` → pipeline timings
+- `metadata` → pipeline timings + optional `trace_id`
 - `chunk` / `token` → answer tokens
 - `sources` / `complete` → citations
 - `done`
 
 **Note:** The backend pipeline emits `type: "chunk"`, `type: "sources"`, `type: "done"`. The route handler in `query.py` **translates** these to frontend-compatible `type: "token"` and `type: "complete"` before writing SSE lines.
+
+**Time range support:** Both `POST /api/query` and `POST /api/query/stream` accept `from_date`/`to_date`. The frontend types expose these as ISO strings (`frontend/types/index.ts` and `frontend/hooks/use-query-stream.ts`).
 
 ### 6.2 Ingestion Pipeline
 
@@ -421,9 +445,10 @@ All backend endpoints are under `/api`. See `01_API_list.md` for full details.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/health` | `{status, version, db}` |
-| POST | `/api/query` | Non-streaming RAG. Returns `{answer, citations, sources_used, tokens_used, latency_ms}`. |
+| GET | `/api/health` | `{status, version, db, pending_count, requires_membership_count, failed_count}`. |
+| POST | `/api/query` | Non-streaming RAG. Returns `{answer, sources, tokens_used, cache_hit, pipeline_steps}`. |
 | POST | `/api/query/stream` | SSE streaming RAG. |
+| GET | `/api/summarize` | Time-range summary: `{summary, time_range, stats, top_events, top_pages}`. |
 | POST | `/api/sources` | Create source. |
 | GET | `/api/sources` | List active sources as `{sources, total}`. |
 | GET | `/api/pages/{slug}` | Get page detail (basic version from `pages.py`). |
@@ -438,11 +463,11 @@ All backend endpoints are under `/api`. See `01_API_list.md` for full details.
 | GET | `/api/system-stats` | CPU/RAM/disk via `psutil`. |
 | GET | `/api/workers` | Worker heartbeat list. |
 | GET | `/api/attention-items` | Failed / needs-attention items. |
-| GET/POST | `/api/graph`, `/api/entity-graph`, `/api/cluster-graph`, `/api/cluster-expand` | Graph data. |
+| GET/POST | `/api/graph`, `/api/entity-graph`, `/api/cluster-graph`, `/api/cluster-expand` | Graph data. `entity-graph` and `cluster-expand` now return real `entities` nodes and `entity_relations` edges. |
 | GET/POST/PATCH/DELETE | `/api/sources/{id}/*` | Source detail, scan, items, skip/retry/transcript. |
 | POST | `/api/restart/{id}`, `/api/restart/source/{id}` | Reset items to pending. |
 | GET/POST/PUT/DELETE | `/api/admin/api-keys` | API key management. |
-| GET/POST | `/api/admin/cron-jobs` | Cron job management. |
+| GET/POST | `/api/admin/cron-jobs` | Cron job management. Status is real: `scheduled`, `running`, `error`, `stopped`, `not_found`, `no_workers`. |
 | DELETE | `/api/admin/clear-alerts` | Clear ingestion logs. |
 | GET/POST/PUT/DELETE | `/api/chat/sessions` | Chat sessions (currently stub). |
 
@@ -487,7 +512,10 @@ npm run dev
 See `k8s/README.md` for full instructions. Highlights:
 
 - Uses `kind` with `extraMounts` + `hostPath` for live code reload without rebuilding images.
-- Frontend image uses an `initContainer` to copy `node_modules` into an `emptyDir` because the host mount lacks `node_modules`.
+- `backend-v2`, `cpu-worker`, and `wiki-consumer` all use the same backend image (`32_llm_wiki_clean_arch-backend:latest`).
+- `cpu-worker` deployment includes an `api` sidecar container on port `8100` so the backend can forward cron-job start/stop requests.
+- `backend-v2` runs under `serviceAccountName: backend-v2` so it can read K8s `cronjobs`/`jobs` via RBAC (`k8s/backend/rbac.yaml`).
+- Frontend image is built standalone (no `initContainer`/`hostPath` volumes); `next.config.js` rewrites `/api/*` to the backend service.
 - Ingress: `llm-wiki.local` → `/api` → backend, `/` → frontend. NodePort `30080` also exposed.
 
 ---
@@ -501,8 +529,9 @@ A comprehensive integration / contract test suite. It validates every endpoint a
 - `GET /api/sources` must be `{sources: [], total: N}` not a flat array.
 - `GET /api/pages` must include `page` and `per_page`.
 - `GET /api/search` results must include `slug`, `summary`, `source_name`, `published_at`.
-- `POST /api/query` must return `citations`, `sources_used`, `tokens_used`, `latency_ms`.
+- `POST /api/query` must return `answer`, `sources`, `tokens_used`, `cache_hit`, `pipeline_steps`.
 - `POST /api/query/stream` must emit `type: "token"` and `type: "complete"`.
+- `GET /api/health` must include `pending_count`, `requires_membership_count`, `failed_count`.
 - `GET /api/pages/{slug}` must include sections, media, links, source info.
 
 Run it:
@@ -528,7 +557,7 @@ API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
 
 ### 12.1 Code style
 
-- Python 3.11+ syntax; line length 100; target `py311`.
+- Python 3.12+ syntax; line length 100; target `py312`.
 - Use `async`/`await` for I/O. Use `AsyncSession` for DB work.
 - Prefer `dataclasses` for domain objects and DTOs.
 - Use Pydantic v2 for request/response schemas.
@@ -587,9 +616,11 @@ API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
 2. **DI container passes `None` for session-bound deps:** `query_pipeline`, `integrate_wiki_use_case`, etc. are declared with `None` for repository/search args because they need a per-request `AsyncSession`. The real objects are built in route handlers or dependencies.
 3. **Chat sessions are stubs:** persistence is not implemented; they return hardcoded responses.
 4. **API key create/update endpoints return 501:** only list, delete, and activate are implemented.
-5. **Frontend streaming proxy:** `frontend/app/api/query/stream/route.ts` directly calls the K8s backend service. For local dev, set `NEXT_PUBLIC_API_URL` so the browser calls the local backend instead.
+5. **Frontend streaming proxy:** `frontend/app/api/query/stream/route.ts` proxies the SSE stream from the backend to the browser. In K8s it uses the internal service DNS; for local dev, set `NEXT_PUBLIC_API_URL`.
 6. **Cache failures are silent:** if Redis is down, the system still works but answers are not cached.
 7. **Embedding dimension mismatch:** `Embedding` validates 1024 dims. If you change the embedding model, update `Embedding.dimensions` and all `Vector(...)` columns in `models.py`.
+8. **Docker DNS on this host:** the default Docker bridge cannot resolve `registry.npmjs.org` reliably. Build the frontend image with `--network=host` (see `frontend/AGENTS.md`).
+9. **K8s CronJob status requires RBAC:** the backend ServiceAccount must be bound to `k8s/backend/rbac.yaml` before `/api/admin/cron-jobs` can report real K8s state.
 
 ---
 
@@ -605,7 +636,9 @@ API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
 | Run all contract tests | `API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v` |
 | Deploy to K8s | `./scripts/deploy-k8s.sh` (K3s) or follow `k8s/README.md` (Kind) |
 | Run frontend locally | `cd frontend && npm install && npm run dev` |
+| Build frontend Docker image | `docker build --network=host -t 32_llm_wiki_clean_arch-frontend:latest -f frontend/Dockerfile frontend/` (see `frontend/AGENTS.md`) |
+| Deploy to Kind | `k8s/AGENTS.md` for order + RBAC |
 
 ---
 
-*Last updated for backend v2.0.0 / frontend v3.0.0.*
+*Last updated for backend v2.0.0 / frontend v3.0.0 — includes telemetry, temporal search, real graph/cron status, and unified K8s image.*
