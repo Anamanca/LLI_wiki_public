@@ -49,3 +49,8 @@ Thumbs.db
 # Data dirs (mounted in kind)
 data/
 frontend/tsconfig.tsbuildinfo
+
+# Internal / local-only files
+plans/
+02_run_claude_bypass_permission.sh
+release-manifest.json
