@@ -223,7 +223,7 @@ export function fetchFullEntityGraph(predicate?: string) {
   return request<EntityGraphData>(`/entity-graph?${sp.toString()}`);
 }
 
-export function fetchClusterExpand(entityType: string, limit = 1000) {
+export function fetchClusterExpand(entityType: string, limit = 300) {
   const sp = new URLSearchParams();
   sp.set("entity_type", entityType);
   sp.set("limit", String(limit));

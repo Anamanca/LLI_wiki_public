@@ -1,55 +1,51 @@
-# Agent Guidelines — Frontend
+# Agent Notes — Frontend
 
-## Stack
-- Next.js 14 App Router, React 18, TypeScript 5.6.
-- TanStack Query v5 for server state.
-- Tailwind CSS v3 + custom `components/ui/*` primitives (shadcn/ui style).
-- Graph: `react-force-graph-3d`, `@xyflow/react`, `@dagrejs/dagre`.
-- Markdown: `react-markdown` + `rehype-highlight` + `rehype-sanitize` + `remark-gfm`.
+## Docker Build
 
-## Directory Conventions
-```
-app/            # Routes + route handlers (e.g. api/query/stream/route.ts)
-components/ui/  # Primitive components (card, button, badge, input, …)
-components/<feature>/  # Feature components (chat, wiki, kg, sources, admin, dashboard)
-hooks/          # TanStack Query wrappers. One hook per data concern.
-lib/            # api-client.ts, query-keys.ts, kg-colors.ts, utils.ts
-types/index.ts  # Source of truth for API response shapes.
+```bash
+cd /home/hieunt/32_LLM_wiki_clean_arch
+docker build --network=host -t 32_llm_wiki_clean_arch-frontend:latest -f frontend/Dockerfile frontend/
 ```
 
-## Data Fetching
-- All backend calls go through `lib/api-client.ts`.
-- All server-state reads go through `hooks/use-<feature>.ts` using TanStack Query.
-- API base: `process.env.NEXT_PUBLIC_API_URL || "/api"`.
-- In K8s, `/api/*` is rewritten to `backend-v2.llm-wiki.svc.cluster.local:8000/api/*`.
-- For local dev against backend directly: `echo 'NEXT_PUBLIC_API_URL=http://localhost:8000/api' > .env.local`.
+### Why `--network=host`?
+The default Docker bridge network on this machine cannot resolve `registry.npmjs.org` reliably (`EAI_AGAIN`). Always add `--network=host`; otherwise `npm ci` will appear to hang or fail with DNS errors.
 
-## Streaming Chat
-- Browser calls `/api/query/stream` (Next.js route handler).
-- `app/api/query/stream/route.ts` proxies SSE to backend service.
-- `hooks/use-query-stream.ts` consumes SSE and updates state.
-- Backend emits `type: "token"` and `type: "complete"` after translation in `routes/query.py`.
+### Dockerfile structure
+- `deps`: `npm ci`
+- `builder`: `npm run build` (requires `output: 'standalone'` in `next.config.js`)
+- `runner`: copies `.next/standalone` + `public`, runs as non-root `nextjs` user
 
-## Component Rules
-- Use `components/ui/*` primitives. Build feature components on top of them.
-- Keep pages thin; put complex UI in `components/<feature>/`.
-- Use `clsx` + `tailwind-merge` via `lib/utils.ts` for conditional classes.
-- Client components need `"use client"`.
+### Why no `curl` in the image?
+The frontend does not need `curl` to talk to the backend. Next.js uses Node.js built-in HTTP clients (`http`/`https` modules / `node-fetch`) for API calls. `curl` is only useful for manual debugging, so we keep the image minimal and use a `busybox` debug pod or Node.js one-liners when needed.
 
-## Type Safety
-- Every API shape must be defined in `types/index.ts`.
-- `api-client.ts` functions must return typed promises using those interfaces.
-- Updating an endpoint → update type + api-client + consuming hooks/components.
-
-## Common Commands
+### Local sanity check
+If Docker fails but local build works, the problem is Docker networking, not the code:
 ```bash
 cd frontend
-npm install
-npm run dev        # localhost:3000
-npm run build      # standalone output
+npm ci
+npm run build
 ```
 
-## Gotchas
-- `node_modules` is excluded from host mount in K8s dev mode via emptyDir/initContainer trick.
-- `next.config.js` sets `output: 'standalone'` and `serverExternalPackages: ['three', 'react-force-graph-3d']`.
-- Long LLM proxy timeout: `experimental.proxyTimeout: 300_000`.
+## Next.js Rewrites / API Proxy
+
+`next.config.js` rewrites `/api/:path*` to `http://backend-v2.llm-wiki.svc.cluster.local:8000/api/:path*`. This only works inside the cluster where that DNS name resolves.
+
+For local testing through `kubectl port-forward`, use IPv4 to avoid intermittent 500 errors:
+```bash
+kubectl -n llm-wiki port-forward --address 127.0.0.1 svc/frontend 3001:3000
+curl http://127.0.0.1:3001/api/health
+```
+
+## Container Debugging
+
+The frontend image is based on `node:22-slim` and does **not** include `curl` or `nslookup`. Use Node.js built-in modules or a `busybox` debug pod for network tests:
+
+```bash
+# Test connectivity using Node.js
+kubectl -n llm-wiki exec deployment/frontend -- node -e \
+  "http.get('http://backend-v2.llm-wiki.svc.cluster.local:8000/api/health', r => { let d=''; r.on('data', c => d+=c); r.on('end', () => console.log(r.statusCode, d)); })"
+
+# Or use a busybox debug pod
+kubectl -n llm-wiki run debug --rm -i --restart=Never --image=busybox:1.36 -- \
+  wget -qO- http://backend-v2.llm-wiki.svc.cluster.local:8000/api/health
+```
