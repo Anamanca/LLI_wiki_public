@@ -8,8 +8,8 @@ Dự án được xây dựng theo Clean Architecture với FastAPI. Tất cả 
 
 ### `GET /api/health`
 - **Tag:** health
-- **Mô tả:** Kiểm tra trạng thái hoạt động của service. Trả về trạng thái `ok` và phiên bản API.
-- **Response:** `{"status": "ok", "version": "2.0.0"}`
+- **Mô tả:** Kiểm tra trạng thái hoạt động của service. Trả về trạng thái `ok`, phiên bản API, và số lượng item đang chờ xử lý.
+- **Response:** `{"status": "ok", "version": "2.0.0", "db": "connected", "pending_count": N, "requires_membership_count": N, "failed_count": N}`
 
 ---
 
@@ -22,21 +22,35 @@ Dự án được xây dựng theo Clean Architecture với FastAPI. Tất cả 
   - `question` (string, required): Câu hỏi của người dùng.
   - `source_id` (string, optional): Lọc tìm kiếm theo nguồn dữ liệu cụ thể (YouTube channel...).
   - `top_k` (int, default=10): Số lượng kết quả tìm kiếm trả về tối đa.
+  - `from_date` (datetime, optional): Lọc câu trả lời từ ngày này (ISO 8601).
+  - `to_date` (datetime, optional): Lọc câu trả lời đến ngày này (ISO 8601).
 - **Response:**
   - `answer` (string): Câu trả lời được LLM sinh ra.
-  - `sources` (list[dict]): Danh sách nguồn tham khảo gồm `id`, `title`, `score`, `page_title`, `page_slug`.
-  - `pipeline_steps` (dict): Thời gian xử lý từng bước trong pipeline (cache_check, embed, vector_search, keyword_search, merge, synthesize, cache_save).
-  - `cache_hit` (bool): `true` nếu câu trả lời được lấy từ cache thay vì xử lý lại toàn bộ pipeline.
+  - `citations` (list[dict]): Danh sách nguồn tham khảo gồm `page_title`, `page_slug`, `section`, `source_name`, `source_url`, `timestamp`.
+  - `sources_used` (list[dict]): Tên các nguồn được sử dụng.
+  - `tokens_used` (int): Số token đã dùng.
+  - `latency_ms` (float): Tổng thời gian xử lý (ms).
 
 ### `POST /api/query/stream`
 - **Tag:** query
-- **Mô tả:** Giống `POST /api/query` nhưng trả về kết quả dạng Server-Sent Events (SSE) streaming. LLM sẽ trả về từng token một theo thời gian thực. Không sử dụng cache.
+- **Mô tả:** Giống `POST /api/query` nhưng trả về kết quả dạng Server-Sent Events (SSE) streaming. LLM sẽ trả về từng token một theo thời gian thực. Hỗ trợ `from_date`/`to_date`.
 - **Request Body:** Giống `POST /api/query` (tham số `stream` luôn được set thành `true`).
-- **Response:** SSE stream với các event:
-  - `metadata`: Thông tin pipeline steps timing.
-  - `chunk`: Một phần (token) của câu trả lời.
-  - `sources`: Danh sách nguồn tham khảo sau khi hoàn tất.
-  - `done`: Đánh dấu kết thúc stream.
+- **Response:** SSE stream với các event (đã được route chuyển đổi sang frontend shape):
+  - `metadata`: Thông tin pipeline steps timing + `trace_id` (nếu LangSmith bật).
+  - `token`: Một phần (token) của câu trả lời.
+  - `complete`: Kết thúc stream, kèm `citations` và `sources_used`.
+
+### `GET /api/summarize`
+- **Tag:** query
+- **Mô tả:** Tóm tắt các sự kiện và trang wiki trong một khoảng thời gian.
+- **Query Parameters:**
+  - `days` (int, default=30, min=1, max=365): Số ngày lùi lại từ hiện tại.
+- **Response:**
+  - `summary` (string): Bản tóm tắt.
+  - `time_range` (dict): `start`, `end`.
+  - `stats` (dict): `event_count`, `page_count`, `items_completed`, `items_failed`, `items_rate_limited`.
+  - `top_events` (list[dict]): Các sự kiện nổi bật.
+  - `top_pages` (list[dict]): Các trang nổi bật.
 
 ---
 
@@ -82,10 +96,11 @@ Dự án được xây dựng theo Clean Architecture với FastAPI. Tất cả 
 
 ### `GET /api/search`
 - **Tag:** search
-- **Mô tả:** Tìm kiếm toàn văn (full-text search) sử dụng PostgreSQL tsvector. Trả về các đoạn nội dung khớp với từ khóa, kèm điểm relevance score.
+- **Mô tả:** Tìm kiếm toàn văn (full-text search) sử dụng PostgreSQL tsvector. Trả về các đoạn nội dung khớp với từ khóa, kèm điểm relevance score và recency boost.
 - **Query Parameters:**
   - `q` (string, required): Từ khóa tìm kiếm.
-- **Response:** Mảng `results` gồm `id`, `title`, `content` (300 ký tự đầu), `score` (điểm khớp).
+  - `limit` (int, default=20): Số lượng kết quả tối đa.
+- **Response:** `results` (list: `id`, `title`, `slug`, `summary`, `source_name`, `published_at`, `score`) + `total`.
 
 ---
 
@@ -210,16 +225,16 @@ Dự án được xây dựng theo Clean Architecture với FastAPI. Tất cả 
 
 ### `GET /api/cluster-graph`
 - **Tag:** stubs
-- **Mô tả:** Trả về đồ thị phân cụm thực thể theo loại (entity type). Mỗi node là một cluster đại diện cho một loại thực thể, kích thước dựa trên số lượng thực thể trong cluster đó.
-- **Response:** `nodes` (list: id=entity_type, label, type="cluster", event_count=số lượng).
+- **Mô tả:** Trả về đồ thị phân cụm thực thể theo loại (entity type). Mỗi node là một cluster đại diện cho một loại thực thể, kích thước dựa trên số lượng thực thể trong cluster đó. Chỉ tính các entity có ít nhất một relation.
+- **Response:** `clusters` (list: id=entity_type, label, type="cluster", event_count=số lượng) + `edges` (list: source_cluster, target_cluster, weight).
 
 ### `GET /api/cluster-expand`
 - **Tag:** stubs
-- **Mô tả:** Mở rộng một cluster - trả về danh sách tất cả thực thể thuộc một loại cụ thể.
+- **Mô tả:** Mở rộng một cluster - trả về danh sách thực thể thuộc một loại cụ thể và các `entity_relations` nội bộ của cluster đó.
 - **Query Parameters:**
   - `entity_type` (string, optional): Loại thực thể cần mở rộng.
-  - `limit` (int, default=1000): Số lượng tối đa.
-- **Response:** `nodes` (list: id, label, type, ticker, event_count).
+  - `limit` (int, default=500): Số lượng tối đa.
+- **Response:** `nodes` (list: id, label, type, ticker, event_count) + `edges` (list: source, target, edge_type="entity_relation", predicate, confidence).
 
 ---
 
@@ -302,8 +317,15 @@ Dự án được xây dựng theo Clean Architecture với FastAPI. Tất cả 
 
 ### `GET /api/admin/cron-jobs`
 - **Tag:** stubs
-- **Mô tả:** Lấy danh sách tất cả cron job đã đăng ký trong hệ thống (VD: quét YouTube định kỳ, backup database...).
-- **Response:** Mảng các job gồm `job_id`, `name`, `description`, `schedule` (cron expression), `job_type`, `managed`, `status` (active/inactive), `last_run`.
+- **Mô tả:** Lấy danh sách tất cả cron job đã đăng ký trong hệ thống (VD: quét YouTube định kỳ, backup database...). Trạng thái được xác định thực tế từ K8s CronJob/Job và worker heartbeats.
+- **Response:** Mảng các job gồm `job_id`, `name`, `description`, `schedule` (cron expression), `job_type`, `managed`, `status`, `last_run`, `crontab_active`, `alive_workers`, `error`.
+- **Status values:**
+  - `scheduled`: CronJob tồn tại và không bị suspend.
+  - `running`: Một child Job đang chạy.
+  - `error`: Job gần nhất failed.
+  - `stopped`: `cron_jobs.enabled = false` hoặc CronJob bị suspend.
+  - `not_found`: Không tìm thấy CronJob trong namespace.
+  - `no_workers`: Background task không có worker heartbeat gần đây.
 
 ### `POST /api/admin/cron-jobs/{job_id}/start`
 - **Tag:** stubs
@@ -359,7 +381,7 @@ Dự án được xây dựng theo Clean Architecture với FastAPI. Tất cả 
 | Nhóm | Số lượng API | Trạng thái |
 |---|---|---|
 | Health | 1 | Hoàn chỉnh |
-| Query (RAG) | 2 | Hoàn chỉnh |
+| Query (RAG) | 3 | Hoàn chỉnh (`/query`, `/query/stream`, `/summarize`) |
 | Sources cơ bản | 2 | Hoàn chỉnh |
 | Pages cơ bản | 2 | Hoàn chỉnh |
 | Search | 1 | Hoàn chỉnh |
@@ -367,15 +389,15 @@ Dự án được xây dựng theo Clean Architecture với FastAPI. Tất cả 
 | Source Detail | 4 | 1 hoàn chỉnh, 3 stub |
 | Source Items | 4 | 2 hoàn chỉnh, 2 stub |
 | Page Detail nâng cao | 2 | Stub route |
-| Graph (Knowledge Graph) | 4 | Stub route |
+| Graph (Knowledge Graph) | 4 | Stub route; entity-graph/cluster-expand trả về dữ liệu thực |
 | Attention Items | 1 | Stub route |
 | Workers | 1 | Stub route |
 | Restart | 2 | Stub route |
 | Admin API Keys | 5 | 3 hoàn chỉnh, 2 stub (501) |
-| Admin Cron Jobs | 3 | Stub route |
+| Admin Cron Jobs | 3 | Stub route; `/admin/cron-jobs` trả về trạng thái thực từ K8s |
 | Admin Clear Alerts | 1 | Stub route |
 | Chat Sessions | 5 | Toàn bộ là stub |
-| **Tổng** | **42** | |
+| **Tổng** | **43** | |
 
 ### Kiến trúc RAG Pipeline (`POST /api/query`)
 
@@ -383,30 +405,38 @@ Dự án được xây dựng theo Clean Architecture với FastAPI. Tất cả 
 User Question
     │
     ▼
-[1. Cache Check] ─── hit ──→ Trả về cached answer
+[1. Time Range Extraction] → regex patterns (Vietnamese/English) + optional LLM fallback
+    │
+    ▼
+[2. Cache Check] ─── hit ──→ Trả về cached answer
     │ miss
     ▼
-[2. Embed Question] → Ollama Embedding
+[3. Embed Question] → Ollama Embedding
     ▼
-[3. Vector Search] → pgvector (semantic similarity)
+[4. Vector Search] → pgvector (semantic similarity + time filter + recency boost)
     │
-[4. Keyword Search] → tsvector (full-text match)
-    │
-    ▼
-[5. Reciprocal Rank Fusion] → Kết hợp & xếp hạng kết quả
+[5. Keyword Search] → tsvector (full-text match + time filter + recency boost)
     │
     ▼
-[6. LLM Synthesis] → OpenAI-compatible LLM (sinh câu trả lời từ context)
+[6. Reciprocal Rank Fusion] → Kết hợp & xếp hạng kết quả
     │
     ▼
-[7. Cache Save] → Redis (TTL 3600s)
+[7. LLM Synthesis] → OpenAI-compatible LLM (sinh câu trả lời từ context)
     │
     ▼
-Response (answer + sources + pipeline_steps)
+[8. Telemetry Span] → LangSmith (nếu bật) với latency, tokens, sources
+    │
+    ▼
+[9. Cache Save] → Redis (TTL 3600s)
+    │
+    ▼
+Response (answer + citations + sources_used + tokens_used + latency_ms)
 ```
 
 ### Ghi chú
 
-- Các API trong router `stubs` (`stubs.py`) chỉ được kích hoạt khi biến môi trường `ENABLE_STUB_ROUTES=true`. Đây là các API phục vụ admin dashboard, nhiều API còn ở dạng stub (chưa implement đầy đủ logic nghiệp vụ).
+- Các API trong router `stubs` (`stubs.py`) chỉ được kích hoạt khi biến môi trường `ENABLE_STUB_ROUTES=true`. Đây là các API phục vụ admin dashboard.
+- Một số stub route đã có logic thực: `/api/entity-graph`, `/api/cluster-expand` truy vấn DB thực; `/api/admin/cron-jobs` đọc trạng thái từ K8s API.
 - Route `GET /api/pages/{slug}` bị trùng giữa `pages.py` và `stubs.py`. Router đăng ký trước (`pages.py`) được ưu tiên, trả về dữ liệu cơ bản. Router `stubs.py` có phiên bản chi tiết hơn (kèm sections, media, linked_pages) nhưng bị ghi đè.
+- `/api/admin/*` routes được mount vĩnh viễn trong `main.py` (không phụ thuộc `ENABLE_STUB_ROUTES`) vì CronJob K8s cần gọi chúng.
 - Hệ thống sử dụng Clean Architecture: `presentation/routes/` → `application/use_cases/` → `domain/` ← `infrastructure/`.
