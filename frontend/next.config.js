@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
-  serverExternalPackages: ['three', 'react-force-graph-3d'],
+  transpilePackages: ['react-force-graph-3d', 'three', 'three-render-objects', '3d-force-graph', 'force-graph'],
   experimental: {
     proxyTimeout: 300_000,
   },

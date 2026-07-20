@@ -28,6 +28,8 @@ export function useQueryStream() {
       history?: { role: string; content: string }[];
       source_id?: string;
       top_k?: number;
+      from_date?: string;
+      to_date?: string;
     }) => {
       if (abortRef.current) {
         abortRef.current.abort();

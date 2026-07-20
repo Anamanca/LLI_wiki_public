@@ -12,8 +12,8 @@ export async function POST(req: Request) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      duplex: "half",
-    } as RequestInit);
+      cache: "no-store",
+    });
 
     if (!backendRes.body) {
       return new Response(JSON.stringify({ error: "No response body" }), {

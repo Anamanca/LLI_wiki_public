@@ -122,6 +122,8 @@ export interface QueryRequest {
   source_id?: string;
   top_k?: number;
   language?: string;
+  from_date?: string;
+  to_date?: string;
 }
 
 export interface Citation {

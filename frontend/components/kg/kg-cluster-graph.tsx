@@ -113,19 +113,35 @@ export function ClusterGraph({ onNodeClick, expandedType, expandedData, onBack }
   const [clusterData, setClusterData] = useState<ClusterData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [forceGraphReady, setForceGraphReady] = useState(false);
   const fgRef = useRef<any>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    import("react-force-graph-3d").then(() => {
+      if (mounted) setForceGraphReady(true);
+    });
+    return () => { mounted = false; };
+  }, []);
 
   useEffect(() => {
     if (expandedType) return;
     let cancelled = false;
     async function load() {
       setLoading(true);
+      setError(null);
       try {
         const res = await fetch("/api/cluster-graph");
+        if (!res.ok) {
+          throw new Error(`${res.status}: ${await res.text().catch(() => "Unknown error")}`);
+        }
         const data = await res.json() as ClusterData;
+        if (!Array.isArray(data.clusters)) {
+          throw new Error("Invalid response shape from /api/cluster-graph");
+        }
         if (!cancelled) setClusterData(data);
-      } catch {
-        if (!cancelled) setError("Không thể tải cluster graph.");
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Không thể tải cluster graph.");
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -172,12 +188,26 @@ export function ClusterGraph({ onNodeClick, expandedType, expandedData, onBack }
     );
   }
 
-  if (!graphData) return null;
+  if (!graphData) {
+    return (
+      <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
+        Đang tải dữ liệu đồ thị...
+      </div>
+    );
+  }
+
+  if (!forceGraphReady) {
+    return (
+      <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
+        Đang tải thư viện 3D...
+      </div>
+    );
+  }
 
   return (
     <div className="h-full w-full relative">
       <ForceGraph3D
-        ref={fgRef}
+        key={expandedType ?? "cluster"}
         graphData={graphData}
         nodeLabel={(node: any) => {
           const n = node as GraphNode3D;
