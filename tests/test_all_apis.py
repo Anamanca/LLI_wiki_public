@@ -651,7 +651,8 @@ class TestGraph:
     async def test_cluster_graph(self, api_tester: ApiTester):
         r = await api_tester.get("/cluster-graph")
         data = r.json()
-        assert "nodes" in data
+        assert "clusters" in data
+        assert "edges" in data
 
     async def test_cluster_expand(self, api_tester: ApiTester):
         r = await api_tester.get("/cluster-expand")
