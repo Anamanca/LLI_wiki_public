@@ -22,6 +22,7 @@ dependencies = [
     "ollama>=0.4",
     "psutil>=5.9",
     "python-dotenv",
+    "langsmith>=0.1.0",
 ]
 
 [project.optional-dependencies]

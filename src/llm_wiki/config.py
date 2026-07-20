@@ -43,5 +43,27 @@ class Settings(BaseSettings):
     temporal_precision_enabled: bool = True
     reranker_enabled: bool = Field(default=True, validation_alias="RERANKER_ENABLED")
 
+    # LangSmith observability & evaluation
+    langsmith_tracing_enabled: bool = Field(default=False, validation_alias="LANGSMITH_TRACING")
+    langsmith_api_key: str = Field(default="", validation_alias="LANGSMITH_API_KEY")
+    langsmith_endpoint: str = Field(
+        default="https://api.smith.langchain.com", validation_alias="LANGSMITH_ENDPOINT"
+    )
+    langsmith_project: str = Field(default="llm-wiki-rag", validation_alias="LANGSMITH_PROJECT")
+    langsmith_evaluator_model: str = Field(
+        default="deepseek-v4-flash", validation_alias="LANGSMITH_EVALUATOR_MODEL"
+    )
+
+    # Worker / ingestion operational settings
+    cpu_max_percent: int = Field(default=85, validation_alias="CPU_MAX_PERCENT")
+    rapidapi_rps: int = Field(default=1, validation_alias="RAPIDAPI_RPS")
+    rapidapi_host: str = Field(
+        default="youtube-transcriptor.p.rapidapi.com", validation_alias="RAPIDAPI_HOST"
+    )
+    telegram_alert_chat_id: str = Field(default="", validation_alias="TELEGRAM_ALERT_CHAT_ID")
+    worker_id: int = Field(default=1, validation_alias="WORKER_ID")
+    consumer_id: int = Field(default=101, validation_alias="CONSUMER_ID")
+    minio_bucket: str = Field(default="llm-wiki-media", validation_alias="MINIO_BUCKET")
+
 
 settings = Settings()
