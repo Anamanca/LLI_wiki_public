@@ -24,8 +24,84 @@ spec:
           until nc -z postgres.llm-wiki.svc.cluster.local 5432; do sleep 3; done
           echo "Postgres ready"
       containers:
+      - name: api
+        image: 32_llm_wiki_clean_arch-backend:latest
+        imagePullPolicy: IfNotPresent
+        command: ["uvicorn", "llm_wiki.main:app", "--host", "0.0.0.0", "--port", "8100"]
+        env:
+        - name: TZ
+          value: Asia/Ho_Chi_Minh
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: DATABASE_URL
+        - name: MINIO_ENDPOINT
+          value: minio.llm-wiki.svc.cluster.local:9000
+        - name: MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: MINIO_ACCESS_KEY
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: MINIO_SECRET_KEY
+        - name: REDIS_HOST
+          value: redis.llm-wiki.svc.cluster.local
+        - name: REDIS_PORT
+          value: "6379"
+        - name: OLLAMA_HOST
+          value: http://ollama.llm-wiki.svc.cluster.local:11434
+        - name: YOUTUBE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: YOUTUBE_API_KEY
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: GEMINI_API_KEY
+        - name: LLM_PROVIDER
+          value: auto
+        - name: OPENCODE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: OPENCODE_API_KEY
+        - name: OPENCODE_BASE_URL
+          value: https://opencode.ai/zen/go/v1
+        - name: OPENCODE_PRIMARY_MODEL
+          value: deepseek-v4-flash
+        - name: OPENCODE_FALLBACK_MODEL
+          value: deepseek-v4-flash
+        ports:
+        - containerPort: 8100
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8100
+          initialDelaySeconds: 30
+          periodSeconds: 15
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8100
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        volumeMounts:
+        - name: transcripts
+          mountPath: /app/data/transcripts
+        - name: whisper-cache
+          mountPath: /root/.cache/huggingface
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
       - name: cpu-worker
-        image: 29_llm_wiki-worker:latest
+        image: 32_llm_wiki_clean_arch-backend:latest
         imagePullPolicy: IfNotPresent
         env:
         - name: TZ
@@ -93,6 +169,21 @@ spec:
             secretKeyRef:
               name: llm-wiki-secrets
               key: RAPIDAPI_KEY
+        - name: RAPIDAPI_HOST
+          value: youtube-transcriptor.p.rapidapi.com
+        - name: MINIO_BUCKET
+          value: llm-wiki-media
+        - name: TELEGRAM_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: TELEGRAM_BOT_TOKEN
+        - name: ALLOWED_TELEGRAM_CHAT_IDS
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: ALLOWED_TELEGRAM_CHAT_IDS
+        command: ["python3", "-m", "llm_wiki.infrastructure.entrypoints.cpu_worker"]
         ports:
         - containerPort: 8101
         startupProbe:
@@ -111,8 +202,6 @@ spec:
           initialDelaySeconds: 300
           periodSeconds: 60
         volumeMounts:
-        - name: source-code
-          mountPath: /app/app
         - name: transcripts
           mountPath: /app/data/transcripts
         - name: whisper-cache
@@ -125,10 +214,6 @@ spec:
             cpu: "4"
             memory: 6Gi
       volumes:
-      - name: source-code
-        hostPath:
-          path: /code/backend
-          type: Directory
       - name: transcripts
         hostPath:
           path: /data/transcripts

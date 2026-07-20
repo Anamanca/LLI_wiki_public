@@ -4,13 +4,13 @@ metadata:
   name: youtube-daily-scan
   namespace: llm-wiki
 spec:
-  schedule: "1 1 * * *"  # 8:00 AM ICT = 1:00 UTC
-  successfulJobsHistoryLimit: 1
-  failedJobsHistoryLimit: 3
+  schedule: "1 1 * * *"  # 8:01 AM ICT = 1:01 UTC
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 7
   concurrencyPolicy: Forbid
   jobTemplate:
     spec:
-      backoffLimit: 1
+      backoffLimit: 6
       template:
         spec:
           restartPolicy: OnFailure
@@ -21,18 +21,22 @@ spec:
             - sh
             - -c
             - |
-              echo "[$(date)] Triggering daily YouTube scan..."
-              wget -q -O - --post-data="" \
-                http://backend-v2.llm-wiki.svc.cluster.local:8000/api/admin/cron-jobs/youtube-daily-scan/start \
-                2>&1
-              RC=$?
-              if [ $RC -eq 0 ]; then
-                echo "[$(date)] Scan triggered successfully"
-                exit 0
-              else
-                echo "[$(date)] Scan trigger failed with rc=$RC"
-                exit 1
-              fi
+              URL="http://backend-v2.llm-wiki.svc.cluster.local:8000/api/admin/cron-jobs/youtube-daily-scan/start"
+              echo "[$(date)] Triggering daily YouTube scan: $URL"
+              for i in 1 2 3 4 5; do
+                echo "[$(date)] Attempt $i/5: $URL"
+                RC=$(wget -q -O - --timeout=30 --tries=1 --post-data="" "$URL" > /tmp/resp 2>&1; echo $?)
+                if [ "$RC" -eq 0 ]; then
+                  echo "[$(date)] Scan triggered successfully"
+                  cat /tmp/resp
+                  exit 0
+                fi
+                echo "[$(date)] Attempt $i failed (rc=$RC), retrying in 30s"
+                sleep 30
+              done
+              echo "[$(date)] All attempts failed"
+              cat /tmp/resp 2>/dev/null || true
+              exit 1
             resources:
               requests:
                 memory: "16Mi"

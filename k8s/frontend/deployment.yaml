@@ -13,24 +13,6 @@ spec:
       labels:
         app: frontend
     spec:
-      initContainers:
-      - name: copy-node-modules
-        image: 32_llm_wiki_clean_arch-frontend:latest
-        imagePullPolicy: IfNotPresent
-        command:
-        - sh
-        - -c
-        - |
-          cp -r /app/node_modules /deps/node_modules
-      - name: wait-for-backend
-        image: busybox:1.36
-        command:
-        - sh
-        - -c
-        - |
-          echo "Waiting for backend..."
-          until nc -z backend-v2.llm-wiki.svc.cluster.local 8000; do sleep 3; done
-          echo "Backend ready"
       containers:
       - name: frontend
         image: 32_llm_wiki_clean_arch-frontend:latest
@@ -60,15 +42,3 @@ spec:
           requests:
             memory: "256Mi"
             cpu: "100m"
-        volumeMounts:
-        - name: source
-          mountPath: /app
-        - name: deps
-          mountPath: /app/node_modules
-      volumes:
-      - name: source
-        hostPath:
-          path: /code/frontend
-          type: Directory
-      - name: deps
-        emptyDir: {}

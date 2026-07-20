@@ -37,7 +37,7 @@ spec:
           echo "Redis ready"
       containers:
       - name: wiki-consumer
-        image: 29_llm_wiki-consumer:latest
+        image: 32_llm_wiki_clean_arch-backend:latest
         imagePullPolicy: IfNotPresent
         command:
         - sh
@@ -45,7 +45,7 @@ spec:
         - |
           export CONSUMER_ID=$((101 + $(echo $HOSTNAME | sed 's/.*-//')))
           echo "wiki-consumer starting with CONSUMER_ID=$CONSUMER_ID HOSTNAME=$HOSTNAME"
-          exec python3 -m app.ingestion.wiki_consumer_entrypoint
+          exec python3 -m llm_wiki.infrastructure.entrypoints.wiki_consumer
         env:
         - name: TZ
           value: Asia/Ho_Chi_Minh
@@ -101,6 +101,20 @@ spec:
           value: deepseek-v4-flash
         - name: OPENCODE_FALLBACK_MODEL
           value: deepseek-v4-flash
+        - name: RAPIDAPI_HOST
+          value: youtube-transcriptor.p.rapidapi.com
+        - name: MINIO_BUCKET
+          value: llm-wiki-media
+        - name: TELEGRAM_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: TELEGRAM_BOT_TOKEN
+        - name: ALLOWED_TELEGRAM_CHAT_IDS
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: ALLOWED_TELEGRAM_CHAT_IDS
         ports:
         - containerPort: 8201
         startupProbe:
@@ -125,11 +139,5 @@ spec:
           limits:
             cpu: "1"
             memory: 2Gi
-        volumeMounts:
-        - name: source-code
-          mountPath: /app/app
-      volumes:
-      - name: source-code
-        hostPath:
-          path: /code/backend
-          type: Directory
+        volumeMounts: []
+      volumes: []

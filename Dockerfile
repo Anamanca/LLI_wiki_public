@@ -27,7 +27,8 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
         "faster-whisper>=1.0" \
         ollama>=0.4 \
         psutil>=5.9 \
-        python-dotenv
+        python-dotenv \
+        langsmith>=0.1.0
 
 FROM python:3.12-slim
 
