@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -27,7 +28,7 @@ _TIME_PATTERNS = [
     (r"(\d+)\s*tuần\s*(vừa\s*)?qua", lambda m: timedelta(weeks=int(m.group(1)))),
     (r"(\d+)\s*tháng\s*(vừa\s*)?qua", lambda m: timedelta(days=int(m.group(1)) * 30)),
     (
-        r"(?:trong\s+)?(?:khoảng\s+)?(\d+)\s*tháng\s+(?:qua|vừa\s+qua|gần\s+đây)",
+        r"(?:trong\s+)?(?:khoảng\s+)(\d+)\s*tháng\s+(?:qua|vừa\s+qua|gần\s+đây)",
         lambda m: timedelta(days=int(m.group(1)) * 30),
     ),
     # English — explicit numeric time ranges
@@ -83,6 +84,7 @@ def _month_year_delta(m: re.Match) -> timedelta | None:
     if month_str not in _MONTH_MAP:
         return None
     from datetime import date
+
     month_num = _MONTH_MAP[month_str]
     ref_date = date(year_str, month_num, 1)
     now = date.today()
@@ -125,6 +127,43 @@ def _extract_time_range(question: str) -> TimeRange | None:
 
 def _may_be_time_related(question: str) -> bool:
     return bool(_TIME_KEYWORDS.search(question))
+
+
+def _set_parent_on_wrappers(
+    embedder: EmbeddingServicePort,
+    vector_search: VectorSearchPort,
+    keyword_search: KeywordSearchPort,
+    llm: LLMClientPort,
+    cache: CacheServicePort,
+    parent: TelemetrySpan,
+) -> None:
+    """Wire the pipeline root span as parent for all traced wrappers.
+
+    Each wrapper that exposes ``set_parent_span()`` will attach its own spans
+    under *parent*, building a single tree on LangSmith.
+    """
+    for wrapped in (embedder, vector_search, keyword_search, llm, cache):
+        fn = getattr(wrapped, "set_parent_span", None)
+        if callable(fn):
+            fn(parent)
+
+
+async def _timed(fn) -> tuple[Any, float]:
+    """Run *fn* (sync or async) and return ``(result, latency_seconds)``.
+
+    This is a pure timing helper — tracing is handled exclusively by the
+    traced wrappers (TracedLLMWrapper, TracedEmbeddingWrapper, etc.).
+    """
+    t0 = time.time()
+    if callable(fn):
+        called = fn()
+        if asyncio.iscoroutine(called):
+            result = await called
+        else:
+            result = called
+    else:
+        result = fn
+    return result, time.time() - t0
 
 
 class QueryPipeline:
@@ -214,75 +253,21 @@ class QueryPipeline:
             context_parts.append(f"[{i}] ({source}) {result.title}\n{result.content[:800]}")
         return "\n\n".join(context_parts)
 
-    async def _timed_step(
-        self,
-        name: str,
-        kind: str,
-        inputs: dict[str, Any],
-        root_span: TelemetrySpan | None,
-        fn,
-    ) -> tuple[Any, float]:
-        """Run a pipeline step and record latency via telemetry if available.
-
-        ``fn`` may be sync or async; it is awaited or called accordingly.
-        """
-        telemetry = self._telemetry
-        span: TelemetrySpan | None = None
-        if telemetry:
-            span = await telemetry.start_span(name=name, kind=kind, inputs=inputs, parent=root_span)
-        t0 = time.time()
-        try:
-            if callable(fn):
-                called = fn()
-                result = await called if callable(getattr(called, "__await__", None)) else called
-            else:
-                result = fn
-            latency = time.time() - t0
-            if telemetry and span:
-                await telemetry.end_span(
-                    span=span,
-                    outputs={"latency_ms": round(latency * 1000, 2)},
-                )
-            return result, latency
-        except Exception as exc:
-            latency = time.time() - t0
-            if telemetry and span:
-                await telemetry.add_metadata(
-                    span=span,
-                    metadata={
-                        "latency_ms": round(latency * 1000, 2),
-                        "error_type": type(exc).__name__,
-                    },
-                )
-                await telemetry.end_span(span=span, error=str(exc))
-            raise
-
     async def _retrieve_and_merge(
         self,
         input: QueryInput,
         query_embedding: Embedding,
         time_range: TimeRange | None,
-        root_span: TelemetrySpan | None,
     ) -> tuple[list[SearchResult], list[SearchResult], list[SearchResult], dict[str, float]]:
         """Run vector + keyword search and reciprocal rank fusion.
 
-        Returns raw results and timings.
+        Tracing is emitted by the traced wrappers (TracedVectorSearchWrapper,
+        TracedKeywordSearchWrapper) — pipeline only measures wall-clock time.
         """
         step_times: dict[str, float] = {}
 
-        vector_results, step_times["vector_search"] = await self._timed_step(
-            name="vector_search",
-            kind="retriever",
-            inputs={
-                "top_k": input.top_k * 2,
-                "source_id": input.source_id,
-                "time_range": {
-                    "start": time_range.start.isoformat() if time_range else None,
-                    "end": time_range.end.isoformat() if time_range else None,
-                },
-            },
-            root_span=root_span,
-            fn=lambda: self._vector_search.search_similar(
+        vector_results, step_times["vector_search"] = await _timed(
+            lambda: self._vector_search.search_similar(
                 query_embedding,
                 top_k=input.top_k * 2,
                 source_id=input.source_id,
@@ -290,19 +275,8 @@ class QueryPipeline:
             ),
         )
 
-        keyword_results, step_times["keyword_search"] = await self._timed_step(
-            name="keyword_search",
-            kind="retriever",
-            inputs={
-                "query": input.question,
-                "top_k": input.top_k,
-                "time_range": {
-                    "start": time_range.start.isoformat() if time_range else None,
-                    "end": time_range.end.isoformat() if time_range else None,
-                },
-            },
-            root_span=root_span,
-            fn=lambda: self._keyword_search.search_keyword(
+        keyword_results, step_times["keyword_search"] = await _timed(
+            lambda: self._keyword_search.search_keyword(
                 input.question,
                 top_k=input.top_k,
                 time_range=time_range,
@@ -313,16 +287,7 @@ class QueryPipeline:
             merged = self._reciprocal_rank_fusion([vector_results, keyword_results])
             return merged[: input.top_k]
 
-        top_results, step_times["merge"] = await self._timed_step(
-            name="merge_results",
-            kind="chain",
-            inputs={
-                "vector_result_count": len(vector_results),
-                "keyword_result_count": len(keyword_results),
-            },
-            root_span=root_span,
-            fn=_merge,
-        )
+        top_results, step_times["merge"] = await _timed(_merge)
 
         return vector_results, keyword_results, top_results, step_times
 
@@ -344,15 +309,13 @@ class QueryPipeline:
                     "to_date": input.to_date.isoformat() if input.to_date else None,
                 },
             )
+            _set_parent_on_wrappers(
+                self._embedder, self._vector_search, self._keyword_search,
+                self._llm, self._cache, root_span,
+            )
 
         cache_key = self._cache_key(input.question)
-        cached, step_times["cache_check"] = await self._timed_step(
-            name="cache_check",
-            kind="tool",
-            inputs={"key_hash": hashlib.sha256(cache_key.encode()).hexdigest()[:16]},
-            root_span=root_span,
-            fn=lambda: self._cache.get(cache_key),
-        )
+        cached, step_times["cache_check"] = await _timed(lambda: self._cache.get(cache_key))
 
         if cached:
             cache_hit = True
@@ -373,20 +336,25 @@ class QueryPipeline:
                 )
             return data
 
-        query_embedding, step_times["embed"] = await self._timed_step(
-            name="embedding",
-            kind="embedding",
-            inputs={"text_length": len(input.question)},
-            root_span=root_span,
-            fn=lambda: self._embedder.embed(input.question),
-        )
+        try:
+            query_embedding, step_times["embed"] = await _timed(
+                lambda: self._embedder.embed(input.question),
+            )
+        except Exception as exc:
+            if telemetry and root_span:
+                await telemetry.add_metadata(
+                    span=root_span,
+                    metadata={"error_type": type(exc).__name__},
+                )
+                await telemetry.end_span(span=root_span, error=str(exc))
+            raise
 
         time_range = self._resolve_time_range(input)
         if time_range:
             logger.debug("Extracted time_range: %s → %s", time_range.start, time_range.end)
 
         _, _, top_results, search_step_times = await self._retrieve_and_merge(
-            input, query_embedding, time_range, root_span
+            input, query_embedding, time_range
         )
         step_times.update(search_step_times)
 
@@ -397,17 +365,8 @@ class QueryPipeline:
             "Cite sources using [N] notation. If the context doesn't contain the answer, say so."
         )
 
-        answer, step_times["synthesize"] = await self._timed_step(
-            name="synthesize",
-            kind="llm",
-            inputs={
-                "context_length": len(context),
-                "context_sources": len(top_results),
-                "temperature": 0.3,
-                "max_tokens": 4096,
-            },
-            root_span=root_span,
-            fn=lambda: self._llm.chat_completion(
+        answer, step_times["synthesize"] = await _timed(
+            lambda: self._llm.chat_completion(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {
@@ -444,12 +403,8 @@ class QueryPipeline:
             "pipeline_steps": step_times,
         }
 
-        _, step_times["cache_save"] = await self._timed_step(
-            name="cache_save",
-            kind="tool",
-            inputs={"key_hash": hashlib.sha256(cache_key.encode()).hexdigest()[:16]},
-            root_span=root_span,
-            fn=lambda: self._cache.set(cache_key, json.dumps(result, default=str), ttl=3600),
+        _, step_times["cache_save"] = await _timed(
+            lambda: self._cache.set(cache_key, json.dumps(result, default=str), ttl=3600),
         )
 
         if telemetry and root_span:
@@ -491,30 +446,24 @@ class QueryPipeline:
                     "to_date": input.to_date.isoformat() if input.to_date else None,
                 },
             )
+            _set_parent_on_wrappers(
+                self._embedder, self._vector_search, self._keyword_search,
+                self._llm, self._cache, root_span,
+            )
 
-        query_embedding, step_times["embed"] = await self._timed_step(
-            name="embedding",
-            kind="embedding",
-            inputs={"text_length": len(input.question)},
-            root_span=root_span,
-            fn=lambda: self._embedder.embed(input.question),
+        query_embedding, step_times["embed"] = await _timed(
+            lambda: self._embedder.embed(input.question),
         )
 
         async def _resolve_time():
             return await self._resolve_time_range_async(input)
 
-        time_range, step_times["time_resolution"] = await self._timed_step(
-            name="time_resolution",
-            kind="chain",
-            inputs={"question": input.question},
-            root_span=root_span,
-            fn=_resolve_time,
-        )
+        time_range, step_times["time_resolution"] = await _timed(_resolve_time)
         if time_range:
             logger.debug("Extracted time_range: %s → %s", time_range.start, time_range.end)
 
         _, _, top_results, search_step_times = await self._retrieve_and_merge(
-            input, query_embedding, time_range, root_span
+            input, query_embedding, time_range
         )
         step_times.update(search_step_times)
 
@@ -531,20 +480,9 @@ class QueryPipeline:
         full_answer = ""
         has_content = False
         t0_synth = time.time()
-        synth_span: TelemetrySpan | None = None
-        if telemetry:
-            synth_span = await telemetry.start_span(
-                name="synthesize_stream",
-                kind="llm",
-                inputs={
-                    "context_length": len(context),
-                    "context_sources": len(top_results),
-                    "temperature": 0.3,
-                    "max_tokens": 4096,
-                },
-                parent=root_span,
-            )
 
+        # Trace emitted by TracedLLMWrapper.chat_completion_stream
+        # (parent was wired via _set_parent_on_wrappers above).
         root_logger.warning(
             "[STREAM] calling chat_completion_stream for: %s...", input.question[:50]
         )
@@ -564,12 +502,6 @@ class QueryPipeline:
                 full_answer += chunk
                 yield {"type": "chunk", "data": chunk}
         except Exception as exc:
-            if telemetry and synth_span:
-                await telemetry.add_metadata(
-                    span=synth_span,
-                    metadata={"error_type": type(exc).__name__},
-                )
-                await telemetry.end_span(span=synth_span, error=str(exc))
             if telemetry and root_span:
                 await telemetry.add_metadata(
                     span=root_span,
@@ -597,24 +529,6 @@ class QueryPipeline:
 
         usage = getattr(self._llm, "last_usage", None) or {}
         tokens_used = usage.get("total_tokens", 0)
-
-        if telemetry and synth_span:
-            await telemetry.end_span(
-                span=synth_span,
-                outputs={
-                    "answer_length": len(full_answer),
-                    "answer_preview": full_answer[:200],
-                },
-            )
-            await telemetry.add_metadata(
-                span=synth_span,
-                metadata={
-                    "latency_ms": round(step_times["synthesize"] * 1000, 2),
-                    "tokens_used": tokens_used,
-                    "prompt_tokens": usage.get("prompt_tokens"),
-                    "completion_tokens": usage.get("completion_tokens"),
-                },
-            )
 
         sources = [
             {

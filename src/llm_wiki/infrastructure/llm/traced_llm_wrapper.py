@@ -34,6 +34,10 @@ class TracedLLMWrapper(LLMClientPort):
         self._parent_span = parent_span
         self.last_usage: dict[str, Any] | None = None
 
+    def set_parent_span(self, parent: TelemetrySpan) -> None:
+        """Wire this wrapper's spans under a parent span (e.g. pipeline root)."""
+        self._parent_span = parent
+
     async def chat_completion(
         self,
         messages: list[dict],

@@ -5,6 +5,7 @@ from llm_wiki.infrastructure.persistence.postgres.repositories.source_repository
 from llm_wiki.infrastructure.persistence.postgres.repositories.page_repository import PostgresPageRepository, PostgresPageSectionRepository
 from llm_wiki.infrastructure.persistence.postgres.repositories.event_repository import PostgresEventRepository
 from llm_wiki.infrastructure.persistence.postgres.repositories.entity_repository import PostgresEntityRepository
+from llm_wiki.infrastructure.persistence.file import ChatSessionFileRepository
 from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter
 from llm_wiki.infrastructure.embedding.ollama_adapter import OllamaEmbeddingAdapter
 from llm_wiki.infrastructure.persistence.redis.cache_adapter import RedisCacheAdapter
@@ -58,6 +59,8 @@ class Container(containers.DeclarativeContainer):
     )
 
     cache = providers.Singleton(RedisCacheAdapter)
+
+    chat_session_repo = providers.Singleton(ChatSessionFileRepository)
 
     query_pipeline = providers.Factory(
         QueryPipeline,

@@ -21,6 +21,10 @@ class TracedCacheWrapper(CacheServicePort):
         self._telemetry = telemetry
         self._parent_span = parent_span
 
+    def set_parent_span(self, parent: TelemetrySpan) -> None:
+        """Wire this wrapper's spans under a parent span (e.g. pipeline root)."""
+        self._parent_span = parent
+
     async def get(self, key: str) -> str | None:
         span = await self._telemetry.start_span(
             name="cache_get",

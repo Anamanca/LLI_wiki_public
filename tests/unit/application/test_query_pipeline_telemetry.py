@@ -1,6 +1,6 @@
 import json
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from llm_wiki.application.dto.query_dto import QueryInput
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
@@ -40,6 +40,7 @@ def fake_telemetry():
 def mock_embedder():
     mock = AsyncMock()
     mock.embed.return_value = Embedding(vector=[0.1] * 1024)
+    mock.set_parent_span = MagicMock()
     return mock
 
 
@@ -49,6 +50,7 @@ def mock_vector_search():
     mock.search_similar.return_value = [
         SearchResult(content_id="1", content_type="section", title="Test", content="test", score=0.9)
     ]
+    mock.set_parent_span = MagicMock()
     return mock
 
 
@@ -56,6 +58,7 @@ def mock_vector_search():
 def mock_keyword_search():
     mock = AsyncMock()
     mock.search_keyword.return_value = []
+    mock.set_parent_span = MagicMock()
     return mock
 
 
@@ -64,6 +67,7 @@ def mock_llm():
     mock = AsyncMock()
     mock.chat_completion.return_value = "This is a test answer."
     mock.last_usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+    mock.set_parent_span = MagicMock()
     return mock
 
 
@@ -71,6 +75,7 @@ def mock_llm():
 def mock_cache():
     mock = AsyncMock()
     mock.get.return_value = None
+    mock.set_parent_span = MagicMock()
     return mock
 
 
@@ -93,17 +98,14 @@ async def test_execute_emits_root_span_and_step_spans(
     end_events = [e for e in fake_telemetry.events if e["action"] == "end"]
 
     span_names = [e["span"].name for e in start_events]
+    # Only root span from pipeline._timed helper; step spans come from wrappers.
     assert "rag_query" in span_names
-    assert "cache_check" in span_names
-    assert "embedding" in span_names
-    assert "vector_search" in span_names
-    assert "keyword_search" in span_names
-    assert "merge_results" in span_names
-    assert "synthesize" in span_names
-    assert "cache_save" in span_names
+    assert len(start_events) == 1  # root only — wrappers are mocks
 
-    # Each started span should be ended.
-    assert len(start_events) == len(end_events)
+    # Root span is ended with outputs.
+    root_end = [e for e in end_events if e["span"].name == "rag_query"]
+    assert root_end
+    assert root_end[0]["outputs"]["answer_length"] > 0
 
 
 @pytest.mark.asyncio
@@ -166,5 +168,8 @@ async def test_execute_error_records_error(
     with pytest.raises(RuntimeError):
         await pipeline.execute(QueryInput(question="What is RAG?"))
 
+    # The pipeline now catches errors and records them directly on root_span.
     error_events = [e for e in fake_telemetry.events if e.get("error")]
     assert error_events
+    # Verify the error was recorded against the root span.
+    assert error_events[0]["span"].name == "rag_query"

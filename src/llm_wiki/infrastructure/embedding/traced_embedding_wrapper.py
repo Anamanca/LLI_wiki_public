@@ -24,6 +24,10 @@ class TracedEmbeddingWrapper(EmbeddingServicePort):
         self._model = model
         self._parent_span = parent_span
 
+    def set_parent_span(self, parent: TelemetrySpan) -> None:
+        """Wire this wrapper's spans under a parent span (e.g. pipeline root)."""
+        self._parent_span = parent
+
     async def embed(self, text: str) -> Embedding:
         span = await self._telemetry.start_span(
             name="embedding",

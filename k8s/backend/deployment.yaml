@@ -170,6 +170,8 @@ spec:
               key: LANGSMITH_API_KEY
         - name: ENABLE_STUB_ROUTES
           value: "true"
+        - name: CHAT_HISTORY_DIR
+          value: "/data/chat-history"
         ports:
         - containerPort: 8000
         readinessProbe:
@@ -188,3 +190,11 @@ spec:
           requests:
             memory: "256Mi"
             cpu: "100m"
+        volumeMounts:
+        - name: chat-history
+          mountPath: /data/chat-history
+      volumes:
+      - name: chat-history
+        hostPath:
+          path: /data/chat-history
+          type: DirectoryOrCreate

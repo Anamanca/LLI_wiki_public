@@ -24,7 +24,7 @@ data:
   MINIO_BUCKET: "llm-wiki-media"
   NEXT_PUBLIC_API_URL: "/api"
   HOSTNAME: "0.0.0.0"
-  LANGSMITH_TRACING: "false"
+  LANGSMITH_TRACING: "true"
   LANGSMITH_ENDPOINT: "https://api.smith.langchain.com"
   LANGSMITH_PROJECT: "llm-wiki-rag"
   LANGSMITH_EVALUATOR_MODEL: "deepseek-v4-flash"

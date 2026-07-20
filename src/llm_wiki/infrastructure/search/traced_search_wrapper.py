@@ -39,6 +39,10 @@ class TracedVectorSearchWrapper(VectorSearchPort):
         self._telemetry = telemetry
         self._parent_span = parent_span
 
+    def set_parent_span(self, parent: TelemetrySpan) -> None:
+        """Wire this wrapper's spans under a parent span (e.g. pipeline root)."""
+        self._parent_span = parent
+
     async def search_similar(
         self,
         embedding: Embedding,
@@ -156,6 +160,10 @@ class TracedKeywordSearchWrapper(KeywordSearchPort):
         self._inner = inner
         self._telemetry = telemetry
         self._parent_span = parent_span
+
+    def set_parent_span(self, parent: TelemetrySpan) -> None:
+        """Wire this wrapper's spans under a parent span (e.g. pipeline root)."""
+        self._parent_span = parent
 
     async def search_keyword(
         self,

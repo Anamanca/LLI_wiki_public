@@ -780,37 +780,8 @@ async def list_workers(db: AsyncSession = Depends(get_db)):
 
 
 # ──────────────────────────────────────────
-# Chat Sessions (still stubs — requires file-based storage)
+# Chat Sessions (implemented in chat_sessions.py)
 # ──────────────────────────────────────────
-
-
-def _now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-@router.get("/chat/sessions")
-async def list_chat_sessions_stub():
-    return []
-
-
-@router.post("/chat/sessions")
-async def create_chat_session_stub():
-    return {"id": "stub-1", "title": "New Chat", "messages": [], "created_at": _now(), "updated_at": _now()}
-
-
-@router.get("/chat/sessions/{session_id}")
-async def get_chat_session_stub(session_id: str):
-    return {"id": session_id, "title": "Chat", "messages": [], "created_at": _now(), "updated_at": _now()}
-
-
-@router.put("/chat/sessions/{session_id}")
-async def update_chat_session_stub(session_id: str):
-    return {"id": session_id, "title": "Chat", "messages": [], "created_at": _now(), "updated_at": _now()}
-
-
-@router.delete("/chat/sessions/{session_id}")
-async def delete_chat_session_stub(session_id: str):
-    return {"status": "deleted"}
 
 
 async def _no_mutation_stub():
