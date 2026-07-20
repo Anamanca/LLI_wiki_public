@@ -3,6 +3,7 @@ import logging
 from llm_wiki.application.ports.repositories.event_repository import EventRepository
 from llm_wiki.application.ports.search.vector_search import LLMClientPort, EmbeddingServicePort
 from llm_wiki.application.ports.repositories.page_repository import PageRepository
+from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort
 from llm_wiki.domain.entities.event import EventCanonical, EventObservation
 from llm_wiki.domain.entities.entity import Entity, EventEntityLink
 from llm_wiki.domain.value_objects.identifiers import EventId, PageId
@@ -21,13 +22,50 @@ class ExtractEventsUseCase:
         entity_repo: EntityRepository,
         llm: LLMClientPort,
         embedder: EmbeddingServicePort,
+        telemetry: TelemetryPort | None = None,
     ):
         self._event_repo = event_repo
         self._entity_repo = entity_repo
         self._llm = llm
         self._embedder = embedder
+        self._telemetry = telemetry
 
     async def execute(
+        self,
+        page_id: PageId,
+        page_title: str,
+        content_markdown: str,
+    ) -> list[EventCanonical]:
+        span = None
+        if self._telemetry:
+            span = await self._telemetry.start_span(
+                name="event_extraction",
+                kind="llm",
+                inputs={"page_title": page_title, "content_length": len(content_markdown)},
+            )
+        t0 = datetime.utcnow()
+        try:
+            result = await self._run_extraction(page_id, page_title, content_markdown)
+            if span:
+                await self._telemetry.end_span(
+                    span=span,
+                    outputs={"event_count": len(result)},
+                )
+                await self._telemetry.add_metadata(
+                    span=span,
+                    metadata={"latency_ms": (datetime.utcnow() - t0).total_seconds() * 1000},
+                )
+            return result
+        except Exception as exc:
+            if span:
+                await self._telemetry.add_metadata(
+                    span=span,
+                    metadata={"error_type": type(exc).__name__},
+                )
+                await self._telemetry.end_span(span=span, error=str(exc))
+            raise
+
+    async def _run_extraction(
         self,
         page_id: PageId,
         page_title: str,
