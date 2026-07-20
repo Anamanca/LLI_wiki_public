@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 
@@ -9,6 +10,8 @@ class QueryInput:
     top_k: int = 10
     stream: bool = False
     chat_history: Optional[list[dict]] = None
+    from_date: Optional[datetime] = None
+    to_date: Optional[datetime] = None
 
 
 @dataclass

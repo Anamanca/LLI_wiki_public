@@ -1,5 +1,6 @@
 from typing import Optional
 import time
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query as FastQuery
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,24 +10,48 @@ from llm_wiki.presentation.dependencies import container, get_db
 from llm_wiki.presentation.schemas.common import QueryRequest, QueryResponseModel
 from llm_wiki.infrastructure.search.pgvector_adapter import PgVectorSearchAdapter
 from llm_wiki.infrastructure.search.tsvector_adapter import TsVectorSearchAdapter
+from llm_wiki.infrastructure.search.traced_search_wrapper import (
+    TracedKeywordSearchWrapper,
+    TracedVectorSearchWrapper,
+)
+from llm_wiki.infrastructure.llm.traced_llm_wrapper import TracedLLMWrapper
+from llm_wiki.infrastructure.embedding.traced_embedding_wrapper import TracedEmbeddingWrapper
+from llm_wiki.infrastructure.persistence.redis.traced_cache_wrapper import TracedCacheWrapper
 from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
 from llm_wiki.application.use_cases.query.ask_question import AskQuestionUseCase
 from llm_wiki.application.use_cases.query.stream_answer import StreamAnswerUseCase
+from llm_wiki.application.use_cases.query.summarize_time_range import (
+    SummarizeTimeRangeUseCase,
+    TimeRangeSummaryInput,
+)
+from llm_wiki.infrastructure.persistence.postgres.repositories.event_repository import PostgresEventRepository
 from llm_wiki.application.dto.query_dto import QueryInput
 
 router = APIRouter()
 
 
 def get_query_pipeline(db: AsyncSession = Depends(get_db)):
-    embedder = container.embedder()
-    llm = container.llm_client()
-    cache = container.cache()
+    telemetry = container.telemetry()
+    embedder = TracedEmbeddingWrapper(
+        container.embedder(),
+        telemetry,
+        model=container.config.langsmith_evaluator_model() or "unknown",
+    )
+    llm = TracedLLMWrapper(
+        container.llm_client(),
+        telemetry,
+        model=container.config.opencode_primary_model() or "unknown",
+    )
+    cache = TracedCacheWrapper(container.cache(), telemetry)
+    vector_search = TracedVectorSearchWrapper(PgVectorSearchAdapter(db), telemetry)
+    keyword_search = TracedKeywordSearchWrapper(TsVectorSearchAdapter(db), telemetry)
     return QueryPipeline(
         embedder=embedder,
-        vector_search=PgVectorSearchAdapter(db),
-        keyword_search=TsVectorSearchAdapter(db),
+        vector_search=vector_search,
+        keyword_search=keyword_search,
         llm=llm,
         cache=cache,
+        telemetry=telemetry,
     )
 
 
@@ -41,6 +66,8 @@ async def ask_question(
         question=payload.question,
         source_id=payload.source_id,
         top_k=payload.top_k or 10,
+        from_date=payload.from_date,
+        to_date=payload.to_date,
     ))
     latency = (time.time() - t0) * 1000
 
@@ -49,9 +76,9 @@ async def ask_question(
             "page_title": s.get("page_title") or s.get("title", ""),
             "page_slug": s.get("page_slug") or s.get("id", ""),
             "section": "",
-            "source_name": "",
+            "source_name": s.get("source_name") or "",
             "source_url": "",
-            "timestamp": "",
+            "timestamp": s.get("published_at") or "",
         }
         for s in result.sources
     ]
@@ -85,6 +112,8 @@ async def ask_question_stream(
             source_id=payload.source_id,
             top_k=payload.top_k or 10,
             stream=True,
+            from_date=payload.from_date,
+            to_date=payload.to_date,
         )):
             import json
 
@@ -105,9 +134,9 @@ async def ask_question_stream(
                         "page_title": s.get("page_title") or s.get("title", ""),
                         "page_slug": s.get("page_slug") or s.get("id", ""),
                         "section": "",
-                        "source_name": "",
+                        "source_name": s.get("source_name") or "",
                         "source_url": "",
-                        "timestamp": "",
+                        "timestamp": s.get("published_at") or "",
                     }
                     for s in (chunk_data if isinstance(chunk_data, list) else [])
                 ]
@@ -120,3 +149,38 @@ async def ask_question_stream(
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/summarize")
+async def summarize_time_range(
+    days: int = FastQuery(default=30, ge=1, le=365, description="Number of days to look back"),
+    db: AsyncSession = Depends(get_db),
+):
+    from llm_wiki.presentation.dependencies import traced_llm
+    now = datetime.utcnow()
+    start = now - timedelta(days=days)
+    use_case = SummarizeTimeRangeUseCase(
+        session=db,
+        event_repo=PostgresEventRepository(db),
+        llm=traced_llm("summarize_time_range"),
+    )
+    result = await use_case.execute(TimeRangeSummaryInput(
+        start=start,
+        end=now,
+    ))
+    return {
+        "summary": result.summary_text,
+        "time_range": {
+            "start": str(result.time_range.start),
+            "end": str(result.time_range.end) if result.time_range.end else None,
+        },
+        "stats": {
+            "event_count": result.event_count,
+            "page_count": result.page_count,
+            "items_completed": result.items_completed,
+            "items_failed": result.items_failed,
+            "items_rate_limited": result.items_rate_limited,
+        },
+        "top_events": result.top_events,
+        "top_pages": result.top_pages,
+    }

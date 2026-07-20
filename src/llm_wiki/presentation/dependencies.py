@@ -1,16 +1,14 @@
 from dependency_injector import containers, providers
 
 from llm_wiki.config import settings
-from llm_wiki.infrastructure.persistence.postgres.database import async_session_factory
 from llm_wiki.infrastructure.persistence.postgres.repositories.source_repository import PostgresSourceRepository, PostgresSourceItemRepository
 from llm_wiki.infrastructure.persistence.postgres.repositories.page_repository import PostgresPageRepository, PostgresPageSectionRepository
 from llm_wiki.infrastructure.persistence.postgres.repositories.event_repository import PostgresEventRepository
 from llm_wiki.infrastructure.persistence.postgres.repositories.entity_repository import PostgresEntityRepository
-from llm_wiki.infrastructure.search.pgvector_adapter import PgVectorSearchAdapter
-from llm_wiki.infrastructure.search.tsvector_adapter import TsVectorSearchAdapter
 from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter
 from llm_wiki.infrastructure.embedding.ollama_adapter import OllamaEmbeddingAdapter
 from llm_wiki.infrastructure.persistence.redis.cache_adapter import RedisCacheAdapter
+from llm_wiki.infrastructure.telemetry import create_telemetry_adapter
 from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
 from llm_wiki.application.use_cases.query.ask_question import AskQuestionUseCase
 from llm_wiki.application.use_cases.query.stream_answer import StreamAnswerUseCase
@@ -19,8 +17,36 @@ from llm_wiki.application.use_cases.ingestion.process_video import ProcessVideoU
 from llm_wiki.application.use_cases.ingestion.extract_events import ExtractEventsUseCase
 
 
+def traced_llm(name: str = "llm_chat_completion"):
+    from llm_wiki.infrastructure.llm.traced_llm_wrapper import TracedLLMWrapper
+
+    return TracedLLMWrapper(
+        container.llm_client(),
+        container.telemetry(),
+        model=container.config.opencode_primary_model() or "unknown",
+    )
+
+
+def traced_embedder(name: str = "embedding"):
+    from llm_wiki.infrastructure.embedding.traced_embedding_wrapper import TracedEmbeddingWrapper
+
+    return TracedEmbeddingWrapper(
+        container.embedder(),
+        container.telemetry(),
+        model=container.config.langsmith_evaluator_model() or "unknown",
+    )
+
+
 class Container(containers.DeclarativeContainer):
     config = providers.Configuration()
+
+    telemetry = providers.Singleton(
+        create_telemetry_adapter,
+        enabled=settings.langsmith_tracing_enabled,
+        api_key=settings.langsmith_api_key,
+        api_url=settings.langsmith_endpoint,
+        project=settings.langsmith_project,
+    )
 
     embedder = providers.Singleton(OllamaEmbeddingAdapter, host=settings.ollama_host)
 
@@ -40,6 +66,7 @@ class Container(containers.DeclarativeContainer):
         keyword_search=None,
         llm=llm_client,
         cache=cache,
+        telemetry=telemetry,
     )
 
     ask_question_use_case = providers.Factory(
@@ -72,6 +99,7 @@ class Container(containers.DeclarativeContainer):
         entity_repo=None,
         llm=llm_client,
         embedder=embedder,
+        telemetry=telemetry,
     )
 
     process_video_use_case = providers.Factory(

@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 
 
 class QueryRequest(BaseModel):
@@ -7,6 +8,8 @@ class QueryRequest(BaseModel):
     source_id: Optional[str] = None
     top_k: Optional[int] = 10
     stream: bool = False
+    from_date: Optional[datetime] = None
+    to_date: Optional[datetime] = None
 
 
 class QueryResponseModel(BaseModel):

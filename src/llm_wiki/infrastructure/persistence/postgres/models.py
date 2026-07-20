@@ -99,6 +99,7 @@ class Page(Base):
 
     __table_args__ = (
         Index("ix_pages_source_id", "source_id"),
+        Index("ix_pages_published_at", "published_at"),
         Index(
             "ix_pages_summary_vector_hnsw",
             "summary_vector",

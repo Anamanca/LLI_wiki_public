@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from llm_wiki.domain.value_objects.embedding import Embedding, SearchResult
+from llm_wiki.domain.value_objects.time_range import TimeRange
 
 
 class VectorSearchPort(ABC):
@@ -10,7 +10,8 @@ class VectorSearchPort(ABC):
         self,
         embedding: Embedding,
         top_k: int = 10,
-        source_id: Optional[str] = None,
+        source_id: str | None = None,
+        time_range: TimeRange | None = None,
     ) -> list[SearchResult]: ...
 
     @abstractmethod
@@ -18,7 +19,8 @@ class VectorSearchPort(ABC):
         self,
         embedding: Embedding,
         top_k: int = 10,
-        source_id: Optional[str] = None,
+        source_id: str | None = None,
+        time_range: TimeRange | None = None,
     ) -> list[SearchResult]: ...
 
     @abstractmethod
@@ -26,6 +28,7 @@ class VectorSearchPort(ABC):
         self,
         embedding: Embedding,
         top_k: int = 10,
+        time_range: TimeRange | None = None,
     ) -> list[SearchResult]: ...
 
 
@@ -35,6 +38,7 @@ class KeywordSearchPort(ABC):
         self,
         query: str,
         top_k: int = 10,
+        time_range: TimeRange | None = None,
     ) -> list[SearchResult]: ...
 
 
@@ -55,6 +59,34 @@ class LLMClientPort(ABC):
         max_tokens: int = 4096,
     ): ...
 
+    async def chat_completion_raw(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> dict:
+        """Return the raw chat completion response dict.
+
+        Default implementation uses the string endpoint and wraps the result in
+        an OpenAI-compatible shape. Adapters that already receive a raw dict can
+        override this to avoid the round-trip.
+        """
+        content = await self.chat_completion(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                    "index": 0,
+                }
+            ],
+            "usage": getattr(self, "last_usage", None),
+        }
+
 
 class EmbeddingServicePort(ABC):
     @abstractmethod
@@ -66,7 +98,7 @@ class EmbeddingServicePort(ABC):
 
 class CacheServicePort(ABC):
     @abstractmethod
-    async def get(self, key: str) -> Optional[str]: ...
+    async def get(self, key: str) -> str | None: ...
 
     @abstractmethod
     async def set(self, key: str, value: str, ttl: int = 3600) -> None: ...
