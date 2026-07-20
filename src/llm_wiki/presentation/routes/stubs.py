@@ -1,5 +1,7 @@
 """
-Routes backed by real database queries. Replaces empty stubs with live data.
+Optional stub/read-only routes for the admin UI. Admin operational routes
+(cron, scan status, health, restarts, api-keys) are mounted unconditionally
+via src/llm_wiki/presentation/routes/admin.py.
 """
 import os
 from datetime import datetime, timezone
@@ -7,6 +9,8 @@ from uuid import UUID
 
 import psutil
 from fastapi import APIRouter, Depends, HTTPException, Query
+from collections import defaultdict
+
 from sqlalchemy import select, func, case, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +20,16 @@ from llm_wiki.presentation.dependencies import get_db
 router = APIRouter()
 
 MASK = "***"
+
+
+async def _count_done_today(db: AsyncSession) -> int:
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    q = select(func.count(orm.SourceItem.id)).where(
+        orm.SourceItem.status.in_(["completed", "published"]),
+        orm.SourceItem.started_at >= today_start,
+    )
+    return (await db.execute(q)).scalar() or 0
+
 
 # ──────────────────────────────────────────
 # Progress
@@ -36,7 +50,7 @@ async def progress(db: AsyncSession = Depends(get_db)):
         "pending_transcribe": status_counts.get("pending_transcribe", 0),
         "waiting_for_wiki": status_counts.get("waiting_for_wiki", 0),
         "processing": status_counts.get("processing", 0),
-        "done_today": 0,
+        "done_today": await _count_done_today(db),
         "failed": status_counts.get("failed", 0),
         "rate_limited": status_counts.get("rate_limited", 0),
         "requires_membership": status_counts.get("requires_membership", 0),
@@ -428,66 +442,161 @@ async def page_graph(
 # Entity Graph
 # ──────────────────────────────────────────
 
+async def _entity_event_counts(db: AsyncSession, entity_ids: list[UUID]) -> dict[UUID, int]:
+    """Return a mapping of entity_id -> number of linked events."""
+    if not entity_ids:
+        return {}
+    result = await db.execute(
+        select(
+            orm.EventEntityLink.entity_id,
+            func.count(orm.EventEntityLink.event_id).label("cnt"),
+        )
+        .where(orm.EventEntityLink.entity_id.in_(entity_ids))
+        .group_by(orm.EventEntityLink.entity_id)
+    )
+    return {row[0]: row[1] for row in result.all()}
+
+
+def _entity_node_dict(e: orm.Entity, event_count: int = 0) -> dict:
+    return {
+        "id": str(e.id),
+        "label": e.name,
+        "type": e.type,
+        "ticker": e.ticker,
+        "event_count": event_count,
+    }
+
+
+def _entity_relation_dict(r: orm.EntityRelation) -> dict:
+    return {
+        "source": str(r.from_entity_id),
+        "target": str(r.to_entity_id),
+        "edge_type": "entity_relation",
+        "predicate": r.predicate,
+        "confidence": r.confidence,
+    }
+
+
 @router.get("/entity-graph")
 async def entity_graph(
-    entity_type: str = None,
-    predicate: str = None,
-    depth: int = None,
-    limit: int = None,
-    entity_id: str = None,
-    full_graph: str = None,
+    entity_type: str | None = None,
+    predicate: str | None = None,
+    depth: int = 1,
+    limit: int = 200,
+    entity_id: str | None = None,
+    full_graph: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    limit = limit or (10000 if full_graph == "true" else 200)
-    entities_q = select(orm.Entity)
-    if entity_type:
-        entities_q = entities_q.where(orm.Entity.type == entity_type)
+    """Return a subgraph of entities and their relations.
+
+    - ``entity_id``: start from a specific entity and expand by ``depth``.
+    - ``entity_type``: filter the result set by entity type.
+    - ``full_graph=true``: return all entities up to ``limit`` (use sparingly).
+    - ``predicate``: filter relations by predicate.
+    """
+    if full_graph == "true":
+        limit = limit or 2000
+        entities_q = select(orm.Entity).limit(limit)
+        if entity_type:
+            entities_q = entities_q.where(orm.Entity.type == entity_type)
+        ent_result = await db.execute(entities_q)
+        entities = ent_result.scalars().all()
+        entity_ids = [e.id for e in entities]
+
+        relations_q = select(orm.EntityRelation).where(
+            orm.EntityRelation.from_entity_id.in_(entity_ids),
+            orm.EntityRelation.to_entity_id.in_(entity_ids),
+        )
+        if predicate:
+            relations_q = relations_q.where(orm.EntityRelation.predicate == predicate)
+        relations_q = relations_q.limit(limit * 2)
+        rel_result = await db.execute(relations_q)
+        relations = rel_result.scalars().all()
+
+        event_counts = await _entity_event_counts(db, entity_ids)
+        nodes = [_entity_node_dict(e, event_counts.get(e.id, 0)) for e in entities]
+        edges = [_entity_relation_dict(r) for r in relations]
+        return {"nodes": nodes, "edges": edges}
+
+    # Depth-based expansion around one or more seed entities.
+    seed_ids: set[UUID] = set()
     if entity_id:
         try:
-            entities_q = entities_q.where(orm.Entity.id == UUID(entity_id))
+            seed_ids.add(UUID(entity_id))
         except ValueError:
-            pass
-    entities_q = entities_q.limit(limit)
+            raise HTTPException(status_code=400, detail="Invalid entity_id")
+
+    if entity_type and not seed_ids:
+        # No seed: pick the most connected entities of the requested type.
+        type_entities_q = (
+            select(orm.Entity.id)
+            .where(orm.Entity.type == entity_type)
+            .limit(min(limit, 50))
+        )
+        type_result = await db.execute(type_entities_q)
+        seed_ids.update(row[0] for row in type_result.all())
+
+    if not seed_ids:
+        # Fallback: most connected entities overall.
+        popular_q = (
+            select(orm.EntityRelation.from_entity_id)
+            .group_by(orm.EntityRelation.from_entity_id)
+            .order_by(func.count(orm.EntityRelation.from_entity_id).desc())
+            .limit(min(limit, 50))
+        )
+        pop_result = await db.execute(popular_q)
+        seed_ids.update(row[0] for row in pop_result.all())
+
+    current_ids = seed_ids.copy()
+    collected_ids = seed_ids.copy()
+    current_depth = 0
+
+    while current_ids and current_depth < max(1, depth):
+        relations_q = select(orm.EntityRelation).where(
+            orm.EntityRelation.from_entity_id.in_(current_ids)
+            | orm.EntityRelation.to_entity_id.in_(current_ids)
+        )
+        if predicate:
+            relations_q = relations_q.where(orm.EntityRelation.predicate == predicate)
+        rel_result = await db.execute(relations_q)
+        relations = rel_result.scalars().all()
+
+        next_ids: set[UUID] = set()
+        for r in relations:
+            next_ids.add(r.from_entity_id)
+            next_ids.add(r.to_entity_id)
+
+        current_ids = next_ids - collected_ids
+        collected_ids |= next_ids
+        current_depth += 1
+
+        if len(collected_ids) > limit:
+            break
+
+    # Fetch full entity rows and relations among the collected set.
+    collected_list = list(collected_ids)[:limit]
+    if not collected_list:
+        return {"nodes": [], "edges": []}
+
+    entities_q = select(orm.Entity).where(orm.Entity.id.in_(collected_list))
+    if entity_type:
+        entities_q = entities_q.where(orm.Entity.type == entity_type)
     ent_result = await db.execute(entities_q)
     entities = ent_result.scalars().all()
 
-    nodes = [
-        {
-            "id": str(e.id),
-            "label": e.name,
-            "type": e.type,
-            "ticker": e.ticker,
-            "event_count": 0,
-        }
-        for e in entities
-    ]
-
-    relations_q = select(orm.EntityRelation)
+    entity_id_set = {e.id for e in entities}
+    relations_q = select(orm.EntityRelation).where(
+        orm.EntityRelation.from_entity_id.in_(entity_id_set),
+        orm.EntityRelation.to_entity_id.in_(entity_id_set),
+    )
     if predicate:
         relations_q = relations_q.where(orm.EntityRelation.predicate == predicate)
-    if entity_id:
-        try:
-            eid = UUID(entity_id)
-            from sqlalchemy import or_
-            relations_q = relations_q.where(
-                or_(orm.EntityRelation.from_entity_id == eid, orm.EntityRelation.to_entity_id == eid)
-            )
-        except ValueError:
-            pass
-    relations_q = relations_q.limit(limit)
     rel_result = await db.execute(relations_q)
     relations = rel_result.scalars().all()
-    edges = [
-        {
-            "source": str(r.from_entity_id),
-            "target": str(r.to_entity_id),
-            "edge_type": "entity_relation",
-            "predicate": r.predicate,
-            "confidence": r.confidence,
-        }
-        for r in relations
-    ]
 
+    event_counts = await _entity_event_counts(db, entity_id_set)
+    nodes = [_entity_node_dict(e, event_counts.get(e.id, 0)) for e in entities]
+    edges = [_entity_relation_dict(r) for r in relations]
     return {"nodes": nodes, "edges": edges}
 
 
@@ -495,42 +604,121 @@ async def entity_graph(
 # Cluster Graph
 # ──────────────────────────────────────────
 
+# ──────────────────────────────────────────
+# Cluster Graph (entity-type hierarchy)
+# ──────────────────────────────────────────
+
+TYPE_COLORS: dict[str, str] = {
+    "stock_ticker": "#3b82f6", "company": "#eab308", "sector": "#22c55e",
+    "person": "#f97316", "bank": "#ef4444", "market_index": "#8b5cf6",
+    "commodity": "#ec4899", "bond": "#14b8a6", "policy": "#64748b",
+    "macro_indicator": "#06b6d4", "financial_metric": "#84cc16",
+    "country": "#f43f5e", "city": "#0ea5e9", "organization": "#a855f7",
+    "executive": "#d946ef", "fund": "#6366f1", "interest_rate": "#10b981",
+    "monetary_policy": "#78716c", "trade_policy": "#fbbf24",
+    "securities_firm": "#0891b2", "real_estate_project": "#f59e0b",
+    "cryptocurrency": "#f97316", "precious_metal": "#d4a574",
+    "energy": "#e11d48", "other": "#9ca3af",
+}
+
+_FALLBACK_COLORS = ["#64748b", "#94a3b8", "#a1a1aa", "#71717a", "#6b7280",
+                    "#78716c", "#a8a29e", "#78716c", "#9ca3af", "#b0b0b0"]
+
+
 @router.get("/cluster-graph")
 async def cluster_graph(db: AsyncSession = Depends(get_db)):
-    q = select(orm.Entity.type, func.count(orm.Entity.id)).group_by(orm.Entity.type)
-    result = await db.execute(q)
-    entity_types = result.all()
-    nodes = []
-    for et, cnt in entity_types:
-        nodes.append({
-            "id": et,
-            "label": et,
-            "type": "cluster",
-            "ticker": None,
-            "event_count": cnt,
+    """Return entity-type clusters with aggregated inter-cluster relations.
+
+    Mirrors the legacy 29_LLM_wiki graph API so the 3D cluster view renders
+    colors, sizes, and edges consistently.
+    """
+    entity_rows = (await db.execute(text("""
+        SELECT DISTINCT e.id, e.type
+        FROM entities e
+        WHERE EXISTS (
+            SELECT 1 FROM entity_relations er
+            WHERE er.from_entity_id = e.id OR er.to_entity_id = e.id
+        )
+    """))).all()
+
+    entity_type_map: dict[str, str] = {str(row.id): row.type for row in entity_rows}
+
+    type_counts: dict[str, int] = defaultdict(int)
+    for etype in entity_type_map.values():
+        type_counts[etype] += 1
+
+    rel_rows = (await db.execute(text("""
+        SELECT from_entity_id, to_entity_id, predicate
+        FROM entity_relations
+    """))).all()
+
+    cluster_edges: dict[tuple[str, str, str], int] = defaultdict(int)
+    for row in rel_rows:
+        from_type = entity_type_map.get(str(row.from_entity_id))
+        to_type = entity_type_map.get(str(row.to_entity_id))
+        if from_type and to_type and from_type != to_type:
+            key = (from_type, to_type, row.predicate)
+            cluster_edges[key] += 1
+
+    edge_counts: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
+    for (from_t, to_t, pred), cnt in cluster_edges.items():
+        edge_counts[(from_t, to_t)].append((pred, cnt))
+
+    edges = []
+    color_idx = 0
+    for (from_t, to_t), pred_list in edge_counts.items():
+        pred_list.sort(key=lambda x: -x[1])
+        total = sum(c for _, c in pred_list)
+        if total < 2:
+            continue
+        top_pred, top_cnt = pred_list[0]
+        edges.append({
+            "source": from_t,
+            "target": to_t,
+            "predicate": f"{top_pred} ({top_cnt}/{total})",
+            "relation_count": total,
         })
-    return {"nodes": nodes, "edges": []}
+
+    clusters = []
+    for etype, cnt in sorted(type_counts.items(), key=lambda x: -x[1]):
+        color = TYPE_COLORS.get(etype)
+        if not color:
+            color = _FALLBACK_COLORS[color_idx % len(_FALLBACK_COLORS)]
+            color_idx += 1
+        clusters.append({
+            "id": etype,
+            "label": etype.replace("_", " ").title(),
+            "entity_count": cnt,
+            "color": color,
+        })
+
+    return {"clusters": clusters, "edges": edges}
 
 
 @router.get("/cluster-expand")
-async def cluster_expand(entity_type: str = None, limit: int = 1000, db: AsyncSession = Depends(get_db)):
+async def cluster_expand(entity_type: str | None = None, limit: int = 500, db: AsyncSession = Depends(get_db)):
+    """Expand an entity-type cluster into its member entities and intra-cluster relations."""
     q = select(orm.Entity)
     if entity_type:
         q = q.where(orm.Entity.type == entity_type)
     q = q.limit(limit)
     result = await db.execute(q)
     entities = result.scalars().all()
-    nodes = [
-        {
-            "id": str(e.id),
-            "label": e.name,
-            "type": e.type,
-            "ticker": e.ticker,
-            "event_count": 0,
-        }
-        for e in entities
-    ]
-    return {"nodes": nodes, "edges": []}
+    entity_ids = [e.id for e in entities]
+    entity_id_set = set(entity_ids)
+
+    # Relations where both endpoints are within the returned entity set.
+    relations_q = select(orm.EntityRelation).where(
+        orm.EntityRelation.from_entity_id.in_(entity_id_set),
+        orm.EntityRelation.to_entity_id.in_(entity_id_set),
+    ).limit(limit * 2)
+    rel_result = await db.execute(relations_q)
+    relations = rel_result.scalars().all()
+
+    event_counts = await _entity_event_counts(db, entity_id_set)
+    nodes = [_entity_node_dict(e, event_counts.get(e.id, 0)) for e in entities]
+    edges = [_entity_relation_dict(r) for r in relations]
+    return {"nodes": nodes, "edges": edges}
 
 
 # ──────────────────────────────────────────
@@ -592,190 +780,9 @@ async def list_workers(db: AsyncSession = Depends(get_db)):
 
 
 # ──────────────────────────────────────────
-# Restart
-# ──────────────────────────────────────────
-
-@router.post("/restart/{item_id}")
-async def restart_item(item_id: str, db: AsyncSession = Depends(get_db)):
-    try:
-        iid = UUID(item_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid item ID")
-    result = await db.execute(select(orm.SourceItem).where(orm.SourceItem.id == iid))
-    item = result.scalar_one_or_none()
-    if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
-    item.status = "pending"
-    item.error_message = None
-    item.retry_after = None
-    await db.commit()
-    return {"status": "ok", "item_id": item_id, "restarted": 1}
-
-
-@router.post("/restart/source/{source_id}")
-async def restart_source(source_id: str, db: AsyncSession = Depends(get_db)):
-    try:
-        sid = UUID(source_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid source ID")
-    error_statuses = ["failed", "no_captions", "rate_limited", "skipped"]
-    result = await db.execute(
-        select(orm.SourceItem).where(
-            orm.SourceItem.source_id == sid,
-            orm.SourceItem.status.in_(error_statuses),
-        )
-    )
-    items = result.scalars().all()
-    count = 0
-    for item in items:
-        item.status = "pending"
-        item.error_message = None
-        item.retry_after = None
-        count += 1
-    await db.commit()
-    return {"status": "ok", "restarted": count}
-
-
-# ──────────────────────────────────────────
-# Admin API Keys
-# ──────────────────────────────────────────
-
-@router.get("/admin/api-keys")
-async def list_api_keys(db: AsyncSession = Depends(get_db)):
-    q = select(orm.ApiKey).order_by(orm.ApiKey.priority.desc())
-    result = await db.execute(q)
-    keys = []
-    for k in result.scalars():
-        keys.append({
-            "id": str(k.id),
-            "provider": k.provider,
-            "api_key_masked": k.api_key[:7] + MASK if k.api_key and len(k.api_key) > 7 else MASK,
-            "model_name": k.model_name,
-            "status": k.status,
-            "priority": k.priority or 0,
-            "rate_limited_until": str(k.rate_limited_until) if k.rate_limited_until else None,
-            "usage_count": k.usage_count or 0,
-            "last_used_at": str(k.last_used_at) if k.last_used_at else None,
-            "created_at": str(k.created_at) if k.created_at else None,
-            "updated_at": str(k.updated_at) if k.updated_at else None,
-        })
-    return keys
-
-
-@router.post("/admin/api-keys")
-async def create_api_key(db: AsyncSession = Depends(get_db)):
-    return await _no_mutation_stub()
-
-
-@router.put("/admin/api-keys/{key_id}")
-async def update_api_key(key_id: str, db: AsyncSession = Depends(get_db)):
-    return await _no_mutation_stub()
-
-
-@router.delete("/admin/api-keys/{key_id}")
-async def delete_api_key(key_id: str, db: AsyncSession = Depends(get_db)):
-    try:
-        kid = UUID(key_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid key ID")
-    result = await db.execute(select(orm.ApiKey).where(orm.ApiKey.id == kid))
-    key = result.scalar_one_or_none()
-    if not key:
-        raise HTTPException(status_code=404, detail="API key not found")
-    await db.delete(key)
-    await db.commit()
-    return {"status": "deleted", "deleted": key_id}
-
-
-@router.post("/admin/api-keys/{key_id}/activate")
-async def activate_api_key(key_id: str, db: AsyncSession = Depends(get_db)):
-    try:
-        kid = UUID(key_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid key ID")
-    result = await db.execute(select(orm.ApiKey).where(orm.ApiKey.id == kid))
-    key = result.scalar_one_or_none()
-    if not key:
-        raise HTTPException(status_code=404, detail="API key not found")
-    key.status = "active"
-    key.rate_limited_until = None
-    await db.commit()
-    return {
-        "id": str(key.id),
-        "provider": key.provider,
-        "api_key_masked": key.api_key[:7] + MASK if key.api_key and len(key.api_key) > 7 else MASK,
-        "model_name": key.model_name,
-        "status": key.status,
-        "priority": key.priority or 0,
-        "rate_limited_until": None,
-        "usage_count": key.usage_count or 0,
-        "last_used_at": str(key.last_used_at) if key.last_used_at else None,
-        "created_at": str(key.created_at) if key.created_at else None,
-        "updated_at": str(key.updated_at) if key.updated_at else None,
-    }
-
-
-# ──────────────────────────────────────────
-# Admin Cron Jobs
-# ──────────────────────────────────────────
-
-@router.get("/admin/cron-jobs")
-async def list_cron_jobs(db: AsyncSession = Depends(get_db)):
-    q = select(orm.CronJob).order_by(orm.CronJob.job_id)
-    result = await db.execute(q)
-    jobs = []
-    for j in result.scalars():
-        jobs.append({
-            "job_id": j.job_id,
-            "name": j.name,
-            "description": j.description,
-            "schedule": j.schedule,
-            "job_type": j.job_type,
-            "managed": j.managed,
-            "status": "active" if j.enabled else "inactive",
-            "last_run": None,
-        })
-    return jobs
-
-
-@router.post("/admin/cron-jobs/{job_id}/start")
-async def start_cron_job(job_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(orm.CronJob).where(orm.CronJob.job_id == job_id))
-    job = result.scalar_one_or_none()
-    if job:
-        job.enabled = True
-        await db.commit()
-    return {"success": True, "message": f"Cron job {job_id} started"}
-
-
-@router.post("/admin/cron-jobs/{job_id}/stop")
-async def stop_cron_job(job_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(orm.CronJob).where(orm.CronJob.job_id == job_id))
-    job = result.scalar_one_or_none()
-    if job:
-        job.enabled = False
-        await db.commit()
-    return {"success": True, "message": f"Cron job {job_id} stopped"}
-
-
-# ──────────────────────────────────────────
-# Admin Clear Alerts
-# ──────────────────────────────────────────
-
-@router.delete("/admin/clear-alerts")
-async def clear_alerts(all: str = None, db: AsyncSession = Depends(get_db)):
-    alert_types = ["error", "rate_limit", "retry", "api_limit"]
-    q = orm.IngestionLog.__table__.delete().where(
-        orm.IngestionLog.event_type.in_(alert_types)
-    )
-    result = await db.execute(q)
-    await db.commit()
-    return {"status": "ok", "deleted": result.rowcount or 0}
-
-
-# ──────────────────────────────────────────
 # Chat Sessions (still stubs — requires file-based storage)
 # ──────────────────────────────────────────
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
