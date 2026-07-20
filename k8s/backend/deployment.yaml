@@ -15,6 +15,7 @@ spec:
       labels:
         app: backend-v2
     spec:
+      serviceAccountName: backend-v2
       initContainers:
       - name: wait-for-postgres
         image: busybox:1.36
@@ -142,6 +143,31 @@ spec:
             secretKeyRef:
               name: llm-wiki-secrets
               key: RAPIDAPI_KEY
+        - name: LANGSMITH_TRACING
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LANGSMITH_TRACING
+        - name: LANGSMITH_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LANGSMITH_ENDPOINT
+        - name: LANGSMITH_PROJECT
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LANGSMITH_PROJECT
+        - name: LANGSMITH_EVALUATOR_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LANGSMITH_EVALUATOR_MODEL
+        - name: LANGSMITH_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: LANGSMITH_API_KEY
         - name: ENABLE_STUB_ROUTES
           value: "true"
         ports:

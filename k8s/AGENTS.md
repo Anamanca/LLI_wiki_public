@@ -1,118 +1,84 @@
-# Agent Guidelines — K8s Deployment
+# Agent Notes — Kubernetes
 
-## Target
-- Local/dev: `kind` cluster named `llm-wiki`.
-- Remote: K3s cluster.
-- Namespace: `llm-wiki`.
+## Cluster Context
 
-## Services
-| Service | Role | Data path / image source |
-|---------|------|--------------------------|
-| `postgres` | PostgreSQL + pgvector | `/data/postgres` |
-| `redis` | Valkey 8 cache | `/data/redis` |
-| `minio` | S3-compatible object storage | `/data/minio` |
-| `ollama` | Embedding / LLM inference | `/data/ollama` |
-| `backend-v2` | FastAPI backend | Docker image `32_llm_wiki_clean_arch-backend:latest` (no hostPath mount) |
-| `frontend` | Next.js dev server | hostPath `/code/frontend` + image `32_llm_wiki_clean_arch-frontend:latest` for `node_modules` |
-| `cpu-worker` | CPU-bound worker | hostPath `/code/backend` (legacy project path) |
-| `wiki-consumer` | Wiki ingestion consumer | hostPath `/code/backend` (legacy project path) |
-| `telegram-bot` | Telegram bot | hostPath `/code/telegram-bot` |
-
-> **Note:** `backend-v2` runs entirely from its Docker image. Editing source code on the host does **not** affect it unless a new image is built and loaded. Only `cpu-worker` and `wiki-consumer` pick up live host-source changes via `uvicorn --reload` / hostPath.
->
-> **Secrets:** `k8s/secret.yaml` is gitignored. Use `k8s/secret.example.yaml` as a template, fill in real values, and apply it locally or via your secret management pipeline. Never commit real secrets.
-
-## Ingress
-- Host: `llm-wiki.local` (add `127.0.0.1 llm-wiki.local` to `/etc/hosts`).
-- `/api/*` → `backend-v2:8000`
-- `/` → `frontend:3000`
-- NodePort: `30080` also exposed.
-
-## Dev Mode (no rebuild)
-- `kind-config.yaml` mounts host dirs into kind node via `extraMounts`.
-- `frontend` uses `initContainer` copying `node_modules` from image into `emptyDir`, then mounts host source + emptyDir over `/app/node_modules` for HMR.
-- `cpu-worker` and `wiki-consumer` mount `hostPath` `/code/backend` and run code from there (legacy project path).
-- `backend-v2` runs from its image with `uvicorn --reload`; live source edits require either `kubectl cp` into the pod (lost on restart) or rebuilding the image.
-- **Important:** `extraMounts` only apply when creating cluster. Adding new mounts requires `kind delete cluster` and recreate.
-
-## Common Commands
 ```bash
-# Create kind cluster
-kind create cluster --config k8s/kind-config.yaml
+kubectl config use-context kind-llm-wiki
+kubectl -n llm-wiki get all
+```
 
-# Install nginx ingress
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+## Deployment Order
 
-# Deploy full stack
+```bash
+# 1. Global resources
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/configmap.yaml
-# Copy k8s/secret.example.yaml to k8s/secret.yaml, fill in real values, then apply:
 kubectl apply -f k8s/secret.yaml
-kubectl apply -f k8s/
 
-# Check pods
-kubectl get pods -n llm-wiki
+# 2. Storage / dependencies
+kubectl apply -f k8s/postgres/
+kubectl apply -f k8s/redis/
+kubectl apply -f k8s/minio/
 
-# Port-forward for local dev
-kubectl port-forward -n llm-wiki svc/postgres 5432:5432
-kubectl port-forward -n llm-wiki svc/redis   6379:6379
-kubectl port-forward -n llm-wiki svc/ollama  11434:11434
-kubectl port-forward -n llm-wiki svc/minio   9000:9000
+# 3. RBAC (must be applied before backend pods start)
+kubectl apply -f k8s/backend/rbac.yaml
 
-# Deploy helpers
-./scripts/deploy-k8s.sh      # K3s build & deploy (uses k3s ctr; not for kind)
-./scripts/sync-and-test.sh   # sync changed files + run tests (also sets up port-forward)
-./scripts/test-apis.sh       # run contract tests (requires backend reachable)
+# 4. Application workloads
+kubectl apply -f k8s/backend/
+kubectl apply -f k8s/cpu-worker/
+kubectl apply -f k8s/wiki-consumer/
+kubectl apply -f k8s/frontend/
+kubectl apply -f k8s/ollama/
+kubectl apply -f k8s/telegram-bot/
 
-# For kind, use the manual Build/Load/Restart flow above instead of deploy-k8s.sh.
+# 5. Ingress
+kubectl apply -f k8s/ingress.yaml
 ```
 
-## Build Images
-```bash
-# Backend
-docker build -t 32_llm_wiki_clean_arch-backend:latest .
+## Loading Images into kind
 
-# Frontend
-docker build -t 32_llm_wiki_clean_arch-frontend:latest ./frontend
-```
-
-### DNS issue during `apt-get update` in Docker build
-If the build hangs at `apt-get update` with lines like `Ign:1 http://deb.debian.org/debian trixie InRelease`, Docker's default DNS cannot resolve Debian mirrors. Fix by building with the host network:
-
-```bash
-docker build --network host -t 32_llm_wiki_clean_arch-backend:latest .
-docker build --network host -t 32_llm_wiki_clean_arch-frontend:latest ./frontend
-```
-
-## Load Images into kind
+Images must be loaded into the kind node before the cluster can use `IfNotPresent`:
 ```bash
 kind load docker-image 32_llm_wiki_clean_arch-backend:latest --name llm-wiki
 kind load docker-image 32_llm_wiki_clean_arch-frontend:latest --name llm-wiki
 ```
 
-## Redeploy on kind
-```bash
-# Restart deployments so pods pick up the new image
-kubectl rollout restart deployment/backend-v2 -n llm-wiki
-kubectl rollout restart deployment/frontend -n llm-wiki
+## Backend RBAC is Required
 
-# Wait for rollout
-kubectl rollout status deployment/backend-v2 -n llm-wiki --timeout=120s
-kubectl rollout status deployment/frontend -n llm-wiki --timeout=120s
-```
+`k8s/backend/rbac.yaml` grants the backend ServiceAccount permission to read `cronjobs` and `jobs`. The `/api/admin/cron-jobs` endpoint uses this to report real status. Without it, the endpoint silently degrades to DB-only status.
 
-## Troubleshooting
-- `ImagePullBackOff` → image not loaded into kind node; run `kind load docker-image`.
-- `ErrImageNeverPull` / `InvalidImageName` → check the image tag and `imagePullPolicy`.
-- Backend returns old API shapes (e.g. missing `db`, `citations`, `sources` wrapper) → `backend-v2` is running an old image. Rebuild + `kind load` + `kubectl rollout restart deployment/backend-v2`.
-- Frontend crash `exec ./node_modules/.bin/next: no such file` → rebuild + load frontend image, or initContainer failed.
-- No HMR → check `docker exec llm-wiki-control-plane ls /code/frontend`.
-- Port 30080 busy → `sudo lsof -i :30080` and kill, or change `extraPortMappings`.
-- Docker build hangs at `apt-get update` → use `--network host` (see Build Images).
+## Cron Job Status API
 
-## Adding a New Service
-1. Create manifest dir under `k8s/<service>/`.
-2. Add `Deployment` + `Service`.
-3. If needs host source: add `extraMounts` in `kind-config.yaml` **before** cluster create.
-4. Add env vars to `k8s/configmap.yaml` or `k8s/secret.yaml`.
-5. Update this file and root `AGENTS.md`.
+Endpoint: `GET /api/admin/cron-jobs`
+
+Returned statuses by job type:
+
+| job_type | status | meaning |
+|----------|--------|---------|
+| `kubernetes_cronjob` | `scheduled` | CronJob exists and is not suspended |
+| `kubernetes_cronjob` | `running` | A child Job is currently active |
+| `kubernetes_cronjob` | `error` | Most recent child Job failed |
+| `kubernetes_cronjob` | `stopped` | CronJob exists but `spec.suspend: true` |
+| `kubernetes_cronjob` | `not_found` | No matching CronJob in namespace |
+| `background_task` | `running` | At least one worker heartbeat within 60s |
+| `background_task` | `no_workers` | No recent worker heartbeats |
+| all | `stopped` | `cron_jobs.enabled == false` |
+
+The frontend maps these strings to badges in `frontend/components/admin/cron-jobs-panel.tsx`.
+
+## Common Gotchas
+
+- Backend deployment sets `serviceAccountName: backend-v2`. Do not remove it.
+- `imagePullPolicy: IfNotPresent` is used everywhere. Load images into kind after each rebuild.
+- The `youtube-daily-scan` CronJob triggers the backend via `wget` POST to `/api/admin/cron-jobs/youtube-daily-scan/start`.
+
+## Entity Graph API Notes
+
+`GET /api/entity-graph` and `GET /api/cluster-expand` now return real data from the database:
+
+- Entity nodes include `event_count` derived from `event_entity_links`.
+- Edges are real `entity_relations` rows with `edge_type: "entity_relation"`.
+- `/api/cluster-graph` only counts entities that have at least one relation (isolated entities are hidden from the cluster view).
+- `/api/cluster-expand` limits the number of entities per request to keep the 3D graph responsive.
+
+Frontend renders expanded cluster edges automatically because `toEntityGraph()` in `frontend/components/kg/kg-cluster-graph.tsx` already filters and displays `entity_relation` edges.
