@@ -48,3 +48,4 @@ Thumbs.db
 
 # Data dirs (mounted in kind)
 data/
+frontend/tsconfig.tsbuildinfo
