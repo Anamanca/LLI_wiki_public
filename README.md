@@ -62,7 +62,7 @@ This README is written for **AI agents and future developers**. It explains the 
 | **Clean Architecture** | Business logic (`domain` + `application`) is isolated from frameworks (FastAPI, SQLAlchemy, Redis, Ollama). You can swap databases or LLM providers without touching use cases. |
 | **Async-first** | FastAPI + SQLAlchemy async (`asyncpg`) + `httpx` for all external calls. |
 | **Hybrid search** | Vector search alone is brittle; combining `pgvector` cosine similarity with `tsvector` keyword search via Reciprocal Rank Fusion (RRF) improves recall. |
-| **Redis answer cache** | Expensive LLM calls are cached by SHA256 of the question + current date (TTL 3600 s). Cache failures are swallowed (degraded performance, not failure). |
+| **Redis answer cache** | Three-tier caching: (1) exact-match via SHA256 of normalized question, (2) semantic cache via embedding cosine similarity (≥0.80), (3) variable TTL: 1h for time-sensitive questions, 24h for factual. Both `/api/query` and `/api/query/stream` (GUI chat) benefit. Cache failures are swallowed (degraded performance, not failure). |
 | **Temporal filtering** | Questions like "trong tháng vừa qua" or "past 2 weeks" are parsed into a `TimeRange` and applied to both vector and keyword search; recency decay boosts newer pages. |
 | **Telemetry** | Optional LangSmith tracing spans every pipeline step (embedding, search, synthesis, cache). Disabled by default via `LANGSMITH_TRACING=false`. |
 | **Ports as abstract classes** | Every external service is hidden behind a port in `application/ports/`. Infrastructure provides concrete adapters. |
@@ -292,46 +292,50 @@ def get_query_pipeline(db: AsyncSession = Depends(get_db)):
 User Question
     │
     ▼
-[1. Time Range Extraction] ──▶ regex patterns (Vietnamese/English) + optional LLM fallback
+[1. Question Normalization] ──▶ lowercase, strip punctuation, collapse whitespace
     │
     ▼
-[2. Cache Check] ──hit──▶ return cached answer
+[2. Exact Cache Check] ──hit──▶ return cached answer (0 LLM cost)
     │ miss
     ▼
 [3. Embed Question] ──▶ Ollama bge-m3  ──▶ Embedding(1024)
     │
     ▼
-[4. Vector Search] ──▶ pgvector HNSW cosine on page_sections.section_vector + time filter + recency
-    │
-[5. Keyword Search] ──▶ PostgreSQL tsvector on page_sections.fts_vector + time filter + recency
-    │
-    ▼
-[6. Reciprocal Rank Fusion] ──▶ merge + re-rank (k=60)
-    │
-    ▼
-[7. Build Context] ──▶ top 20 sections, truncated to 800 chars, cited [1]..[N]
-    │
-    ▼
-[8. LLM Synthesis] ──▶ OpenAI-compatible /chat/completions, temp=0.3, max_tokens=4096
-    │
-    ▼
-[9. Telemetry Span] ──▶ LangSmith (if enabled) with latency, tokens, sources
-    │
-    ▼
-[10. Cache Save] ──▶ Redis TTL 3600
-    │
-    ▼
-Response: {answer, sources, pipeline_steps, cache_hit, tokens_used}
+[4. Semantic Cache Check] ──▶ cosine similarity ≥ 0.80 against stored embeddings
+    │ hit                              │ miss
+    ▼                                  ▼
+[return cached answer]       [5. Time Range Extraction]
+    (embed cost only)              │
+                                   ▼
+                        [6. Vector Search] ──▶ pgvector HNSW cosine + time filter + recency
+                                   │
+                        [7. Keyword Search] ──▶ PostgreSQL tsvector + time filter + recency
+                                   │
+                                   ▼
+                        [8. Reciprocal Rank Fusion] ──▶ merge + re-rank (k=60)
+                                   │
+                                   ▼
+                        [9. Build Context] ──▶ top 20 sections, truncated to 2000 chars, cited [1]..[N]
+                                   │
+                                   ▼
+                        [10. LLM Synthesis] ──▶ OpenAI-compatible, temp=0.3, max_tokens=16384
+                                   │
+                                   ▼
+                        [11. Cache Save] ──▶ exact (TTL 1h/24h) + semantic (embedding)
+                                   │
+                                   ▼
+                        [12. Telemetry Span] ──▶ LangSmith with full input/output
+                                   │
+                                   ▼
+Response: {answer, sources, tokens_used, cache_hit, pipeline_steps}
 ```
 
-Streaming version (`/api/query/stream`) does the same retrieval but yields SSE events:
+Streaming version (`/api/query/stream`) follows the same flow: exact cache → embed → semantic cache → retrieval → LLM synthesis → cache save. Cache hits return immediately as a `type: "complete"` SSE event.
 
-- `metadata` → pipeline timings + optional `trace_id`
-- `chunk` / `token` → answer tokens
-- `sources` / `complete` → citations
-- `done`
-
-**Note:** The backend pipeline emits `type: "chunk"`, `type: "sources"`, `type: "done"`. The route handler in `query.py` **translates** these to frontend-compatible `type: "token"` and `type: "complete"` before writing SSE lines.
+SSE events emitted:
+- `status: processing` → `retrieving` → `thinking` → `summarizing`
+- `chunk` / `token` → answer tokens (non-streaming LLM currently returns full answer at once)
+- `complete` → {answer, citations, sources_used, tokens_used}
 
 **Time range support:** Both `POST /api/query` and `POST /api/query/stream` accept `from_date`/`to_date`. The frontend types expose these as ISO strings (`frontend/types/index.ts` and `frontend/hooks/use-query-stream.ts`).
 
@@ -614,7 +618,7 @@ API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
 
 1. **Route shadowing:** `GET /api/pages/{slug}` is served by `pages.py`, not the richer version in `stubs.py`. If you need the enriched shape, either merge the implementations or change registration order.
 2. **DI container passes `None` for session-bound deps:** `query_pipeline`, `integrate_wiki_use_case`, etc. are declared with `None` for repository/search args because they need a per-request `AsyncSession`. The real objects are built in route handlers or dependencies.
-3. **Chat sessions are stubs:** persistence is not implemented; they return hardcoded responses.
+3. **Chat sessions use file-backed storage:** persisted to `CHAT_HISTORY_DIR` (default `/data/chat-history`). In K8s this is a `hostPath` volume. Sessions auto-title from the first user message.
 4. **API key create/update endpoints return 501:** only list, delete, and activate are implemented.
 5. **Frontend streaming proxy:** `frontend/app/api/query/stream/route.ts` proxies the SSE stream from the backend to the browser. In K8s it uses the internal service DNS; for local dev, set `NEXT_PUBLIC_API_URL`.
 6. **Cache failures are silent:** if Redis is down, the system still works but answers are not cached.
@@ -641,4 +645,4 @@ API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
 
 ---
 
-*Last updated for backend v2.0.0 / frontend v3.0.0 — includes telemetry, temporal search, real graph/cron status, and unified K8s image.*
+*Last updated for backend v2.1.0 / frontend v3.0.0 — includes three-tier cache (exact + semantic + variable TTL), stream endpoint caching, single-source dependency Dockerfile, and LangSmith full output tracing.*

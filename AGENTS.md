@@ -14,7 +14,27 @@ This project is a FastAPI backend + Next.js frontend deployed on a local `kind` 
 - The frontend uses Next.js `rewrites()` to proxy `/api/*` to `backend-v2.llm-wiki.svc.cluster.local:8000` inside the cluster.
 - Always use the repo's existing patterns (`src/llm_wiki/...`, `frontend/...`, `k8s/...`) before inventing new ones.
 
-## Verified State (2026-07-20)
+## Docker Build
+
+Both backend and frontend images MUST be built with `--network=host`. The default Docker bridge on this machine cannot resolve external registries reliably (`EAI_AGAIN`). Without it, `pip install` or `npm ci` will hang or fail with DNS errors.
+
+```bash
+# Backend (from repo root)
+docker build --network=host -t 32_llm_wiki_clean_arch-backend:latest .
+
+# Frontend (from repo root)
+docker build --network=host -t 32_llm_wiki_clean_arch-frontend:latest -f frontend/Dockerfile frontend/
+```
+
+### Backend Dockerfile
+- Single `pyproject.toml` is the source of truth for Python dependencies — `pip install .` reads from it, no duplicate dependency list.
+- Multi-stage: `builder` stage compiles deps, `runner` stage only copies installed packages + `src/`.
+- `CMD` starts uvicorn on port 8000.
+
+### Frontend Dockerfile
+See [`frontend/AGENTS.md`](frontend/AGENTS.md) for details. Key: uses `npm ci` (needs `--network=host`), Next.js `output: 'standalone'`, runs as non-root `nextjs` user.
+
+## Verified State (2026-07-21)
 
 - Frontend image: `32_llm_wiki_clean_arch-frontend:latest`
 - Backend image: `32_llm_wiki_clean_arch-backend:latest`

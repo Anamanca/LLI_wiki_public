@@ -45,6 +45,7 @@ export function ChatContent() {
   const streamQuery = useQueryStream();
 
   const isStreaming = streamQuery.loading;
+  const statusLabel = streamQuery.statusLabel;
 
   const sourceList = useMemo(
     () => sourcesData?.sources?.map((s) => ({ id: s.id, name: s.name })) || [],
@@ -151,11 +152,18 @@ export function ChatContent() {
       const next = prev.map((m) => {
         if (m.id !== finalId) return m;
         if (streamQuery.error) return { ...m, content: `Error: ${streamQuery.error}` };
-        if (streamQuery.citations.length > 0) return { ...m, citations: streamQuery.citations };
-        return m;
+        return {
+          ...m,
+          content: streamQuery.answer || m.content,
+          citations: streamQuery.citations.length > 0 ? streamQuery.citations : m.citations,
+        };
       });
       if (sessionId) {
-        saveChatSession(sessionId, next.map((m) => ({ role: m.role, content: m.content })))
+        // Derive a title from the first user message when the session still
+        // has the default placeholder title.
+        const firstUser = next.find((m) => m.role === "user");
+        const title = firstUser && firstUser.content ? firstUser.content.slice(0, 60) : undefined;
+        saveChatSession(sessionId, next.map((m) => ({ role: m.role, content: m.content })), title)
           .catch((e) => console.warn("saveChatSession failed:", e));
       }
       return next;
@@ -182,8 +190,9 @@ export function ChatContent() {
 
   const handleSend = useCallback(
     (question: string) => {
-      const userMsgId = `user-${Date.now()}`;
-      const assistantMsgId = `assistant-${Date.now()}`;
+      const now = Date.now();
+      const userMsgId = `user-${now}`;
+      const assistantMsgId = `assistant-${now + 1}`;
       pendingMsgId.current = assistantMsgId;
 
       setMessages((prev) => [
@@ -227,7 +236,7 @@ export function ChatContent() {
       </div>
       <Card className="flex-1 flex flex-col overflow-hidden min-h-0">
         <CardContent className="flex-1 flex flex-col p-0 min-h-0">
-          <ChatMessages messages={messages} isLoading={isStreaming} />
+          <ChatMessages messages={messages} isLoading={isStreaming} statusLabel={statusLabel} />
           <ChatInput onSend={handleSend} disabled={isStreaming} />
         </CardContent>
       </Card>

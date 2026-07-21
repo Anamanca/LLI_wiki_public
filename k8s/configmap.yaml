@@ -18,6 +18,7 @@ data:
   GEMINI_FALLBACK_MODEL: "gemini-2.5-flash"
   GEMINI_CHAT_MODEL: "gemini-2.5-flash"
   RERANKER_ENABLED: "false"
+  REASONING_ENABLED: "true"
   CPU_MAX_PERCENT: "85"
   RAPIDAPI_RPS: "1"
   RAPIDAPI_HOST: "youtube-transcriptor.p.rapidapi.com"

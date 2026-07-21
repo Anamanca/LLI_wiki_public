@@ -6,29 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy pyproject.toml + source so pip install . can resolve deps from pyproject.toml
 COPY pyproject.toml .
+COPY src/ ./src/
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir \
-        fastapi>=0.115 \
-        "uvicorn[standard]>=0.30" \
-        "sqlalchemy[asyncio]>=2.0" \
-        asyncpg>=0.29 \
-        psycopg2-binary>=2.9 \
-        pgvector>=0.3 \
-        "redis[hiredis]>=5.0" \
-        httpx \
-        pydantic>=2.0 \
-        pydantic-settings>=2.5 \
-        dependency_injector>=4.0 \
-        alembic>=1.13 \
-        minio \
-        "python-telegram-bot>=21.0" \
-        "yt-dlp>=2024.0" \
-        "faster-whisper>=1.0" \
-        ollama>=0.4 \
-        psutil>=5.9 \
-        python-dotenv \
-        langsmith>=0.1.0
+    && pip install --no-cache-dir .
 
 FROM python:3.12-slim
 

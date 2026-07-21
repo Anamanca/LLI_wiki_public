@@ -314,6 +314,13 @@ async def list_cron_jobs(db: AsyncSession = Depends(get_db)):
             status = "stopped"
         elif j.job_type == "kubernetes_cronjob":
             status, last_run = await _k8s_cronjob_status(j.job_id)
+            # If the daily scan lock for today is completed, report "completed"
+            # so the GUI can show "Done Today" instead of just "Scheduled".
+            if j.job_id == "youtube-daily-scan" and status == "scheduled":
+                today = _today_utc()
+                lock = await db.get(orm.ScanLock, today)
+                if lock and lock.completed_at:
+                    status = "completed"
         elif j.job_type == "crontab":
             # Crontab management is not implemented in this environment; treat as scheduled.
             status = "scheduled"

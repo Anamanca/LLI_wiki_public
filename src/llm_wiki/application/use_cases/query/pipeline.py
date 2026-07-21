@@ -22,6 +22,28 @@ from llm_wiki.domain.value_objects.time_range import TimeRange
 root_logger = logging.getLogger()
 logger = logging.getLogger(__name__)
 
+# ── Cache tuning constants (P3: variable TTL) ──────────────────────────
+
+_SHORT_TTL = 3600       # 1 hour — answers that depend on "today" / "this week"
+_LONG_TTL = 86400       # 24 hours — factual answers that rarely change
+_SEMANTIC_THRESHOLD = 0.80  # cosine similarity floor for semantic cache hit
+# Tuned to 0.80 after empirical testing: paraphrased Vietnamese questions with
+# same intent typically range 0.80–0.88 against the stored embedding.
+# A higher threshold (0.95) only catches near-identical strings, defeating
+# the purpose of semantic cache.
+
+_TIME_SENSITIVE_PATTERNS: list[str] = [
+    r"hôm\s*nay", r"today",
+    r"hôm\s*qua", r"yesterday",
+    r"ngày\s*mai", r"tomorrow",
+    r"tuần\s*này", r"this\s+week",
+    r"tháng\s*này", r"this\s+month",
+    r"năm\s*nay", r"this\s+year",
+    r"mới\s*nhất", r"latest",
+    r"gần\s*đây", r"recent(?:ly)?",
+    r"hiện\s*tại", r"currently", r"now", r"bây\s*giờ",
+]
+
 _TIME_PATTERNS = [
     # Vietnamese — explicit time ranges (high confidence)
     (r"(\d+)\s*ngày\s*(vừa\s*)?qua", lambda m: timedelta(days=int(m.group(1)))),
@@ -183,9 +205,86 @@ class QueryPipeline:
         self._cache = cache
         self._telemetry = telemetry
 
+    # ── Cache helpers (P1: normalization, P3: variable TTL) ────────────
+
+    @staticmethod
+    def _normalize_question(question: str) -> str:
+        """Normalize a question for consistent exact-cache keys.
+
+        Strips punctuation, collapses whitespace, lowercases — so
+        "Ai là CEO Apple?" and "ai là ceo apple" produce the same hash.
+        """
+        q = question.lower().strip()
+        q = re.sub(r"[^\w\s]", "", q)  # remove punctuation
+        q = re.sub(r"\s+", " ", q)     # collapse whitespace
+        return q
+
+    @staticmethod
+    def _is_time_sensitive(question: str) -> bool:
+        """Return True when the question implies a temporal constraint.
+
+        Questions like "what happened today" or "latest news" should use a
+        short TTL since the answer may be stale quickly.
+        """
+        q_lower = question.lower()
+        return any(re.search(p, q_lower) for p in _TIME_SENSITIVE_PATTERNS)
+
     def _cache_key(self, question: str) -> str:
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        return f"qa:{hashlib.sha256((question + today).encode()).hexdigest()}"
+        """Build an exact-match cache key.
+
+        Uses SHA256 of the normalized question.  Date is NOT embedded in the
+        key — content invalidation is handled by the cache TTL, which is
+        shorter for time-sensitive questions (see ``_cache_ttl``).
+        """
+        normalized = self._normalize_question(question)
+        return f"qa:v3:{hashlib.sha256(normalized.encode()).hexdigest()}"
+
+    def _cache_ttl(self, question: str) -> int:
+        """Pick an appropriate TTL based on time-sensitivity.
+
+        - Time-sensitive questions ("hôm nay", "this week") → short TTL (1h)
+        - Factual questions without temporal cues → long TTL (24h)
+        """
+        return _SHORT_TTL if self._is_time_sensitive(question) else _LONG_TTL
+
+    # ── Exact cache hit helper ─────────────────────────────────────────
+
+    async def _try_exact_cache(self, question: str) -> dict | None:
+        """Check exact-match cache. Returns parsed cached data or None on miss."""
+        cache_key = self._cache_key(question)
+        cached = await self._cache.get(cache_key)
+        if cached:
+            try:
+                return json.loads(cached)
+            except json.JSONDecodeError:
+                logger.debug("Exact cache hit but JSON decode failed, ignoring")
+        return None
+
+    async def _try_semantic_cache(self, embedding: Embedding) -> dict | None:
+        """Check semantic (embedding similarity) cache.
+
+        Returns parsed cached data or None.  Degrades gracefully.
+        """
+        try:
+            raw = await self._cache.semantic_get(embedding.vector, _SEMANTIC_THRESHOLD)
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            logger.debug("Semantic cache lookup failed, ignoring", exc_info=True)
+        return None
+
+    def _build_cached_stream_event(self, data: dict) -> dict:
+        """Build a ``complete`` event from cached data, suitable for streaming output."""
+        return {
+            "type": "complete",
+            "data": {
+                "answer": data.get("answer", ""),
+                "citations": data.get("sources", data.get("citations", [])),
+                "sources_used": data.get("sources_used", []),
+                "tokens_used": 0,
+                "cache_hit": True,
+            },
+        }
 
     async def _extract_time_range_with_llm(self, question: str) -> TimeRange | None:
         now = datetime.now(UTC).replace(tzinfo=None)
@@ -250,7 +349,7 @@ class QueryPipeline:
         context_parts = []
         for i, result in enumerate(results[:20], start=1):
             source = result.metadata.get("source_name", "unknown") if result.metadata else "unknown"
-            context_parts.append(f"[{i}] ({source}) {result.title}\n{result.content[:800]}")
+            context_parts.append(f"[{i}] ({source}) {result.title}\n{result.content[:2000]}")
         return "\n\n".join(context_parts)
 
     async def _retrieve_and_merge(
@@ -314,28 +413,36 @@ class QueryPipeline:
                 self._llm, self._cache, root_span,
             )
 
-        cache_key = self._cache_key(input.question)
-        cached, step_times["cache_check"] = await _timed(lambda: self._cache.get(cache_key))
+        # ── P1: exact-match cache with normalized key ──────────────────
+        cached_data, step_times["cache_check"] = await _timed(
+            lambda: self._try_exact_cache(input.question)
+        )
 
-        if cached:
+        if cached_data:
             cache_hit = True
-            data = json.loads(cached)
-            data["cache_hit"] = True
-            data["pipeline_steps"] = step_times
+            cached_data["cache_hit"] = True
+            cached_data["pipeline_steps"] = step_times
+            answer_text = cached_data.get("answer", "")
             if telemetry and root_span:
                 await telemetry.add_metadata(
                     span=root_span,
                     metadata={
                         "cache_hit": True,
+                        "cache_type": "exact",
+                        "question": input.question,
                         "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
                     },
                 )
                 await telemetry.end_span(
                     span=root_span,
-                    outputs={"answer_length": len(data.get("answer", ""))},
+                    outputs={
+                        "answer_length": len(answer_text),
+                        "answer": answer_text,
+                    },
                 )
-            return data
+            return cached_data
 
+        # ── Attempt embedding for semantic cache check (reused later) ──
         try:
             query_embedding, step_times["embed"] = await _timed(
                 lambda: self._embedder.embed(input.question),
@@ -349,6 +456,34 @@ class QueryPipeline:
                 await telemetry.end_span(span=root_span, error=str(exc))
             raise
 
+        # ── P2: semantic cache check ───────────────────────────────────
+        sem_data, step_times["semantic_cache_check"] = await _timed(
+            lambda: self._try_semantic_cache(query_embedding)
+        )
+        if sem_data:
+            cache_hit = True
+            sem_data["cache_hit"] = True
+            sem_data["pipeline_steps"] = step_times
+            answer_text = sem_data.get("answer", "")
+            if telemetry and root_span:
+                await telemetry.add_metadata(
+                    span=root_span,
+                    metadata={
+                        "cache_hit": True,
+                        "cache_type": "semantic",
+                        "question": input.question,
+                        "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
+                    },
+                )
+                await telemetry.end_span(
+                    span=root_span,
+                    outputs={
+                        "answer_length": len(answer_text),
+                        "answer": answer_text,
+                    },
+                )
+            return sem_data
+
         time_range = self._resolve_time_range(input)
         if time_range:
             logger.debug("Extracted time_range: %s → %s", time_range.start, time_range.end)
@@ -361,23 +496,38 @@ class QueryPipeline:
         context = self._build_context(top_results)
 
         system_prompt = (
-            "You are an expert assistant. Answer the question based ONLY on the provided context. "
-            "Cite sources using [N] notation. If the context doesn't contain the answer, say so."
+            "Bạn là một trợ lý nghiên cứu chuyên sâu. "
+            "Hãy trả lờI câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
+            "Câu trả lờI phảI bao gồm: "
+            "(1) một câu tóm tắt ngắn gọn ở đầu; "
+            "(2) phân tích chi tiết từng khía cạnh liên quan, "
+            "kèm ví dụ cụ thể từ ngữ cảnh; "
+            "(3) giảI thích mốI liên hệ giữa các ý; "
+            "(4) kết luận tổng thể ở cuốI. "
+            "Trích dẫn nguồn bằng [N]. "
+            "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
+            "thay vì bịa đặt. "
+            "Hãy trả lờI đầy đủ, súc tích nhưng không sơ xài."
         )
 
-        answer, step_times["synthesize"] = await _timed(
-            lambda: self._llm.chat_completion(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": f"Context:\n\n{context}\n\nQuestion: {input.question}",
-                    },
-                ],
+        messages = [{"role": "system", "content": system_prompt}]
+        for h in (input.chat_history or [])[-6:]:
+            messages.append({"role": h["role"], "content": h["content"]})
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Context:\n\n{context}\n\nQuestion: {input.question}",
+            }
+        )
+
+        llm_result, step_times["synthesize"] = await _timed(
+            lambda: self._llm.chat_completion_reasoning(
+                messages=messages,
                 temperature=0.3,
-                max_tokens=4096,
+                max_tokens=16384,
             ),
         )
+        answer = llm_result.get("content", "")
 
         sources = [
             {
@@ -403,8 +553,16 @@ class QueryPipeline:
             "pipeline_steps": step_times,
         }
 
+        # ── P3: variable TTL ───────────────────────────────────────────
+        ttl = self._cache_ttl(input.question)
+        cache_key = self._cache_key(input.question)
+        result_json = json.dumps(result, default=str)
         _, step_times["cache_save"] = await _timed(
-            lambda: self._cache.set(cache_key, json.dumps(result, default=str), ttl=3600),
+            lambda: self._cache.set(cache_key, result_json, ttl=ttl),
+        )
+        # Also store embedding for semantic cache (P2)
+        _, step_times["semantic_cache_save"] = await _timed(
+            lambda: self._cache.semantic_set(cache_key, query_embedding.vector, result_json, ttl=ttl),
         )
 
         if telemetry and root_span:
@@ -412,6 +570,7 @@ class QueryPipeline:
                 span=root_span,
                 metadata={
                     "cache_hit": False,
+                    "cache_ttl": ttl,
                     "tokens_used": tokens_used,
                     "prompt_tokens": usage.get("prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens"),
@@ -423,6 +582,7 @@ class QueryPipeline:
                 span=root_span,
                 outputs={
                     "answer_length": len(answer),
+                    "answer": answer,
                     "sources_count": len(sources),
                 },
             )
@@ -433,6 +593,8 @@ class QueryPipeline:
         step_times: dict[str, float] = {}
         root_span: TelemetrySpan | None = None
         telemetry = self._telemetry
+
+        yield {"type": "status", "data": {"status": "processing"}}
 
         if telemetry:
             root_span = await telemetry.start_span(
@@ -451,56 +613,180 @@ class QueryPipeline:
                 self._llm, self._cache, root_span,
             )
 
-        query_embedding, step_times["embed"] = await _timed(
-            lambda: self._embedder.embed(input.question),
+        # ── P0: exact-match cache for stream endpoint ───────────────────
+        cached_data, step_times["cache_check"] = await _timed(
+            lambda: self._try_exact_cache(input.question)
         )
-
-        async def _resolve_time():
-            return await self._resolve_time_range_async(input)
-
-        time_range, step_times["time_resolution"] = await _timed(_resolve_time)
-        if time_range:
-            logger.debug("Extracted time_range: %s → %s", time_range.start, time_range.end)
-
-        _, _, top_results, search_step_times = await self._retrieve_and_merge(
-            input, query_embedding, time_range
-        )
-        step_times.update(search_step_times)
-
-        context = self._build_context(top_results)
-
-        system_prompt = (
-            "You are an expert assistant. Answer the question based ONLY on the provided context. "
-            "Cite sources using [N] notation. If the context doesn't contain the answer, say so."
-        )
-
-        trace_id = root_span.span_id if root_span else None
-        yield {"type": "metadata", "data": {"pipeline_steps": step_times, "trace_id": trace_id}}
-
-        full_answer = ""
-        has_content = False
-        t0_synth = time.time()
-
-        # Trace emitted by TracedLLMWrapper.chat_completion_stream
-        # (parent was wired via _set_parent_on_wrappers above).
-        root_logger.warning(
-            "[STREAM] calling chat_completion_stream for: %s...", input.question[:50]
-        )
-        try:
-            async for chunk in self._llm.chat_completion_stream(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": f"Context:\n\n{context}\n\nQuestion: {input.question}",
+        if cached_data:
+            yield self._build_cached_stream_event(cached_data)
+            if telemetry and root_span:
+                await telemetry.add_metadata(
+                    span=root_span,
+                    metadata={
+                        "cache_hit": True,
+                        "cache_type": "exact",
+                        "question": input.question,
+                        "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
                     },
-                ],
+                )
+                await telemetry.end_span(
+                    span=root_span,
+                    outputs={
+                        "answer_length": len(cached_data.get("answer", "")),
+                        "answer": cached_data.get("answer", ""),
+                    },
+                )
+            return
+
+        try:
+            query_embedding, step_times["embed"] = await _timed(
+                lambda: self._embedder.embed(input.question),
+            )
+
+            # ── P2: semantic cache for stream endpoint ──────────────────
+            sem_data, step_times["semantic_cache_check"] = await _timed(
+                lambda: self._try_semantic_cache(query_embedding)
+            )
+            if sem_data:
+                yield self._build_cached_stream_event(sem_data)
+                if telemetry and root_span:
+                    await telemetry.add_metadata(
+                        span=root_span,
+                        metadata={
+                            "cache_hit": True,
+                            "cache_type": "semantic",
+                            "question": input.question,
+                            "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
+                        },
+                    )
+                    await telemetry.end_span(
+                        span=root_span,
+                        outputs={
+                            "answer_length": len(sem_data.get("answer", "")),
+                            "answer": sem_data.get("answer", ""),
+                        },
+                    )
+                return
+
+            async def _resolve_time():
+                return await self._resolve_time_range_async(input)
+
+            time_range, step_times["time_resolution"] = await _timed(_resolve_time)
+            if time_range:
+                logger.debug("Extracted time_range: %s → %s", time_range.start, time_range.end)
+
+            _, _, top_results, search_step_times = await self._retrieve_and_merge(
+                input, query_embedding, time_range
+            )
+            step_times.update(search_step_times)
+
+            yield {"type": "status", "data": {"status": "retrieving"}}
+
+            context = self._build_context(top_results)
+
+            system_prompt = (
+                "Bạn là một trợ lý nghiên cứu chuyên sâu. "
+                "Hãy trả lờI câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
+                "Câu trả lờI phảI bao gồm: "
+                "(1) một câu tóm tắt ngắn gọn ở đầu; "
+                "(2) phân tích chi tiết từng khía cạnh liên quan, "
+                "kèm ví dụ cụ thể từ ngữ cảnh; "
+                "(3) giảI thích mốI liên hệ giữa các ý; "
+                "(4) kết luận tổng thể ở cuốI. "
+                "Trích dẫn nguồn bằng [N]. "
+                "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
+                "thay vì bịa đặt. "
+                "Hãy trả lờI đầy đủ, súc tích nhưng không sơ xài."
+            )
+
+            stream_messages = [{"role": "system", "content": system_prompt}]
+            for h in (input.chat_history or [])[-6:]:
+                stream_messages.append({"role": h["role"], "content": h["content"]})
+            stream_messages.append(
+                {
+                    "role": "user",
+                    "content": f"Context:\n\n{context}\n\nQuestion: {input.question}",
+                }
+            )
+
+            yield {"type": "status", "data": {"status": "thinking"}}
+
+            t0_synth = time.time()
+            root_logger.warning(
+                "[STREAM] calling chat_completion_reasoning for: %s...", input.question[:50]
+            )
+            llm_result = await self._llm.chat_completion_reasoning(
+                messages=stream_messages,
                 temperature=0.3,
-                max_tokens=4096,
-            ):
-                has_content = True
-                full_answer += chunk
-                yield {"type": "chunk", "data": chunk}
+                max_tokens=16384,
+            )
+            full_answer = llm_result.get("content", "")
+            step_times["synthesize"] = time.time() - t0_synth
+            root_logger.warning("[STREAM] answer_len=%d", len(full_answer))
+
+            yield {"type": "status", "data": {"status": "summarizing"}}
+
+            usage = getattr(self._llm, "last_usage", None) or {}
+            tokens_used = usage.get("total_tokens", 0)
+
+            sources = [
+                {
+                    "id": r.content_id,
+                    "title": r.title,
+                    "score": round(r.score, 4),
+                    "page_title": r.metadata.get("page_title") if r.metadata else None,
+                    "page_slug": r.metadata.get("page_slug") if r.metadata else None,
+                    "source_name": r.metadata.get("source_name") if r.metadata else None,
+                    "published_at": r.metadata.get("published_at") if r.metadata else None,
+                }
+                for r in top_results[:5]
+            ]
+
+            # ── P3: save to both cache layers with variable TTL ──────────
+            cache_key = self._cache_key(input.question)
+            ttl = self._cache_ttl(input.question)
+            cache_value = json.dumps(
+                {
+                    "answer": full_answer,
+                    "sources": sources,
+                    "tokens_used": tokens_used,
+                    "cache_hit": False,
+                },
+                default=str,
+            )
+            await self._cache.set(cache_key, cache_value, ttl=ttl)
+            await self._cache.semantic_set(cache_key, query_embedding.vector, cache_value, ttl=ttl)
+
+            if telemetry and root_span:
+                await telemetry.add_metadata(
+                    span=root_span,
+                    metadata={
+                        "cache_ttl": ttl,
+                        "tokens_used": tokens_used,
+                        "prompt_tokens": usage.get("prompt_tokens"),
+                        "completion_tokens": usage.get("completion_tokens"),
+                        "retrieved_sources_count": len(top_results),
+                        "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
+                    },
+                )
+                await telemetry.end_span(
+                    span=root_span,
+                    outputs={
+                        "answer_length": len(full_answer),
+                        "answer": full_answer,
+                        "sources_count": len(sources),
+                    },
+                )
+
+            yield {
+                "type": "complete",
+                "data": {
+                    "answer": full_answer,
+                    "citations": sources,
+                    "sources_used": [],
+                    "tokens_used": tokens_used,
+                },
+            }
         except Exception as exc:
             if telemetry and root_span:
                 await telemetry.add_metadata(
@@ -509,58 +795,3 @@ class QueryPipeline:
                 )
                 await telemetry.end_span(span=root_span, error=str(exc))
             raise
-
-        step_times["synthesize"] = time.time() - t0_synth
-        if not has_content:
-            root_logger.warning("[STREAM] falling back to non-stream")
-            full_answer = await self._llm.chat_completion(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": (f"Context:\n\n{context}\n\nQuestion: {input.question}"),
-                    },
-                ],
-                temperature=0.3,
-                max_tokens=4096,
-            )
-            root_logger.warning("[STREAM] fallback answer_len=%d", len(full_answer))
-            yield {"type": "chunk", "data": full_answer}
-
-        usage = getattr(self._llm, "last_usage", None) or {}
-        tokens_used = usage.get("total_tokens", 0)
-
-        sources = [
-            {
-                "id": r.content_id,
-                "title": r.title,
-                "score": round(r.score, 4),
-                "page_title": r.metadata.get("page_title") if r.metadata else None,
-                "page_slug": r.metadata.get("page_slug") if r.metadata else None,
-                "source_name": r.metadata.get("source_name") if r.metadata else None,
-                "published_at": r.metadata.get("published_at") if r.metadata else None,
-            }
-            for r in top_results[:5]
-        ]
-
-        if telemetry and root_span:
-            await telemetry.add_metadata(
-                span=root_span,
-                metadata={
-                    "tokens_used": tokens_used,
-                    "prompt_tokens": usage.get("prompt_tokens"),
-                    "completion_tokens": usage.get("completion_tokens"),
-                    "retrieved_sources_count": len(top_results),
-                    "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
-                },
-            )
-            await telemetry.end_span(
-                span=root_span,
-                outputs={
-                    "answer_length": len(full_answer),
-                    "sources_count": len(sources),
-                },
-            )
-
-        yield {"type": "sources", "data": sources}
-        yield {"type": "done", "data": None}

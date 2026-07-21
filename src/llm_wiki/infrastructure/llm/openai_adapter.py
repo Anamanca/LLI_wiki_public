@@ -29,6 +29,16 @@ class OpenAIAdapter(LLMClientPort):
             "Content-Type": "application/json",
         }
 
+    def _is_reasoning_model(self) -> bool:
+        """Return True when the configured model supports reasoning/thinking."""
+        return self._model.startswith("deepseek-v4")
+
+    def _thinking_payload(self) -> dict:
+        """Return thinking parameter based on model and feature flag."""
+        if self._is_reasoning_model() and settings.reasoning_enabled:
+            return {"type": "enabled"}
+        return {"type": "disabled"}
+
     @staticmethod
     def _extract_usage(data: dict[str, Any]) -> dict[str, Any] | None:
         """Extract usage from a chat completion response."""
@@ -53,14 +63,21 @@ class OpenAIAdapter(LLMClientPort):
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "thinking": {"type": "disabled"},
+            "thinking": self._thinking_payload(),
         }
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(url, headers=self._headers(), json=payload)
             resp.raise_for_status()
             data = resp.json()
             self.last_usage = self._extract_usage(data)
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"].get("content", "")
+            # Fallback for reasoning models that return reasoning_content
+            # when content is empty or missing.
+            if not content:
+                content = data["choices"][0]["message"].get("reasoning_content", "")
+                if content:
+                    logger.warning("Using reasoning_content as fallback for empty content")
+            return content
 
     async def chat_completion_raw(
         self,
@@ -74,14 +91,34 @@ class OpenAIAdapter(LLMClientPort):
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "thinking": {"type": "disabled"},
+            "thinking": self._thinking_payload(),
         }
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(url, headers=self._headers(), json=payload)
             resp.raise_for_status()
             data = resp.json()
             self.last_usage = self._extract_usage(data)
             return data
+
+    async def chat_completion_reasoning(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> dict[str, str]:
+        """Return both final content and reasoning content for reasoning models."""
+        data = await self.chat_completion_raw(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        message = data.get("choices", [{}])[0].get("message", {})
+        content = message.get("content", "") or ""
+        reasoning_content = message.get("reasoning_content", "") or ""
+        if not content and reasoning_content:
+            logger.warning("Using reasoning_content as fallback for empty content")
+            content = reasoning_content
+        return {"content": content, "reasoning_content": reasoning_content}
 
     async def chat_completion_stream(
         self,

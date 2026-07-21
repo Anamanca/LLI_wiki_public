@@ -71,12 +71,14 @@ class ChatSessionFileRepository(ChatSessionRepository):
 
     async def list_sessions(self) -> list[ChatSession]:
         sessions: list[ChatSession] = []
-        for path in sorted(self._base_dir.glob("*.json")):
+        for path in self._base_dir.glob("*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 sessions.append(self._dict_to_session(data))
             except Exception:
                 continue
+        # Newest activity first so the sidebar shows recent chats at the top.
+        sessions.sort(key=lambda s: s.updated_at, reverse=True)
         return sessions
 
     async def get_by_id(self, session_id: str) -> Optional[ChatSession]:

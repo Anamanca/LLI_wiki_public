@@ -13,7 +13,7 @@ import { useSources } from "@/hooks/use-sources";
 export default function WikiPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceId, setSourceId] = useState("");
-  const [sortBy, setSortBy] = useState("published_at");
+  const [sortBy, setSortBy] = useState("updated_at");
   const [sortOrder, setSortOrder] = useState("desc");
   const [page, setPage] = useState(1);
   const perPage = 20;

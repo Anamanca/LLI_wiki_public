@@ -138,6 +138,11 @@ spec:
             configMapKeyRef:
               name: llm-wiki-config
               key: RERANKER_ENABLED
+        - name: REASONING_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: REASONING_ENABLED
         - name: RAPIDAPI_KEY
           valueFrom:
             secretKeyRef:

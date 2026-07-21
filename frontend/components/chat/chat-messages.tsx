@@ -8,9 +8,10 @@ import { Badge } from "@/components/ui/badge";
 interface ChatMessagesProps {
   messages: ChatMessage[];
   isLoading: boolean;
+  statusLabel?: string;
 }
 
-export function ChatMessages({ messages, isLoading }: ChatMessagesProps) {
+export function ChatMessages({ messages, isLoading, statusLabel }: ChatMessagesProps) {
   return (
     <div className="flex-1 overflow-y-auto space-y-4 p-4 min-h-0">
       {messages.length === 0 && !isLoading && (
@@ -98,11 +99,22 @@ export function ChatMessages({ messages, isLoading }: ChatMessagesProps) {
         <div className="flex gap-3 justify-start">
           <Bot className="h-6 w-6 text-primary mt-1" />
           <div className="bg-muted rounded-lg px-4 py-3">
-            <div className="flex gap-1">
-              <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:0ms]" />
-              <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:150ms]" />
-              <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:300ms]" />
-            </div>
+            {statusLabel ? (
+              <div className="flex items-center gap-2">
+                <div className="flex gap-1">
+                  <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:0ms]" />
+                  <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:150ms]" />
+                  <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:300ms]" />
+                </div>
+                <span className="text-xs text-muted-foreground">{statusLabel}</span>
+              </div>
+            ) : (
+              <div className="flex gap-1">
+                <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:0ms]" />
+                <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:150ms]" />
+                <span className="h-2 w-2 rounded-full bg-primary animate-bounce [animation-delay:300ms]" />
+              </div>
+            )}
           </div>
         </div>
       )}

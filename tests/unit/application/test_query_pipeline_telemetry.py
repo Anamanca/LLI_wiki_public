@@ -65,7 +65,10 @@ def mock_keyword_search():
 @pytest.fixture
 def mock_llm():
     mock = AsyncMock()
-    mock.chat_completion.return_value = "This is a test answer."
+    mock.chat_completion_reasoning.return_value = {
+        "content": "This is a test answer.",
+        "reasoning_content": "",
+    }
     mock.last_usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
     mock.set_parent_span = MagicMock()
     return mock

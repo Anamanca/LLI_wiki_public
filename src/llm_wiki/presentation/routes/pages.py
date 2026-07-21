@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -10,6 +10,9 @@ from llm_wiki.infrastructure.persistence.postgres import models as orm
 from llm_wiki.domain.value_objects.identifiers import PageId
 
 router = APIRouter()
+
+_ALLOWED_SORT_FIELDS = {"created_at", "updated_at", "published_at"}
+_ALLOWED_SORT_ORDERS = {"asc", "desc"}
 
 
 @router.get("/pages/{slug}")
@@ -106,13 +109,44 @@ async def get_page(slug: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/pages")
-async def list_pages(source_id: str | None = None, limit: int = 50, offset: int = 0, db: AsyncSession = Depends(get_db)):
+async def list_pages(
+    source_id: str | None = None,
+    search: str | None = None,
+    sort_by: str = Query(default="updated_at", description="Field to sort by"),
+    sort_order: str = Query(default="desc", description="Sort direction: asc or desc"),
+    page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
+    per_page: int = Query(default=20, ge=1, le=100, description="Items per page"),
+    db: AsyncSession = Depends(get_db),
+):
+    if sort_by not in _ALLOWED_SORT_FIELDS:
+        raise HTTPException(status_code=400, detail=f"Invalid sort_by: {sort_by}")
+    if sort_order not in _ALLOWED_SORT_ORDERS:
+        raise HTTPException(status_code=400, detail=f"Invalid sort_order: {sort_order}")
+
     repo = PostgresPageRepository(db)
     from llm_wiki.domain.value_objects.identifiers import SourceId
+
     if source_id:
         pages = await repo.list_by_source(SourceId(UUID(source_id)))
+        total = len(pages)
+        # Apply search/sort/pagination in memory for source-scoped lists.
+        if search:
+            pages = [p for p in pages if search.lower() in p.title.lower()]
+            total = len(pages)
+        reverse = sort_order == "desc"
+        pages.sort(key=lambda p: getattr(p, sort_by) or p.created_at, reverse=reverse)
+        offset = (page - 1) * per_page
+        pages = pages[offset : offset + per_page]
     else:
-        pages = await repo.list_all(limit=limit, offset=offset)
+        offset = (page - 1) * per_page
+        pages, total = await repo.list_all(
+            limit=per_page,
+            offset=offset,
+            search=search,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+
     items = [
         {
             "id": str(p.id.value),
@@ -129,7 +163,7 @@ async def list_pages(source_id: str | None = None, limit: int = 50, offset: int 
     ]
     return {
         "items": items,
-        "total": len(items),
-        "page": (offset // limit) + 1 if limit > 0 else 1,
-        "per_page": limit,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
     }

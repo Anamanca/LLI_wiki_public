@@ -42,6 +42,7 @@ class Settings(BaseSettings):
 
     temporal_precision_enabled: bool = True
     reranker_enabled: bool = Field(default=True, validation_alias="RERANKER_ENABLED")
+    reasoning_enabled: bool = Field(default=True, validation_alias="REASONING_ENABLED")
 
     # LangSmith observability & evaluation
     langsmith_tracing_enabled: bool = Field(default=False, validation_alias="LANGSMITH_TRACING")

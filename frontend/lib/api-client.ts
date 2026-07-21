@@ -259,10 +259,16 @@ export function fetchChatSession(id: string) {
   return request<ChatSession>(`/chat/sessions/${id}`);
 }
 
-export function saveChatSession(id: string, messages: { role: string; content: string }[]) {
+export function saveChatSession(
+  id: string,
+  messages: { role: string; content: string }[],
+  title?: string
+) {
+  const payload: { messages: typeof messages; title?: string } = { messages };
+  if (title) payload.title = title;
   return request<ChatSession>(`/chat/sessions/${id}`, {
     method: "PUT",
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify(payload),
   });
 }
 

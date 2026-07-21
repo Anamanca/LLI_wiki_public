@@ -66,6 +66,7 @@ async def ask_question(
         question=payload.question,
         source_id=payload.source_id,
         top_k=payload.top_k or 10,
+        chat_history=[{"role": m.role, "content": m.content} for m in (payload.history or [])],
         from_date=payload.from_date,
         to_date=payload.to_date,
     ))
@@ -106,12 +107,14 @@ async def ask_question_stream(
     pipeline: QueryPipeline = Depends(get_query_pipeline),
 ):
     use_case = StreamAnswerUseCase(pipeline)
+
     async def event_stream():
         async for chunk in use_case.execute(QueryInput(
             question=payload.question,
             source_id=payload.source_id,
             top_k=payload.top_k or 10,
             stream=True,
+            chat_history=[{"role": m.role, "content": m.content} for m in (payload.history or [])],
             from_date=payload.from_date,
             to_date=payload.to_date,
         )):
@@ -120,15 +123,9 @@ async def ask_question_stream(
             chunk_type = chunk.get("type", "")
             chunk_data = chunk.get("data")
 
-            if chunk_type == "metadata":
-                yield f"data: {json.dumps({'type': 'metadata', 'pipeline_steps': chunk_data.get('pipeline_steps', {})})}\n\n"
-            elif chunk_type == "chunk":
-                # Frontend expects: {type: "token", content: "..."}
-                if chunk_data is None:
-                    continue
-                content = chunk_data if isinstance(chunk_data, str) else (chunk_data.get("content") or "")
-                yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
-            elif chunk_type == "sources":
+            if chunk_type == "status":
+                yield f"data: {json.dumps({'type': 'status', 'status': chunk_data.get('status') if isinstance(chunk_data, dict) else chunk_data})}\n\n"
+            elif chunk_type == "complete":
                 citations = [
                     {
                         "page_title": s.get("page_title") or s.get("title", ""),
@@ -138,11 +135,9 @@ async def ask_question_stream(
                         "source_url": "",
                         "timestamp": s.get("published_at") or "",
                     }
-                    for s in (chunk_data if isinstance(chunk_data, list) else [])
+                    for s in (chunk_data.get("citations", []) if isinstance(chunk_data, dict) else [])
                 ]
-                yield f"data: {json.dumps({'type': 'complete', 'citations': citations, 'sources_used': []})}\n\n"
-            elif chunk_type == "done":
-                yield f"data: {json.dumps({'type': 'complete', 'citations': [], 'sources_used': []})}\n\n"
+                yield f"data: {json.dumps({'type': 'complete', 'answer': chunk_data.get('answer') if isinstance(chunk_data, dict) else '', 'citations': citations, 'sources_used': chunk_data.get('sources_used', []) if isinstance(chunk_data, dict) else []})}\n\n"
             else:
                 yield f"data: {json.dumps(chunk, default=str)}\n\n"
 

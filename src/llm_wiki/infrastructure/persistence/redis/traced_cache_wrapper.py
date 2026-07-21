@@ -25,6 +25,81 @@ class TracedCacheWrapper(CacheServicePort):
         """Wire this wrapper's spans under a parent span (e.g. pipeline root)."""
         self._parent_span = parent
 
+    # ── semantic cache ──────────────────────────────────────────────────
+
+    async def semantic_get(
+        self, embedding: list[float], threshold: float = 0.95
+    ) -> str | None:
+        span = await self._telemetry.start_span(
+            name="cache_semantic_get",
+            kind="tool",
+            inputs={"threshold": threshold},
+            parent=self._parent_span,
+        )
+        t0 = time.time()
+        try:
+            value = await self._inner.semantic_get(embedding, threshold)
+            latency_ms = (time.time() - t0) * 1000
+            await self._telemetry.end_span(
+                span=span,
+                outputs={"cache_hit": value is not None},
+            )
+            await self._telemetry.add_metadata(
+                span=span,
+                metadata={
+                    "latency_ms": round(latency_ms, 2),
+                    "cache_hit": value is not None,
+                },
+            )
+            return value
+        except Exception as exc:
+            latency_ms = (time.time() - t0) * 1000
+            await self._telemetry.add_metadata(
+                span=span,
+                metadata={
+                    "latency_ms": round(latency_ms, 2),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            await self._telemetry.end_span(span=span, error=str(exc))
+            raise
+
+    async def semantic_set(
+        self, key: str, embedding: list[float], value: str, ttl: int = 3600
+    ) -> None:
+        span = await self._telemetry.start_span(
+            name="cache_semantic_set",
+            kind="tool",
+            inputs={
+                "key_hash": _hash_key(key),
+                "value_length": len(value),
+                "ttl": ttl,
+            },
+            parent=self._parent_span,
+        )
+        t0 = time.time()
+        try:
+            await self._inner.semantic_set(key, embedding, value, ttl)
+            latency_ms = (time.time() - t0) * 1000
+            await self._telemetry.end_span(span=span, outputs={"stored": True})
+            await self._telemetry.add_metadata(
+                span=span,
+                metadata={"latency_ms": round(latency_ms, 2)},
+            )
+        except Exception as exc:
+            latency_ms = (time.time() - t0) * 1000
+            await self._telemetry.add_metadata(
+                span=span,
+                metadata={
+                    "latency_ms": round(latency_ms, 2),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            await self._telemetry.end_span(span=span, error=str(exc))
+            raise
+
+    # ── exact cache ──────────────────────────────────────────────────────
+
     async def get(self, key: str) -> str | None:
         span = await self._telemetry.start_span(
             name="cache_get",

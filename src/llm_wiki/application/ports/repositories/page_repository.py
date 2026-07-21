@@ -22,7 +22,14 @@ class PageRepository(ABC):
     async def list_by_source(self, source_id: SourceId) -> list[Page]: ...
 
     @abstractmethod
-    async def list_all(self, limit: int = 50, offset: int = 0) -> list[Page]: ...
+    async def list_all(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "updated_at",
+        sort_order: str = "desc",
+    ) -> tuple[list[Page], int]: ...
 
     @abstractmethod
     async def search_by_title(self, query: str, limit: int = 10) -> list[Page]: ...

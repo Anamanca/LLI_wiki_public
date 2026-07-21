@@ -3,11 +3,17 @@ from typing import Optional
 from datetime import datetime
 
 
+class ChatMessageItem(BaseModel):
+    role: str
+    content: str
+
+
 class QueryRequest(BaseModel):
     question: str
     source_id: Optional[str] = None
     top_k: Optional[int] = 10
     stream: bool = False
+    history: Optional[list[ChatMessageItem]] = None
     from_date: Optional[datetime] = None
     to_date: Optional[datetime] = None
 

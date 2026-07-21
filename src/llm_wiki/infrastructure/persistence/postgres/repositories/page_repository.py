@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.application.ports.repositories.page_repository import PageRepository, PageSectionRepository
@@ -51,14 +51,29 @@ class PostgresPageRepository(PageRepository):
         )
         return [PageMapper.to_domain(r) for r in result.scalars()]
 
-    async def list_all(self, limit: int = 50, offset: int = 0) -> list[Page]:
+    async def list_all(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "updated_at",
+        sort_order: str = "desc",
+    ) -> tuple[list[Page], int]:
+        sort_column = getattr(orm.Page, sort_by, orm.Page.updated_at)
+        order_clause = sort_column.desc() if sort_order == "desc" else sort_column.asc()
+
+        base_q = select(orm.Page)
+        count_q = select(func.count(orm.Page.id))
+        if search:
+            base_q = base_q.where(orm.Page.title.ilike(f"%{search}%"))
+            count_q = count_q.where(orm.Page.title.ilike(f"%{search}%"))
+
         result = await self._session.execute(
-            select(orm.Page)
-            .order_by(orm.Page.created_at.desc())
-            .limit(limit)
-            .offset(offset)
+            base_q.order_by(order_clause).limit(limit).offset(offset)
         )
-        return [PageMapper.to_domain(r) for r in result.scalars()]
+        total_result = await self._session.execute(count_q)
+        total = total_result.scalar() or 0
+        return [PageMapper.to_domain(r) for r in result.scalars()], total
 
 
 class PostgresPageSectionRepository(PageSectionRepository):

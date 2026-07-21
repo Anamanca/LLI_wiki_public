@@ -157,6 +157,66 @@ class TracedLLMWrapper(LLMClientPort):
             await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
+    async def chat_completion_reasoning(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> dict[str, str]:
+        span = await self._telemetry.start_span(
+            name="llm_chat_completion_reasoning",
+            kind="llm",
+            inputs={
+                "model": self._model,
+                "messages": _redacted_messages(messages),
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            metadata={"model": self._model},
+            parent=self._parent_span,
+        )
+        t0 = time.time()
+        try:
+            result = await self._inner.chat_completion_reasoning(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            latency_ms = (time.time() - t0) * 1000
+            usage = getattr(self._inner, "last_usage", None)
+            self.last_usage = usage
+            content = result.get("content", "")
+            reasoning_content = result.get("reasoning_content", "")
+            await self._telemetry.end_span(
+                span=span,
+                outputs={
+                    "answer_length": len(content),
+                    "answer_preview": content[:200],
+                    "reasoning_content_length": len(reasoning_content),
+                },
+            )
+            await self._telemetry.add_metadata(
+                span=span,
+                metadata={
+                    "latency_ms": round(latency_ms, 2),
+                    "tokens_used": usage.get("total_tokens") if usage else None,
+                    "prompt_tokens": usage.get("prompt_tokens") if usage else None,
+                    "completion_tokens": usage.get("completion_tokens") if usage else None,
+                },
+            )
+            return result
+        except Exception as exc:
+            latency_ms = (time.time() - t0) * 1000
+            await self._telemetry.add_metadata(
+                span=span,
+                metadata={
+                    "latency_ms": round(latency_ms, 2),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            await self._telemetry.end_span(span=span, error=str(exc))
+            raise
+
     async def chat_completion_stream(
         self,
         messages: list[dict],

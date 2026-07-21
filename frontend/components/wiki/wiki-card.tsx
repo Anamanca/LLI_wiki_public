@@ -30,7 +30,9 @@ export function WikiCard({ page }: WikiCardProps) {
               {page.source_name}
             </Badge>
             <span className="text-xs text-muted-foreground">
-              {"published_at" in page && page.published_at
+              {"updated_at" in page && page.updated_at
+                ? formatDate(page.updated_at)
+                : "published_at" in page && page.published_at
                 ? formatDate(page.published_at)
                 : "created_at" in page && page.created_at
                 ? formatDate(page.created_at)

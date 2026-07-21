@@ -37,6 +37,7 @@ class ChatSessionCreatePayload(BaseModel):
 
 class ChatSessionUpdatePayload(BaseModel):
     messages: list[ChatMessagePayload]
+    title: Optional[str] = None
 
 
 class ChatSessionMetaResponse(BaseModel):
@@ -119,6 +120,16 @@ async def update_chat_session(
     session.messages = [
         ChatMessage(role=m.role, content=m.content) for m in payload.messages
     ]
+    # Auto-title from the first user message when the session still has the
+    # default placeholder title.
+    if payload.title is not None:
+        session.title = payload.title
+    elif session.title in ("New Chat", "Untitled", "", None):
+        first_user = next(
+            (m for m in payload.messages if m.role == "user"), None
+        )
+        if first_user:
+            session.title = first_user.content[:60]
     await repo.save(session)
     return _serialize_session(session)
 

@@ -3,25 +3,36 @@
 import { useState, useCallback, useRef } from "react";
 import type { Citation, SourceUsage } from "@/types";
 
+type QueryStatus = "processing" | "retrieving" | "thinking" | "summarizing" | null;
+
 interface StreamState {
   answer: string;
   citations: Citation[];
   sourcesUsed: SourceUsage[];
+  status: QueryStatus;
   loading: boolean;
   error: string | null;
 }
+
+const STATUS_LABELS: Record<Exclude<QueryStatus, null>, string> = {
+  processing: "Đang phân tích câu hỏi...",
+  retrieving: "Đang tìm kiếm tài liệu...",
+  thinking: "Đang suy luận...",
+  summarizing: "Đang tổng hợp câu trả lờI...",
+};
 
 export function useQueryStream() {
   const [state, setState] = useState<StreamState>({
     answer: "",
     citations: [],
     sourcesUsed: [],
+    status: null,
     loading: false,
     error: null,
   });
   const abortRef = useRef<AbortController | null>(null);
 
-    const askQuestion = useCallback(
+  const askQuestion = useCallback(
     async (body: {
       question: string;
       session_id?: string;
@@ -35,10 +46,10 @@ export function useQueryStream() {
         abortRef.current.abort();
       }
       const controller = new AbortController();
-      const clientTimeout = setTimeout(() => controller.abort(), 240_000);
+      const clientTimeout = setTimeout(() => controller.abort(), 180_000);
       abortRef.current = controller;
 
-      setState({ answer: "", citations: [], sourcesUsed: [], loading: true, error: null });
+      setState({ answer: "", citations: [], sourcesUsed: [], status: "processing", loading: true, error: null });
 
       try {
         const apiBase = process.env.NEXT_PUBLIC_API_URL || "/api";
@@ -58,7 +69,6 @@ export function useQueryStream() {
 
         const decoder = new TextDecoder();
         let buffer = "";
-        let answer = "";
 
         while (true) {
           const { done, value } = await reader.read();
@@ -79,19 +89,23 @@ export function useQueryStream() {
                   ...prev,
                   error: payload.error,
                   loading: false,
+                  status: null,
                 }));
                 return;
               }
-              if (payload.type === "token") {
-                answer += payload.content;
-                setState((prev) => ({ ...prev, answer }));
+              if (payload.type === "status") {
+                const status = payload.status as QueryStatus;
+                if (status && status in STATUS_LABELS) {
+                  setState((prev) => ({ ...prev, status }));
+                }
               } else if (payload.type === "complete") {
                 setState((prev) => ({
                   ...prev,
+                  answer: payload.answer || "",
                   citations: payload.citations || [],
                   sourcesUsed: payload.sources_used || [],
                   loading: false,
-                  answer,
+                  status: null,
                 }));
               }
             } catch {
@@ -99,13 +113,14 @@ export function useQueryStream() {
             }
           }
         }
-        setState((prev) => ({ ...prev, loading: false }));
+        setState((prev) => ({ ...prev, loading: false, status: null }));
       } catch (err: any) {
         if (err.name === "AbortError") return;
         setState((prev) => ({
           ...prev,
           error: err.message || "Stream failed",
           loading: false,
+          status: null,
         }));
       } finally {
         clearTimeout(clientTimeout);
@@ -114,5 +129,5 @@ export function useQueryStream() {
     [],
   );
 
-  return { ...state, askQuestion };
+  return { ...state, askQuestion, statusLabel: state.status ? STATUS_LABELS[state.status] : "" };
 }
