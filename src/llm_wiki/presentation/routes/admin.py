@@ -3,6 +3,7 @@ Admin routes for ingestion, cron, scanning, and operational health.
 Mounted unconditionally because the K8s CronJob depends on them.
 """
 import json
+import logging
 import os
 from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
@@ -13,6 +14,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.infrastructure.persistence.postgres import models as orm
+from llm_wiki.application.use_cases.ingestion.youtube_poller import poll_channel, YouTubeQuotaExceeded
 from llm_wiki.presentation.dependencies import get_db
 
 router = APIRouter(prefix="/admin")
@@ -26,6 +28,85 @@ _WORKER_HEARTBEAT_TIMEOUT_SECONDS = 60
 
 def _today_utc() -> date:
     return datetime.now(timezone.utc).date()
+
+
+async def _run_youtube_scan(
+    db: AsyncSession,
+    backfill: bool = False,
+    backfill_since: date | None = None,
+) -> dict:
+    """Poll every active YouTube source and record the scan lock.
+
+    This is the actual execution triggered by the daily cron job. It writes the
+    scan_lock row so the GUI can report "done" for today, and it inserts any new
+    videos as pending source_items for the workers to process.
+    """
+    today = _today_utc()
+    scan_date = today
+
+    # Mark scan started (idempotent for the day).
+    lock = await db.get(orm.ScanLock, scan_date)
+    now = datetime.now(timezone.utc)
+    if lock is None:
+        lock = orm.ScanLock(scan_date=scan_date, started_at=now)
+        db.add(lock)
+    else:
+        lock.started_at = now
+    await db.commit()
+
+    sources_result = await db.execute(
+        select(orm.Source).where(
+            orm.Source.platform == "youtube",
+            orm.Source.status == "active",
+        )
+    )
+    sources = sources_result.scalars().all()
+
+    total_found = 0
+    total_inserted = 0
+    quota_exceeded = False
+    errors: list[str] = []
+
+    for source in sources:
+        try:
+            found = await poll_channel(source, db, backfill=backfill)
+            total_found += len(found)
+        except YouTubeQuotaExceeded:
+            quota_exceeded = True
+            errors.append(f"quota exceeded for {source.name}")
+            break
+        except Exception as exc:
+            logger = logging.getLogger(__name__)
+            logger.exception("Daily scan failed for source %s", source.name)
+            errors.append(f"{source.name}: {exc}")
+            continue
+
+    # Re-query source counts for newly inserted items.
+    # poll_channel already commits per source; we just need a summary.
+    pending_count = (
+        await db.execute(
+            select(func.count(orm.SourceItem.id)).where(
+                orm.SourceItem.status == "pending",
+                orm.SourceItem.created_at >= now,
+            )
+        )
+    ).scalar() or 0
+    total_inserted = int(pending_count)
+
+    lock.completed_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    return {
+        "success": True,
+        "message": "Daily YouTube scan completed",
+        "scan_date": str(scan_date),
+        "backfill": backfill,
+        "sources_scanned": len(sources),
+        "videos_found": total_found,
+        "new_items": total_inserted,
+        "quota_exceeded": quota_exceeded,
+        "errors": errors,
+    }
 
 
 async def _scan_status(db: AsyncSession) -> dict:
@@ -266,35 +347,18 @@ async def start_cron_job(job_id: str, db: AsyncSession = Depends(get_db)):
         job.enabled = True
         await db.commit()
 
-    # For the daily YouTube scan, detect and backfill missed dates before today's run.
+    # The daily YouTube scan is executed directly by this endpoint; the previous
+    # forward-to-cpu-worker path was a no-op because no cpu-worker endpoint
+    # implemented the scan. Running it here keeps the cron job synchronous and
+    # lets the K8s job success/failure reflect the real outcome.
     if job_id == "youtube-daily-scan":
         status = await _scan_status(db)
         missed_dates = status.get("missed_dates", [])
         if missed_dates:
-            # Backfill: run a single scan from the earliest missed date up to today.
-            # We do this by calling the cpu-worker endpoint with a backfill parameter.
-            try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
-                    resp = await client.post(
-                        f"{_CPU_WORKER_URL}/api/admin/cron-jobs/{job_id}/start",
-                        params={"backfill_since": min(missed_dates)},
-                    )
-                    if resp.status_code == 200:
-                        return resp.json()
-            except Exception as exc:
-                return {
-                    "success": False,
-                    "message": f"Failed to backfill missed dates {missed_dates}: {exc}",
-                }
-
-    # Forward to cpu-worker for actual execution (best-effort, short timeout)
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            resp = await client.post(f"{_CPU_WORKER_URL}/api/admin/cron-jobs/{job_id}/start")
-            if resp.status_code == 200:
-                return resp.json()
-    except Exception:
-        pass
+            return await _run_youtube_scan(
+                db, backfill=True, backfill_since=date.fromisoformat(min(missed_dates))
+            )
+        return await _run_youtube_scan(db)
 
     return {"success": True, "message": f"Cron job {job_id} started"}
 

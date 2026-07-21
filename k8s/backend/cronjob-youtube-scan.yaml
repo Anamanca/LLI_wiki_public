@@ -21,7 +21,7 @@ spec:
             - sh
             - -c
             - |
-              URL="http://backend-v2.llm-wiki.svc.cluster.local:8000/api/admin/cron-jobs/youtube-daily-scan/start"
+              URL="http://cpu-worker.llm-wiki.svc.cluster.local:8100/api/admin/cron-jobs/youtube-daily-scan/start"
               echo "[$(date)] Triggering daily YouTube scan: $URL"
               for i in 1 2 3 4 5; do
                 echo "[$(date)] Attempt $i/5: $URL"
