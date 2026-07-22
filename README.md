@@ -645,4 +645,4 @@ API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
 
 ---
 
-*Last updated for backend v2.1.0 / frontend v3.0.0 — includes three-tier cache (exact + semantic + variable TTL), stream endpoint caching, single-source dependency Dockerfile, and LangSmith full output tracing.*
+*Last updated for backend v2.1.1 / frontend v3.0.1 — added nodejs to Dockerfile runtime deps, fixed KG 3D viewport with ResizeObserver and proper containment, fixed started_at incorrectly cleared on job completion.*
