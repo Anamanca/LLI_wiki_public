@@ -37,7 +37,7 @@ export default function KnowledgeGraphPage() {
 
   return (
     <div className="flex h-[calc(100vh-4rem)]">
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0 overflow-hidden">
         <div className="flex items-center gap-2 px-4 py-3 border-b">
           <Network className="h-5 w-5 text-primary" />
           <h1 className="text-lg font-bold">{title}</h1>
@@ -47,7 +47,7 @@ export default function KnowledgeGraphPage() {
               : "Kéo xoay 3D · Scroll zoom · Click cụm để mở rộng"}
           </span>
         </div>
-        <div className="h-[calc(100%-49px)]">
+        <div className="h-[calc(100%-49px)] overflow-hidden">
           {expanding ? (
             <div className="flex items-center justify-center h-full">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
@@ -64,7 +64,7 @@ export default function KnowledgeGraphPage() {
       </div>
 
       {selectedNode && expandedType && (
-        <div className="w-64 shrink-0 border-l p-3 overflow-y-auto">
+        <div className="w-64 shrink-0 border-l p-3 overflow-y-auto relative z-10 bg-background">
           <KgNodeDetail
             nodeId={selectedNode}
             onClose={() => setSelectedNode(null)}

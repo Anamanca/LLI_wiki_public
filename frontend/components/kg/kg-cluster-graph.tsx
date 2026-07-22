@@ -115,6 +115,20 @@ export function ClusterGraph({ onNodeClick, expandedType, expandedData, onBack }
   const [error, setError] = useState<string | null>(null);
   const [forceGraphReady, setForceGraphReady] = useState(false);
   const fgRef = useRef<any>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [dims, setDims] = useState({ width: 800, height: 600 });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      if (entry) {
+        setDims({ width: entry.contentRect.width, height: entry.contentRect.height });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -165,7 +179,10 @@ export function ClusterGraph({ onNodeClick, expandedType, expandedData, onBack }
 
   const handleNodeClick = useCallback(
     (node: any) => {
-      if (expandedType) return;
+      if (expandedType) {
+        onNodeClick?.(node.id as string);
+        return;
+      }
       const clusterId = (node.id as string).replace("cluster_", "");
       onNodeClick?.(clusterId);
     },
@@ -205,7 +222,7 @@ export function ClusterGraph({ onNodeClick, expandedType, expandedData, onBack }
   }
 
   return (
-    <div className="h-full w-full relative">
+    <div className="h-full w-full relative overflow-hidden" id="kg-3d-container" ref={containerRef}>
       <ForceGraph3D
         key={expandedType ?? "cluster"}
         graphData={graphData}
@@ -225,8 +242,8 @@ export function ClusterGraph({ onNodeClick, expandedType, expandedData, onBack }
         linkLabel={(link: any) => (link as GraphLink3D).predicate.replace(/_/g, " ")}
         onNodeClick={handleNodeClick}
         backgroundColor="rgba(0,0,0,0)"
-        width={typeof window !== "undefined" ? window.innerWidth - 300 : 1200}
-        height={typeof window !== "undefined" ? window.innerHeight - 120 : 800}
+        width={dims.width}
+        height={dims.height}
         showNavInfo={false}
         cooldownTicks={50}
         onEngineStop={() => {

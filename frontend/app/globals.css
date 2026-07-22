@@ -91,4 +91,15 @@
   .hljs-selector-tag { color: #7ee787; }
   .hljs-meta { color: #8b949e; }
   .hljs-params { color: #c9d1d9; }
+
+/* Force knowledge graph containers to properly fill their parent dimensions */
+#kg-3d-container > div,
+#kg-3d-container .scene-container {
+  width: 100% !important;
+  height: 100% !important;
+}
+#kg-3d-container .scene-container > canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
 }
