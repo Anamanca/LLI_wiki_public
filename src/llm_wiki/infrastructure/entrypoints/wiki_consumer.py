@@ -361,7 +361,6 @@ async def process_wiki_job(item_id: UUID) -> None:
 
         # --- Complete ---
         item.status = "completed"
-        item.started_at = None
         item.error_message = None
         await db.commit()
 
