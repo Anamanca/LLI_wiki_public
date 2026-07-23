@@ -39,4 +39,5 @@ spec:
         - |
           mc alias set local http://minio.llm-wiki.svc.cluster.local:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
           mc mb local/llm-wiki-media --ignore-existing || true
+          mc mb local/llm-wiki-backups --ignore-existing || true
           echo 'MinIO buckets initialized'

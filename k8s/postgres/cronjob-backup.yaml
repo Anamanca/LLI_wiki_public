@@ -14,20 +14,53 @@ spec:
       template:
         spec:
           restartPolicy: OnFailure
-          containers:
-          - name: backup
+          # --- Stage 1: dump + compress + verify ---
+          initContainers:
+          - name: pg-dump
             image: pgvector/pgvector:pg16
             imagePullPolicy: IfNotPresent
             command:
             - sh
             - -c
             - |
-              echo "[$(date)] Starting pg_dumpall..."
-              PGPASSWORD="$PGPASSWORD" pg_dumpall -h postgres.llm-wiki.svc.cluster.local -U wiki -f /backups/backup-$(date +%Y%m%d-%H%M).sql
-              echo "[$(date)] Backup complete"
-              # Clean backups older than 3 days
-              find /backups -name "backup-*.sql" -mtime +3 -delete
-              ls -lh /backups/
+              set -e
+              TIMESTAMP=$(date +%Y%m%d-%H%M)
+              DATA_FILE="/backup-data/llm_wiki-${TIMESTAMP}.dump.gz"
+              GLOBALS_FILE="/backup-data/globals-${TIMESTAMP}.sql.gz"
+
+              echo "[$(date)] Starting pg_dump -Fc for llm_wiki ..."
+              PGPASSWORD="$PGPASSWORD" pg_dump \
+                -h postgres.llm-wiki.svc.cluster.local \
+                -U wiki \
+                -d llm_wiki \
+                -Fc \
+                --no-owner \
+                --no-acl \
+                | gzip > "$DATA_FILE"
+
+              # Verify dump is non-empty (fails if 0 bytes)
+              if [ ! -s "$DATA_FILE" ]; then
+                echo "[$(date)] FATAL: data dump file is empty" >&2
+                exit 1
+              fi
+              echo "[$(date)] Data dump OK: $(ls -lh "$DATA_FILE" | awk '{print $5}')"
+
+              # Dump global objects (roles, tablespaces) — small, but needed for full restore
+              echo "[$(date)] Dumping global objects ..."
+              PGPASSWORD="$PGPASSWORD" pg_dumpall \
+                -h postgres.llm-wiki.svc.cluster.local \
+                -U wiki \
+                --globals-only \
+                --no-role-passwords \
+                | gzip > "$GLOBALS_FILE"
+
+              if [ ! -s "$GLOBALS_FILE" ]; then
+                echo "[$(date)] FATAL: globals dump file is empty" >&2
+                exit 1
+              fi
+              echo "[$(date)] Globals dump OK: $(ls -lh "$GLOBALS_FILE" | awk '{print $5}')"
+
+              echo "[$(date)] All dumps completed successfully"
             env:
             - name: PGPASSWORD
               valueFrom:
@@ -35,10 +68,79 @@ spec:
                   name: llm-wiki-secrets
                   key: db-password
             volumeMounts:
-            - name: backups
-              mountPath: /backups
+            - name: backup-data
+              mountPath: /backup-data
+            resources:
+              requests:
+                memory: "64Mi"
+                cpu: "100m"
+              limits:
+                memory: "512Mi"
+                cpu: "1000m"
+
+          # --- Stage 2: upload to MinIO + cleanup ---
+          containers:
+          - name: upload-to-minio
+            image: minio/mc:latest
+            imagePullPolicy: IfNotPresent
+            command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "[$(date)] Connecting to MinIO ..."
+              mc alias set local http://minio.llm-wiki.svc.cluster.local:9000 \
+                "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+
+              # Ensure backup bucket exists
+              mc mb local/llm-wiki-backups --ignore-existing || true
+
+              # Upload all dump files from shared volume
+              echo "[$(date)] Uploading backups to MinIO ..."
+              UPLOADED=0
+              for f in /backup-data/llm_wiki-*.dump.gz /backup-data/globals-*.sql.gz; do
+                if [ -f "$f" ] && [ -s "$f" ]; then
+                  mc cp "$f" local/llm-wiki-backups/
+                  echo "[$(date)] Uploaded: $(basename "$f")"
+                  UPLOADED=$((UPLOADED + 1))
+                fi
+              done
+
+              if [ "$UPLOADED" -eq 0 ]; then
+                echo "[$(date)] FATAL: no backup files to upload" >&2
+                exit 1
+              fi
+
+              # Cleanup backups older than 5 days
+              echo "[$(date)] Removing backups older than 5 days from MinIO ..."
+              mc rm --recursive --older-than 5d --force local/llm-wiki-backups/ || true
+
+              echo "[$(date)] Current backups in MinIO:"
+              mc ls local/llm-wiki-backups/
+
+              echo "[$(date)] Backup job finished successfully"
+            env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: llm-wiki-secrets
+                  key: minio-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: llm-wiki-secrets
+                  key: minio-password
+            volumeMounts:
+            - name: backup-data
+              mountPath: /backup-data
+            resources:
+              requests:
+                memory: "64Mi"
+                cpu: "50m"
+              limits:
+                memory: "256Mi"
+                cpu: "500m"
+
           volumes:
-          - name: backups
-            hostPath:
-              path: /data/postgres-backups
-              type: DirectoryOrCreate
+          - name: backup-data
+            emptyDir: {}
