@@ -261,7 +261,7 @@ async def _k8s_cronjob_status(cronjob_name: str) -> tuple[str, str | None]:
         if failed:
             return "error", last_run
         if completion_time:
-            return "scheduled", last_run
+            return "completed", last_run
 
     return "scheduled", None
 
