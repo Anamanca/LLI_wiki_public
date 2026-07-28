@@ -7,6 +7,8 @@ import time
 from llm_wiki.application.ports.search.vector_search import EmbeddingServicePort
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
 from llm_wiki.domain.value_objects.embedding import Embedding
+from llm_wiki.infrastructure.telemetry.business_metrics import track_duration
+from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
 
 
 class TracedEmbeddingWrapper(EmbeddingServicePort):
@@ -41,15 +43,14 @@ class TracedEmbeddingWrapper(EmbeddingServicePort):
         t0 = time.time()
         try:
             embedding = await self._inner.embed(text)
-            latency_ms = (time.time() - t0) * 1000
+            latency_s = time.time() - t0
+            latency_ms = latency_s * 1000
+            get_metrics().histogram("embedding_duration_seconds", latency_s, {"model": self._model})
             await self._telemetry.end_span(
                 span=span,
                 outputs={
                     "dimensions": embedding.dimensions if embedding else None,
                 },
-            )
-            await self._telemetry.add_metadata(
-                span=span,
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "model": self._model,
@@ -58,14 +59,14 @@ class TracedEmbeddingWrapper(EmbeddingServicePort):
             return embedding
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
     async def embed_batch(self, texts: list[str]) -> list[Embedding]:
@@ -89,9 +90,6 @@ class TracedEmbeddingWrapper(EmbeddingServicePort):
                     "embedding_count": len(embeddings),
                     "dimensions": embeddings[0].dimensions if embeddings else None,
                 },
-            )
-            await self._telemetry.add_metadata(
-                span=span,
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "model": self._model,
@@ -100,12 +98,12 @@ class TracedEmbeddingWrapper(EmbeddingServicePort):
             return embeddings
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise

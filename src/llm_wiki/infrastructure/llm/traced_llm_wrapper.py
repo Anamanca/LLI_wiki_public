@@ -8,6 +8,7 @@ from typing import Any
 
 from llm_wiki.application.ports.search.vector_search import LLMClientPort
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
+from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter, track_duration
 
 
 def _redacted_messages(messages: list[dict]) -> list[dict]:
@@ -66,15 +67,17 @@ class TracedLLMWrapper(LLMClientPort):
             latency_ms = (time.time() - t0) * 1000
             usage = getattr(self._inner, "last_usage", None)
             self.last_usage = usage
+            if usage:
+                if usage.get("prompt_tokens"):
+                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "input"}, usage["prompt_tokens"])
+                if usage.get("completion_tokens"):
+                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "output"}, usage["completion_tokens"])
             await self._telemetry.end_span(
                 span=span,
                 outputs={
                     "answer_length": len(answer),
                     "answer_preview": answer[:200],
                 },
-            )
-            await self._telemetry.add_metadata(
-                span=span,
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "tokens_used": usage.get("total_tokens") if usage else None,
@@ -85,14 +88,15 @@ class TracedLLMWrapper(LLMClientPort):
             return answer
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            inc_counter("llm_api_errors_total", {"provider": self._model})
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
     async def chat_completion_raw(
@@ -123,6 +127,11 @@ class TracedLLMWrapper(LLMClientPort):
             latency_ms = (time.time() - t0) * 1000
             usage = data.get("usage") if isinstance(data, dict) else None
             self.last_usage = usage
+            if usage:
+                if usage.get("prompt_tokens"):
+                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "input"}, usage["prompt_tokens"])
+                if usage.get("completion_tokens"):
+                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "output"}, usage["completion_tokens"])
             content = ""
             if isinstance(data, dict):
                 choices = data.get("choices", [{}])
@@ -134,9 +143,6 @@ class TracedLLMWrapper(LLMClientPort):
                     "answer_length": len(content),
                     "answer_preview": content[:200],
                 },
-            )
-            await self._telemetry.add_metadata(
-                span=span,
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "tokens_used": usage.get("total_tokens") if usage else None,
@@ -147,14 +153,15 @@ class TracedLLMWrapper(LLMClientPort):
             return data
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            inc_counter("llm_api_errors_total", {"provider": self._model})
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
     async def chat_completion_reasoning(
@@ -187,6 +194,11 @@ class TracedLLMWrapper(LLMClientPort):
             self.last_usage = usage
             content = result.get("content", "")
             reasoning_content = result.get("reasoning_content", "")
+            if usage:
+                if usage.get("prompt_tokens"):
+                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "input"}, usage["prompt_tokens"])
+                if usage.get("completion_tokens"):
+                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "output"}, usage["completion_tokens"])
             await self._telemetry.end_span(
                 span=span,
                 outputs={
@@ -194,9 +206,6 @@ class TracedLLMWrapper(LLMClientPort):
                     "answer_preview": content[:200],
                     "reasoning_content_length": len(reasoning_content),
                 },
-            )
-            await self._telemetry.add_metadata(
-                span=span,
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "tokens_used": usage.get("total_tokens") if usage else None,
@@ -207,14 +216,15 @@ class TracedLLMWrapper(LLMClientPort):
             return result
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            inc_counter("llm_api_errors_total", {"provider": self._model})
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
     async def chat_completion_stream(
@@ -248,15 +258,17 @@ class TracedLLMWrapper(LLMClientPort):
             latency_ms = (time.time() - t0) * 1000
             usage = getattr(self._inner, "last_usage", None)
             self.last_usage = usage
+            if usage:
+                if usage.get("prompt_tokens"):
+                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "input"}, usage["prompt_tokens"])
+                if usage.get("completion_tokens"):
+                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "output"}, usage["completion_tokens"])
             await self._telemetry.end_span(
                 span=span,
                 outputs={
                     "answer_length": len(full_answer),
                     "answer_preview": full_answer[:200],
                 },
-            )
-            await self._telemetry.add_metadata(
-                span=span,
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "tokens_used": usage.get("total_tokens") if usage else None,
@@ -266,12 +278,13 @@ class TracedLLMWrapper(LLMClientPort):
             )
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            inc_counter("llm_api_errors_total", {"provider": self._model})
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise

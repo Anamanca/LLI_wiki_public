@@ -6,6 +6,7 @@ import time
 
 from llm_wiki.application.ports.search.vector_search import CacheServicePort
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
+from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter
 
 
 class TracedCacheWrapper(CacheServicePort):
@@ -40,28 +41,30 @@ class TracedCacheWrapper(CacheServicePort):
         try:
             value = await self._inner.semantic_get(embedding, threshold)
             latency_ms = (time.time() - t0) * 1000
+            cache_hit = value is not None
+            if cache_hit:
+                inc_counter("cache_hit_total", {"cache_level": "semantic"})
+            else:
+                inc_counter("cache_miss_total", {"cache_level": "semantic"})
             await self._telemetry.end_span(
                 span=span,
-                outputs={"cache_hit": value is not None},
-            )
-            await self._telemetry.add_metadata(
-                span=span,
+                outputs={"cache_hit": cache_hit},
                 metadata={
                     "latency_ms": round(latency_ms, 2),
-                    "cache_hit": value is not None,
+                    "cache_hit": cache_hit,
                 },
             )
             return value
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
     async def semantic_set(
@@ -81,21 +84,21 @@ class TracedCacheWrapper(CacheServicePort):
         try:
             await self._inner.semantic_set(key, embedding, value, ttl)
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.end_span(span=span, outputs={"stored": True})
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                outputs={"stored": True},
                 metadata={"latency_ms": round(latency_ms, 2)},
             )
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
     # ── exact cache ──────────────────────────────────────────────────────
@@ -112,12 +115,13 @@ class TracedCacheWrapper(CacheServicePort):
             value = await self._inner.get(key)
             latency_ms = (time.time() - t0) * 1000
             cache_hit = value is not None
+            if cache_hit:
+                inc_counter("cache_hit_total", {"cache_level": "exact"})
+            else:
+                inc_counter("cache_miss_total", {"cache_level": "exact"})
             await self._telemetry.end_span(
                 span=span,
                 outputs={"cache_hit": cache_hit},
-            )
-            await self._telemetry.add_metadata(
-                span=span,
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "cache_hit": cache_hit,
@@ -126,14 +130,14 @@ class TracedCacheWrapper(CacheServicePort):
             return value
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
     async def set(self, key: str, value: str, ttl: int = 3600) -> None:
@@ -151,21 +155,21 @@ class TracedCacheWrapper(CacheServicePort):
         try:
             await self._inner.set(key, value, ttl)
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.end_span(span=span, outputs={"stored": True})
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                outputs={"stored": True},
                 metadata={"latency_ms": round(latency_ms, 2)},
             )
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
     async def delete(self, key: str) -> None:
@@ -179,21 +183,21 @@ class TracedCacheWrapper(CacheServicePort):
         try:
             await self._inner.delete(key)
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.end_span(span=span, outputs={"deleted": True})
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                outputs={"deleted": True},
                 metadata={"latency_ms": round(latency_ms, 2)},
             )
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
 

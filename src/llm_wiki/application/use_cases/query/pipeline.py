@@ -8,6 +8,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from llm_wiki.application.dto.query_dto import QueryInput
+from llm_wiki.application.ports.search.event_search_port import EventSearchPort
+from llm_wiki.application.ports.search.query_analyzer_port import (
+    QueryAnalysis,
+    QueryAnalyzerPort,
+)
+from llm_wiki.application.ports.search.query_rewriter_port import QueryRewriterPort
 from llm_wiki.application.ports.search.vector_search import (
     CacheServicePort,
     EmbeddingServicePort,
@@ -18,6 +24,8 @@ from llm_wiki.application.ports.search.vector_search import (
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
 from llm_wiki.domain.value_objects.embedding import Embedding, SearchResult
 from llm_wiki.domain.value_objects.time_range import TimeRange
+from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter
+from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
 
 root_logger = logging.getLogger()
 logger = logging.getLogger(__name__)
@@ -151,6 +159,108 @@ def _may_be_time_related(question: str) -> bool:
     return bool(_TIME_KEYWORDS.search(question))
 
 
+# ── Intent-driven retrieval weights (from 29_LLM_wiki production) ────────
+# Timeline questions emphasize events, general questions emphasize sections.
+
+INTENT_WEIGHTS: dict[str, dict[str, float]] = {
+    "current_state": {"events": 1.0, "sections": 0.7},
+    "historical":    {"events": 0.8, "sections": 0.5},
+    "timeline":      {"events": 1.0, "sections": 0.3},
+    "comparative":   {"events": 0.5, "sections": 0.8},
+    "general":       {"events": 0.4, "sections": 1.0},
+}
+
+# Fixed weights for non-intent-driven streams
+RRF_FIXED_WEIGHTS = {
+    "keyword_sections": 0.5,
+    "keyword_events": 0.3,
+}
+
+
+def _build_rrf_weights(intent: str) -> dict[str, float]:
+    """Return per-stream RRF weights driven by query intent."""
+    iw = INTENT_WEIGHTS.get(intent, INTENT_WEIGHTS["general"])
+    return {
+        "sections": iw["sections"],
+        "events": iw["events"],
+        **RRF_FIXED_WEIGHTS,
+    }
+
+
+def _weighted_rrf_fusion(
+    ranked_sets: dict[str, list[SearchResult]],
+    weights: dict[str, float],
+    k: int = 60,
+) -> list[SearchResult]:
+    """Merge ranked lists with per-stream weights via Reciprocal Rank Fusion.
+
+    Each stream's weight multiplies its RRF score: ``weight * 1/(k+rank)``.
+    Streams not present in *weights* default to weight 0.0 (excluded).
+    """
+    scores: dict[str, tuple[SearchResult, float]] = {}
+    for set_name, results in ranked_sets.items():
+        w = weights.get(set_name, 0.0)
+        if w <= 0.0 or not results:
+            continue
+        for rank, result in enumerate(results, start=1):
+            if result.content_id not in scores:
+                scores[result.content_id] = (result, 0.0)
+            _, existing = scores[result.content_id]
+            scores[result.content_id] = (result, existing + w * 1.0 / (k + rank))
+
+    sorted_items = sorted(scores.values(), key=lambda x: x[1], reverse=True)
+    return [item[0] for item in sorted_items]
+
+
+def _diversify(
+    docs: list[SearchResult],
+    max_per_source: int = 5,
+    max_per_page: int = 2,
+) -> list[SearchResult]:
+    """Cap documents per source and per page to avoid dominance by a single source."""
+    seen_sources: dict[str, int] = {}
+    seen_pages: dict[str, int] = {}
+    result: list[SearchResult] = []
+    for doc in docs:
+        src = doc.metadata.get("source_name", "") if doc.metadata else ""
+        page = doc.metadata.get("page_slug", "") if doc.metadata else ""
+        if seen_sources.get(src, 0) >= max_per_source:
+            continue
+        if page and seen_pages.get(page, 0) >= max_per_page:
+            continue
+        seen_sources[src] = seen_sources.get(src, 0) + 1
+        if page:
+            seen_pages[page] = seen_pages.get(page, 0) + 1
+        result.append(doc)
+    return result
+
+
+def _temporal_addendum(intent: str) -> str:
+    """Return intent-specific temporal instructions for the LLM synthesis prompt."""
+    if intent == "timeline":
+        return (
+            "\n\nLƯU Ý: Người dùng cần DIỄN BIẾN THEO THỜI GIAN. "
+            "Sắp xếp câu trả lời theo trình tự thời gian. "
+            "Mỗi mốc phải có ngày tháng năm cụ thể."
+        )
+    elif intent == "historical":
+        return (
+            "\n\nLƯU Ý: Người dùng hỏi về SỰ KIỆN TRONG QUÁ KHỨ. "
+            "Ghi rõ ngày tháng năm cụ thể cho mọi thông tin."
+        )
+    elif intent == "current_state":
+        return (
+            "\n\nLƯU Ý: Người dùng hỏi về TÌNH HÌNH HIỆN TẠI. "
+            "Ưu tiên thông tin mới nhất, ghi rõ ngày tháng."
+        )
+    elif intent == "comparative":
+        return (
+            "\n\nLƯU Ý: Người dùng muốn SO SÁNH. "
+            "Trình bày đối chiếu rõ ràng, ghi rõ thời điểm của từng dữ liệu."
+        )
+    return ""
+
+
 def _set_parent_on_wrappers(
     embedder: EmbeddingServicePort,
     vector_search: VectorSearchPort,
@@ -158,13 +268,21 @@ def _set_parent_on_wrappers(
     llm: LLMClientPort,
     cache: CacheServicePort,
     parent: TelemetrySpan,
+    rewriter: QueryRewriterPort | None = None,
+    analyzer: QueryAnalyzerPort | None = None,
+    event_search: EventSearchPort | None = None,
 ) -> None:
     """Wire the pipeline root span as parent for all traced wrappers.
 
     Each wrapper that exposes ``set_parent_span()`` will attach its own spans
     under *parent*, building a single tree on LangSmith.
     """
-    for wrapped in (embedder, vector_search, keyword_search, llm, cache):
+    for wrapped in (
+        embedder, vector_search, keyword_search, llm, cache,
+        rewriter, analyzer, event_search,
+    ):
+        if wrapped is None:
+            continue
         fn = getattr(wrapped, "set_parent_span", None)
         if callable(fn):
             fn(parent)
@@ -197,6 +315,9 @@ class QueryPipeline:
         llm: LLMClientPort,
         cache: CacheServicePort,
         telemetry: TelemetryPort | None = None,
+        rewriter: QueryRewriterPort | None = None,
+        analyzer: QueryAnalyzerPort | None = None,
+        event_search: EventSearchPort | None = None,
     ):
         self._embedder = embedder
         self._vector_search = vector_search
@@ -204,6 +325,9 @@ class QueryPipeline:
         self._llm = llm
         self._cache = cache
         self._telemetry = telemetry
+        self._rewriter = rewriter
+        self._analyzer = analyzer
+        self._event_search = event_search
 
     # ── Cache helpers (P1: normalization, P3: variable TTL) ────────────
 
@@ -229,15 +353,19 @@ class QueryPipeline:
         q_lower = question.lower()
         return any(re.search(p, q_lower) for p in _TIME_SENSITIVE_PATTERNS)
 
-    def _cache_key(self, question: str) -> str:
+    def _cache_key(self, question: str, source_id: str | None = None) -> str:
         """Build an exact-match cache key.
 
         Uses SHA256 of the normalized question.  Date is NOT embedded in the
         key — content invalidation is handled by the cache TTL, which is
         shorter for time-sensitive questions (see ``_cache_ttl``).
+
+        *source_id* is included when non-None so that queries scoped to
+        different sources never share a cache entry.
         """
         normalized = self._normalize_question(question)
-        return f"qa:v3:{hashlib.sha256(normalized.encode()).hexdigest()}"
+        scope = f":src-{source_id}" if source_id else ""
+        return f"qa:v3:{hashlib.sha256(normalized.encode()).hexdigest()}{scope}"
 
     def _cache_ttl(self, question: str) -> int:
         """Pick an appropriate TTL based on time-sensitivity.
@@ -249,9 +377,9 @@ class QueryPipeline:
 
     # ── Exact cache hit helper ─────────────────────────────────────────
 
-    async def _try_exact_cache(self, question: str) -> dict | None:
+    async def _try_exact_cache(self, question: str, source_id: str | None = None) -> dict | None:
         """Check exact-match cache. Returns parsed cached data or None on miss."""
-        cache_key = self._cache_key(question)
+        cache_key = self._cache_key(question, source_id=source_id)
         cached = await self._cache.get(cache_key)
         if cached:
             try:
@@ -346,10 +474,31 @@ class QueryPipeline:
         return [item[0] for item in sorted_items]
 
     def _build_context(self, results: list[SearchResult]) -> str:
+        """Build context for LLM synthesis with full date + source metadata.
+
+        Includes published_at so the LLM can reason about WHEN each document
+        was published — the #1 fix for time-related questions.
+        """
         context_parts = []
         for i, result in enumerate(results[:20], start=1):
             source = result.metadata.get("source_name", "unknown") if result.metadata else "unknown"
-            context_parts.append(f"[{i}] ({source}) {result.title}\n{result.content[:2000]}")
+            page_title = result.metadata.get("page_title", "") if result.metadata else ""
+            published_at = result.metadata.get("published_at", "") if result.metadata else ""
+            event_date = result.metadata.get("event_date", "") if result.metadata else ""
+
+            date_str = ""
+            if published_at and isinstance(published_at, str):
+                date_str = f", {published_at[:10]}"
+            elif published_at:
+                date_str = f", {str(published_at)[:10]}"
+            if event_date and isinstance(event_date, str):
+                date_str = f", sự kiện: {event_date[:10]}"
+
+            heading = f" {result.title}" if result.title else ""
+            prefix = f"[{i}]{heading} (nguồn: {source}{date_str})"
+            if page_title:
+                prefix += f" (trang: {page_title})"
+            context_parts.append(f"{prefix}\n{result.content[:2000]}")
         return "\n\n".join(context_parts)
 
     async def _retrieve_and_merge(
@@ -357,42 +506,74 @@ class QueryPipeline:
         input: QueryInput,
         query_embedding: Embedding,
         time_range: TimeRange | None,
-    ) -> tuple[list[SearchResult], list[SearchResult], list[SearchResult], dict[str, float]]:
-        """Run vector + keyword search and reciprocal rank fusion.
+        intent: str = "general",
+        rewritten_question: str | None = None,
+    ) -> tuple[dict[str, list[SearchResult]], list[SearchResult], dict[str, float]]:
+        """Run parallel multi-retrieval + weighted RRF fusion + diversity.
 
-        Tracing is emitted by the traced wrappers (TracedVectorSearchWrapper,
-        TracedKeywordSearchWrapper) — pipeline only measures wall-clock time.
+        Returns (all_result_sets, top_results_after_diversity, step_times).
         """
         step_times: dict[str, float] = {}
+        search_query = rewritten_question or input.question
 
-        vector_results, step_times["vector_search"] = await _timed(
-            lambda: self._vector_search.search_similar(
-                query_embedding,
-                top_k=input.top_k * 2,
-                source_id=input.source_id,
-                time_range=time_range,
-            ),
-        )
+        # Build parallel tasks — always at least vector + keyword sections
+        async def _vec_sections():
+            return await self._vector_search.search_similar(
+                query_embedding, top_k=input.top_k * 2,
+                source_id=input.source_id, time_range=time_range,
+            )
 
-        keyword_results, step_times["keyword_search"] = await _timed(
-            lambda: self._keyword_search.search_keyword(
-                input.question,
-                top_k=input.top_k,
-                time_range=time_range,
-            ),
-        )
+        async def _kw_sections():
+            return await self._keyword_search.search_keyword(
+                search_query, top_k=input.top_k, time_range=time_range,
+            )
 
-        def _merge():
-            merged = self._reciprocal_rank_fusion([vector_results, keyword_results])
-            return merged[: input.top_k]
+        tasks: list[tuple[str, Any]] = [
+            ("sections", _timed(_vec_sections)),
+            ("keyword_sections", _timed(_kw_sections)),
+        ]
 
-        top_results, step_times["merge"] = await _timed(_merge)
+        if self._event_search:
+            async def _vec_events():
+                return await self._event_search.search_events(
+                    query_embedding, top_k=input.top_k * 2, time_range=time_range,
+                )
 
-        return vector_results, keyword_results, top_results, step_times
+            async def _kw_events():
+                return await self._event_search.search_events_keyword(
+                    search_query, top_k=input.top_k, time_range=time_range,
+                )
+
+            tasks.append(("events", _timed(_vec_events)))
+            tasks.append(("keyword_events", _timed(_kw_events)))
+
+        # Run all tasks in parallel
+        coros = [t[1] for t in tasks]
+        results_raw = await asyncio.gather(*coros, return_exceptions=True)
+
+        result_sets: dict[str, list[SearchResult]] = {}
+        for (name, _), raw in zip(tasks, results_raw):
+            if isinstance(raw, Exception):
+                logger.warning("Search stream '%s' failed: %s", name, raw)
+                result_sets[name] = []
+                step_times[name] = 0.0
+            else:
+                result_sets[name], step_times[name] = raw
+
+        # Weighted RRF fusion
+        weights = _build_rrf_weights(intent)
+        merged = _weighted_rrf_fusion(result_sets, weights)
+
+        # Diversity cap
+        diversified = _diversify(merged, max_per_source=5, max_per_page=2)
+        top_results = diversified[:input.top_k]
+
+        return result_sets, top_results, step_times
 
     async def execute(self, input: QueryInput) -> dict:
         step_times: dict[str, float] = {}
         cache_hit = False
+        intent = "general"
         root_span: TelemetrySpan | None = None
         telemetry = self._telemetry
 
@@ -411,21 +592,29 @@ class QueryPipeline:
             _set_parent_on_wrappers(
                 self._embedder, self._vector_search, self._keyword_search,
                 self._llm, self._cache, root_span,
+                rewriter=self._rewriter,
+                analyzer=self._analyzer,
+                event_search=self._event_search,
             )
 
         # ── P1: exact-match cache with normalized key ──────────────────
         cached_data, step_times["cache_check"] = await _timed(
-            lambda: self._try_exact_cache(input.question)
+            lambda: self._try_exact_cache(input.question, source_id=input.source_id)
         )
 
         if cached_data:
             cache_hit = True
+            inc_counter("query_total", {"status": "success", "cache": "exact"})
             cached_data["cache_hit"] = True
             cached_data["pipeline_steps"] = step_times
             answer_text = cached_data.get("answer", "")
             if telemetry and root_span:
-                await telemetry.add_metadata(
+                await telemetry.end_span(
                     span=root_span,
+                    outputs={
+                        "answer_length": len(answer_text),
+                        "answer": answer_text,
+                    },
                     metadata={
                         "cache_hit": True,
                         "cache_type": "exact",
@@ -433,27 +622,30 @@ class QueryPipeline:
                         "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
                     },
                 )
-                await telemetry.end_span(
-                    span=root_span,
-                    outputs={
-                        "answer_length": len(answer_text),
-                        "answer": answer_text,
-                    },
-                )
             return cached_data
 
-        # ── Attempt embedding for semantic cache check (reused later) ──
+        # ── Query rewrite (resolve pronouns from chat history) ─────
+        rewritten = input.question
+        if self._rewriter and input.chat_history:
+            rewritten, step_times["rewrite"] = await _timed(
+                lambda: self._rewriter.rewrite(input.question, input.chat_history)
+            )
+            if rewritten != input.question:
+                logger.debug("Question rewritten: %r → %r", input.question[:80], rewritten[:80])
+
+        # ── Attempt embedding (uses rewritten question) ─────────────
         try:
             query_embedding, step_times["embed"] = await _timed(
-                lambda: self._embedder.embed(input.question),
+                lambda: self._embedder.embed(rewritten),
             )
         except Exception as exc:
+            inc_counter("query_total", {"status": "error", "cache": "n/a"})
             if telemetry and root_span:
-                await telemetry.add_metadata(
+                await telemetry.end_span(
                     span=root_span,
+                    error=str(exc),
                     metadata={"error_type": type(exc).__name__},
                 )
-                await telemetry.end_span(span=root_span, error=str(exc))
             raise
 
         # ── P2: semantic cache check ───────────────────────────────────
@@ -462,12 +654,17 @@ class QueryPipeline:
         )
         if sem_data:
             cache_hit = True
+            inc_counter("query_total", {"status": "success", "cache": "semantic"})
             sem_data["cache_hit"] = True
             sem_data["pipeline_steps"] = step_times
             answer_text = sem_data.get("answer", "")
             if telemetry and root_span:
-                await telemetry.add_metadata(
+                await telemetry.end_span(
                     span=root_span,
+                    outputs={
+                        "answer_length": len(answer_text),
+                        "answer": answer_text,
+                    },
                     metadata={
                         "cache_hit": True,
                         "cache_type": "semantic",
@@ -475,40 +672,61 @@ class QueryPipeline:
                         "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
                     },
                 )
-                await telemetry.end_span(
-                    span=root_span,
-                    outputs={
-                        "answer_length": len(answer_text),
-                        "answer": answer_text,
-                    },
-                )
             return sem_data
 
-        time_range = self._resolve_time_range(input)
-        if time_range:
-            logger.debug("Extracted time_range: %s → %s", time_range.start, time_range.end)
+        # ── Query analysis (intent + time_range + entities) ─────────
+        analysis = QueryAnalysis()
+        if self._analyzer:
+            analysis, step_times["analyze"] = await _timed(
+                lambda: self._analyzer.analyze(rewritten)
+            )
+            intent = analysis.intent
+            logger.debug(
+                "Query analysis: intent=%s time_range=%s entities=%d",
+                intent,
+                analysis.time_range.start if analysis.time_range else None,
+                len(analysis.entities),
+            )
 
-        _, _, top_results, search_step_times = await self._retrieve_and_merge(
-            input, query_embedding, time_range
+        # ── Resolve time_range (regex → LLM analysis → user-provided) ───
+        time_range = self._resolve_time_range(input)
+        if not time_range and analysis.time_range:
+            time_range = analysis.time_range
+        if time_range:
+            logger.debug("Time range: %s → %s", time_range.start, time_range.end)
+
+        # ── Multi-retrieval (parallel) + weighted RRF + diversity ───
+        _, top_results, search_step_times = await self._retrieve_and_merge(
+            input, query_embedding, time_range,
+            intent=intent, rewritten_question=rewritten,
         )
         step_times.update(search_step_times)
 
+        # ── Build context with dates ─────────────────────────────────
         context = self._build_context(top_results)
 
+        # ── System prompt with temporal addendum + today's date ─────
+        today_str = datetime.now(UTC).strftime("%Y-%m-%d")
         system_prompt = (
             "Bạn là một trợ lý nghiên cứu chuyên sâu. "
-            "Hãy trả lờI câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
-            "Câu trả lờI phảI bao gồm: "
+            "Hãy trả lời câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
+            "Câu trả lời phải bao gồm: "
             "(1) một câu tóm tắt ngắn gọn ở đầu; "
             "(2) phân tích chi tiết từng khía cạnh liên quan, "
             "kèm ví dụ cụ thể từ ngữ cảnh; "
-            "(3) giảI thích mốI liên hệ giữa các ý; "
-            "(4) kết luận tổng thể ở cuốI. "
+            "(3) giải thích mối liên hệ giữa các ý; "
+            "(4) kết luận tổng thể ở cuối. "
             "Trích dẫn nguồn bằng [N]. "
             "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
             "thay vì bịa đặt. "
-            "Hãy trả lờI đầy đủ, súc tích nhưng không sơ xài."
+            "Hãy trả lời đầy đủ, súc tích nhưng không sơ xài.\n\n"
+            f"LƯU Ý QUAN TRỌNG: Hôm nay là {today_str}. "
+            "Khi trả lời, PHẢI ghi rõ ngày tháng năm cụ thể cho mọi thông tin. "
+            "KHÔNG được dùng từ tương đối như 'gần đây', 'mới đây', "
+            "'cách đây vài tháng', 'trong thời gian gần đây'. "
+            "Luôn trích dẫn ngày tháng chính xác từ ngữ cảnh được cung cấp."
         )
+        system_prompt += _temporal_addendum(intent)
 
         messages = [{"role": "system", "content": system_prompt}]
         for h in (input.chat_history or [])[-6:]:
@@ -527,6 +745,7 @@ class QueryPipeline:
                 max_tokens=16384,
             ),
         )
+        get_metrics().histogram("llm_synthesis_duration_seconds", step_times["synthesize"])
         answer = llm_result.get("content", "")
 
         sources = [
@@ -538,6 +757,7 @@ class QueryPipeline:
                 "page_slug": r.metadata.get("page_slug") if r.metadata else None,
                 "source_name": r.metadata.get("source_name") if r.metadata else None,
                 "published_at": r.metadata.get("published_at") if r.metadata else None,
+                "event_date": r.metadata.get("event_date") if r.metadata else None,
             }
             for r in top_results[:5]
         ]
@@ -555,7 +775,7 @@ class QueryPipeline:
 
         # ── P3: variable TTL ───────────────────────────────────────────
         ttl = self._cache_ttl(input.question)
-        cache_key = self._cache_key(input.question)
+        cache_key = self._cache_key(input.question, source_id=input.source_id)
         result_json = json.dumps(result, default=str)
         _, step_times["cache_save"] = await _timed(
             lambda: self._cache.set(cache_key, result_json, ttl=ttl),
@@ -565,19 +785,8 @@ class QueryPipeline:
             lambda: self._cache.semantic_set(cache_key, query_embedding.vector, result_json, ttl=ttl),
         )
 
+        inc_counter("query_total", {"status": "success", "cache": "miss"})
         if telemetry and root_span:
-            await telemetry.add_metadata(
-                span=root_span,
-                metadata={
-                    "cache_hit": False,
-                    "cache_ttl": ttl,
-                    "tokens_used": tokens_used,
-                    "prompt_tokens": usage.get("prompt_tokens"),
-                    "completion_tokens": usage.get("completion_tokens"),
-                    "retrieved_sources_count": len(top_results),
-                    "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
-                },
-            )
             await telemetry.end_span(
                 span=root_span,
                 outputs={
@@ -585,12 +794,23 @@ class QueryPipeline:
                     "answer": answer,
                     "sources_count": len(sources),
                 },
+                metadata={
+                    "cache_hit": False,
+                    "cache_ttl": ttl,
+                    "intent": intent,
+                    "tokens_used": tokens_used,
+                    "prompt_tokens": usage.get("prompt_tokens"),
+                    "completion_tokens": usage.get("completion_tokens"),
+                    "retrieved_sources_count": len(top_results),
+                    "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
+                },
             )
 
         return result
 
     async def execute_stream(self, input: QueryInput):
         step_times: dict[str, float] = {}
+        intent = "general"
         root_span: TelemetrySpan | None = None
         telemetry = self._telemetry
 
@@ -611,17 +831,24 @@ class QueryPipeline:
             _set_parent_on_wrappers(
                 self._embedder, self._vector_search, self._keyword_search,
                 self._llm, self._cache, root_span,
+                rewriter=self._rewriter,
+                analyzer=self._analyzer,
+                event_search=self._event_search,
             )
 
         # ── P0: exact-match cache for stream endpoint ───────────────────
         cached_data, step_times["cache_check"] = await _timed(
-            lambda: self._try_exact_cache(input.question)
+            lambda: self._try_exact_cache(input.question, source_id=input.source_id)
         )
         if cached_data:
             yield self._build_cached_stream_event(cached_data)
             if telemetry and root_span:
-                await telemetry.add_metadata(
+                await telemetry.end_span(
                     span=root_span,
+                    outputs={
+                        "answer_length": len(cached_data.get("answer", "")),
+                        "answer": cached_data.get("answer", ""),
+                    },
                     metadata={
                         "cache_hit": True,
                         "cache_type": "exact",
@@ -629,18 +856,20 @@ class QueryPipeline:
                         "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
                     },
                 )
-                await telemetry.end_span(
-                    span=root_span,
-                    outputs={
-                        "answer_length": len(cached_data.get("answer", "")),
-                        "answer": cached_data.get("answer", ""),
-                    },
-                )
             return
 
         try:
+            # ── Query rewrite (resolve pronouns from chat history) ──
+            rewritten = input.question
+            if self._rewriter and input.chat_history:
+                rewritten, step_times["rewrite"] = await _timed(
+                    lambda: self._rewriter.rewrite(input.question, input.chat_history)
+                )
+                if rewritten != input.question:
+                    logger.debug("Stream: question rewritten: %r → %r", input.question[:80], rewritten[:80])
+
             query_embedding, step_times["embed"] = await _timed(
-                lambda: self._embedder.embed(input.question),
+                lambda: self._embedder.embed(rewritten),
             )
 
             # ── P2: semantic cache for stream endpoint ──────────────────
@@ -650,8 +879,12 @@ class QueryPipeline:
             if sem_data:
                 yield self._build_cached_stream_event(sem_data)
                 if telemetry and root_span:
-                    await telemetry.add_metadata(
+                    await telemetry.end_span(
                         span=root_span,
+                        outputs={
+                            "answer_length": len(sem_data.get("answer", "")),
+                            "answer": sem_data.get("answer", ""),
+                        },
                         metadata={
                             "cache_hit": True,
                             "cache_type": "semantic",
@@ -659,24 +892,35 @@ class QueryPipeline:
                             "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
                         },
                     )
-                    await telemetry.end_span(
-                        span=root_span,
-                        outputs={
-                            "answer_length": len(sem_data.get("answer", "")),
-                            "answer": sem_data.get("answer", ""),
-                        },
-                    )
                 return
 
+            # ── Query analysis (intent + time_range + entities) ──────
+            analysis = QueryAnalysis()
+            if self._analyzer:
+                analysis, step_times["analyze"] = await _timed(
+                    lambda: self._analyzer.analyze(rewritten)
+                )
+                intent = analysis.intent
+                logger.debug(
+                    "Stream: query analysis: intent=%s time_range=%s",
+                    intent,
+                    analysis.time_range.start if analysis.time_range else None,
+                )
+
+            # ── Resolve time_range ──────────────────────────────────
             async def _resolve_time():
                 return await self._resolve_time_range_async(input)
 
             time_range, step_times["time_resolution"] = await _timed(_resolve_time)
+            if not time_range and analysis.time_range:
+                time_range = analysis.time_range
             if time_range:
                 logger.debug("Extracted time_range: %s → %s", time_range.start, time_range.end)
 
-            _, _, top_results, search_step_times = await self._retrieve_and_merge(
-                input, query_embedding, time_range
+            # ── Multi-retrieval (parallel) + weighted RRF + diversity ───
+            _, top_results, search_step_times = await self._retrieve_and_merge(
+                input, query_embedding, time_range,
+                intent=intent, rewritten_question=rewritten,
             )
             step_times.update(search_step_times)
 
@@ -684,20 +928,27 @@ class QueryPipeline:
 
             context = self._build_context(top_results)
 
+            today_str_stream = datetime.now(UTC).strftime("%Y-%m-%d")
             system_prompt = (
                 "Bạn là một trợ lý nghiên cứu chuyên sâu. "
-                "Hãy trả lờI câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
-                "Câu trả lờI phảI bao gồm: "
+                "Hãy trả lời câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
+                "Câu trả lời phải bao gồm: "
                 "(1) một câu tóm tắt ngắn gọn ở đầu; "
                 "(2) phân tích chi tiết từng khía cạnh liên quan, "
                 "kèm ví dụ cụ thể từ ngữ cảnh; "
-                "(3) giảI thích mốI liên hệ giữa các ý; "
-                "(4) kết luận tổng thể ở cuốI. "
+                "(3) giải thích mối liên hệ giữa các ý; "
+                "(4) kết luận tổng thể ở cuối. "
                 "Trích dẫn nguồn bằng [N]. "
                 "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
                 "thay vì bịa đặt. "
-                "Hãy trả lờI đầy đủ, súc tích nhưng không sơ xài."
+                "Hãy trả lời đầy đủ, súc tích nhưng không sơ xài.\n\n"
+                f"LƯU Ý QUAN TRỌNG: Hôm nay là {today_str_stream}. "
+                "Khi trả lời, PHẢI ghi rõ ngày tháng năm cụ thể cho mọi thông tin. "
+                "KHÔNG được dùng từ tương đối như 'gần đây', 'mới đây', "
+                "'cách đây vài tháng', 'trong thời gian gần đây'. "
+                "Luôn trích dẫn ngày tháng chính xác từ ngữ cảnh được cung cấp."
             )
+            system_prompt += _temporal_addendum(intent)
 
             stream_messages = [{"role": "system", "content": system_prompt}]
             for h in (input.chat_history or [])[-6:]:
@@ -713,14 +964,16 @@ class QueryPipeline:
 
             t0_synth = time.time()
             root_logger.warning(
-                "[STREAM] calling chat_completion_reasoning for: %s...", input.question[:50]
+                "[STREAM] calling chat_completion_stream for: %s...", input.question[:50]
             )
-            llm_result = await self._llm.chat_completion_reasoning(
+            full_answer = ""
+            async for token in self._llm.chat_completion_stream(
                 messages=stream_messages,
                 temperature=0.3,
                 max_tokens=16384,
-            )
-            full_answer = llm_result.get("content", "")
+            ):
+                full_answer += token
+                yield {"type": "token", "data": token}
             step_times["synthesize"] = time.time() - t0_synth
             root_logger.warning("[STREAM] answer_len=%d", len(full_answer))
 
@@ -738,12 +991,13 @@ class QueryPipeline:
                     "page_slug": r.metadata.get("page_slug") if r.metadata else None,
                     "source_name": r.metadata.get("source_name") if r.metadata else None,
                     "published_at": r.metadata.get("published_at") if r.metadata else None,
+                    "event_date": r.metadata.get("event_date") if r.metadata else None,
                 }
                 for r in top_results[:5]
             ]
 
             # ── P3: save to both cache layers with variable TTL ──────────
-            cache_key = self._cache_key(input.question)
+            cache_key = self._cache_key(input.question, source_id=input.source_id)
             ttl = self._cache_ttl(input.question)
             cache_value = json.dumps(
                 {
@@ -758,23 +1012,21 @@ class QueryPipeline:
             await self._cache.semantic_set(cache_key, query_embedding.vector, cache_value, ttl=ttl)
 
             if telemetry and root_span:
-                await telemetry.add_metadata(
-                    span=root_span,
-                    metadata={
-                        "cache_ttl": ttl,
-                        "tokens_used": tokens_used,
-                        "prompt_tokens": usage.get("prompt_tokens"),
-                        "completion_tokens": usage.get("completion_tokens"),
-                        "retrieved_sources_count": len(top_results),
-                        "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
-                    },
-                )
                 await telemetry.end_span(
                     span=root_span,
                     outputs={
                         "answer_length": len(full_answer),
                         "answer": full_answer,
                         "sources_count": len(sources),
+                    },
+                    metadata={
+                        "cache_ttl": ttl,
+                        "intent": intent,
+                        "tokens_used": tokens_used,
+                        "prompt_tokens": usage.get("prompt_tokens"),
+                        "completion_tokens": usage.get("completion_tokens"),
+                        "retrieved_sources_count": len(top_results),
+                        "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
                     },
                 )
 
@@ -788,10 +1040,11 @@ class QueryPipeline:
                 },
             }
         except Exception as exc:
+            inc_counter("query_total", {"status": "error", "cache": "n/a"})
             if telemetry and root_span:
-                await telemetry.add_metadata(
+                await telemetry.end_span(
                     span=root_span,
+                    error=str(exc),
                     metadata={"error_type": type(exc).__name__},
                 )
-                await telemetry.end_span(span=root_span, error=str(exc))
             raise

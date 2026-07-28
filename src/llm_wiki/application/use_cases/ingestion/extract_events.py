@@ -50,19 +50,16 @@ class ExtractEventsUseCase:
                 await self._telemetry.end_span(
                     span=span,
                     outputs={"event_count": len(result)},
-                )
-                await self._telemetry.add_metadata(
-                    span=span,
                     metadata={"latency_ms": (datetime.utcnow() - t0).total_seconds() * 1000},
                 )
             return result
         except Exception as exc:
             if span:
-                await self._telemetry.add_metadata(
+                await self._telemetry.end_span(
                     span=span,
+                    error=str(exc),
                     metadata={"error_type": type(exc).__name__},
                 )
-                await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
     async def _run_extraction(

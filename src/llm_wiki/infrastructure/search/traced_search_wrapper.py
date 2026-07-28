@@ -12,6 +12,7 @@ from llm_wiki.application.ports.search.vector_search import (
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
 from llm_wiki.domain.value_objects.embedding import Embedding, SearchResult
 from llm_wiki.domain.value_objects.time_range import TimeRange
+from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
 
 
 def _result_summary(results: list[SearchResult]) -> list[dict[str, Any]]:
@@ -122,29 +123,28 @@ class TracedVectorSearchWrapper(VectorSearchPort):
             if source_id is not None:
                 kwargs["source_id"] = source_id
             results = await method(**kwargs)
-            latency_ms = (time.time() - t0) * 1000
+            latency_s = time.time() - t0
+            latency_ms = latency_s * 1000
+            get_metrics().histogram("vector_search_duration_seconds", latency_s)
             await self._telemetry.end_span(
                 span=span,
                 outputs={
                     "result_count": len(results),
                     "results": _result_summary(results),
                 },
-            )
-            await self._telemetry.add_metadata(
-                span=span,
                 metadata={"latency_ms": round(latency_ms, 2)},
             )
             return results
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise
 
 
@@ -191,27 +191,26 @@ class TracedKeywordSearchWrapper(KeywordSearchPort):
                 top_k=top_k,
                 time_range=time_range,
             )
-            latency_ms = (time.time() - t0) * 1000
+            latency_s = time.time() - t0
+            latency_ms = latency_s * 1000
+            get_metrics().histogram("keyword_search_duration_seconds", latency_s)
             await self._telemetry.end_span(
                 span=span,
                 outputs={
                     "result_count": len(results),
                     "results": _result_summary(results),
                 },
-            )
-            await self._telemetry.add_metadata(
-                span=span,
                 metadata={"latency_ms": round(latency_ms, 2)},
             )
             return results
         except Exception as exc:
             latency_ms = (time.time() - t0) * 1000
-            await self._telemetry.add_metadata(
+            await self._telemetry.end_span(
                 span=span,
+                error=str(exc),
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "error_type": type(exc).__name__,
                 },
             )
-            await self._telemetry.end_span(span=span, error=str(exc))
             raise

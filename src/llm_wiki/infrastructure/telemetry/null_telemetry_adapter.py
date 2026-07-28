@@ -34,6 +34,7 @@ class NullTelemetryAdapter(TelemetryPort):
         span: TelemetrySpan,
         outputs: dict[str, Any] | None = None,
         error: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         return None
 

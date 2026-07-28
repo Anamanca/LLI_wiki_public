@@ -44,8 +44,15 @@ class TelemetryPort(ABC):
         span: TelemetrySpan,
         outputs: dict[str, Any] | None = None,
         error: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """End a span, optionally recording outputs or an error message."""
+        """End a span, optionally recording outputs, error, and extra metadata.
+
+        *metadata* is merged into the span BEFORE the underlying run is
+        finalized, guaranteeing it reaches the observability backend.  Callers
+        should prefer this over separate ``add_metadata`` calls that race with
+        ``end_span``.
+        """
 
     @abstractmethod
     async def add_metadata(self, span: TelemetrySpan, metadata: dict[str, Any]) -> None:
