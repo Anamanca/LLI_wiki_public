@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef } from "react";
 import type { Citation, SourceUsage } from "@/types";
 
-type QueryStatus = "processing" | "retrieving" | "thinking" | "summarizing" | null;
+type QueryStatus = "processing" | "retrieving" | "thinking" | "summarizing" | "caching" | "refining" | null;
 
 interface StreamState {
   answer: string;
@@ -18,7 +18,9 @@ const STATUS_LABELS: Record<Exclude<QueryStatus, null>, string> = {
   processing: "Đang phân tích câu hỏi...",
   retrieving: "Đang tìm kiếm tài liệu...",
   thinking: "Đang suy luận...",
-  summarizing: "Đang tổng hợp câu trả lờI...",
+  summarizing: "Đang tổng hợp câu trả lời...",
+  caching: "Đang lưu cache...",
+  refining: "Đang cải thiện câu trả lời...",
 };
 
 export function useQueryStream() {
@@ -98,10 +100,17 @@ export function useQueryStream() {
                 if (status && status in STATUS_LABELS) {
                   setState((prev) => ({ ...prev, status }));
                 }
+              } else if (payload.type === "token") {
+                // Accumulate streamed tokens in real time so the user sees
+                // the answer building up before the final "complete" event.
+                const token = typeof payload.data === "string" ? payload.data : "";
+                setState((prev) => ({ ...prev, answer: prev.answer + token }));
               } else if (payload.type === "complete") {
                 setState((prev) => ({
                   ...prev,
-                  answer: payload.answer || "",
+                  // Only override answer if the complete payload carries one
+                  // (the stream may have already built it via token events).
+                  answer: payload.answer || prev.answer,
                   citations: payload.citations || [],
                   sourcesUsed: payload.sources_used || [],
                   loading: false,

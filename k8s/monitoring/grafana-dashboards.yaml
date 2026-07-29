@@ -1,0 +1,123 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: llm-wiki
+  labels:
+    grafana_dashboard: "1"
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+    - name: default
+      orgId: 1
+      folder: ''
+      type: file
+      disableDeletion: true
+      editable: false
+      options:
+        path: /etc/grafana/provisioning/dashboards
+
+  red-dashboard.json: |
+    {
+      "title": "RED — HTTP Overview",
+      "uid": "llm-wiki-red",
+      "panels": [
+        {
+          "id": 1, "title": "Request Rate", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [{"expr": "sum(rate(http_requests_total[5m]))", "legendFormat": "rps"}]
+        },
+        {
+          "id": 2, "title": "Error Rate (5xx)", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [{"expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m]))", "legendFormat": "error rate"}]
+        },
+        {
+          "id": 3, "title": "P95 Latency", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [{"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))", "legendFormat": "p95 {{path}}"}]
+        },
+        {
+          "id": 4, "title": "Request Rate by Endpoint", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [{"expr": "sum(rate(http_requests_total[5m])) by (path, method)", "legendFormat": "{{method}} {{path}}"}]
+        },
+        {
+          "id": 5, "title": "Status Code Distribution", "type": "piechart", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "targets": [{"expr": "sum(rate(http_requests_total[5m])) by (status)", "legendFormat": "{{status}}"}]
+        }
+      ]
+    }
+
+  business-dashboard.json: |
+    {
+      "title": "Business — RAG Pipeline",
+      "uid": "llm-wiki-business",
+      "panels": [
+        {
+          "id": 1, "title": "Cache Hit Rate", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [{"expr": "sum(rate(cache_hit_total[5m])) / (sum(rate(cache_hit_total[5m])) + sum(rate(cache_miss_total[5m])))", "legendFormat": "hit rate"}]
+        },
+        {
+          "id": 2, "title": "LLM Tokens / Hour", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [{"expr": "sum(increase(llm_tokens_used_total[1h])) by (model)", "legendFormat": "{{model}}"}]
+        },
+        {
+          "id": 3, "title": "Query Count / min", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [{"expr": "sum(rate(query_total{status=\"success\"}[1m]))", "legendFormat": "queries/min"}]
+        },
+        {
+          "id": 4, "title": "Avg Synthesis Latency", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [{"expr": "rate(llm_synthesis_duration_seconds_sum[5m]) / rate(llm_synthesis_duration_seconds_count[5m])", "legendFormat": "avg synthesis (s)"}]
+        },
+        {
+          "id": 5, "title": "Pipeline Stage Durations (p95)", "type": "graph", "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+          "targets": [
+            {"expr": "histogram_quantile(0.95, sum(rate(embedding_duration_seconds_bucket[5m])) by (le))", "legendFormat": "embedding"},
+            {"expr": "histogram_quantile(0.95, sum(rate(vector_search_duration_seconds_bucket[5m])) by (le))", "legendFormat": "vector search"},
+            {"expr": "histogram_quantile(0.95, sum(rate(keyword_search_duration_seconds_bucket[5m])) by (le))", "legendFormat": "keyword search"},
+            {"expr": "histogram_quantile(0.95, sum(rate(llm_synthesis_duration_seconds_bucket[5m])) by (le))", "legendFormat": "LLM synthesis"}
+          ]
+        }
+      ]
+    }
+
+  ingestion-dashboard.json: |
+    {
+      "title": "Ingestion — Pipeline",
+      "uid": "llm-wiki-ingestion",
+      "panels": [
+        {
+          "id": 1, "title": "CPU Worker Outcomes", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {"expr": "sum(rate(ingestion_jobs_total{stage=~\"extract|cpu_done\"}[1h])) by (status)", "legendFormat": "{{status}}"}
+          ],
+          "description": "CPU worker job outcomes: classified=ok queued to wiki, requires_membership=members-only video, unavailable=private/deleted, scheduled=upcoming premiere, no_captions*=transcript extraction failed"
+        },
+        {
+          "id": 2, "title": "Wiki Consumer Outcomes", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {"expr": "sum(rate(ingestion_jobs_total{stage=~\"wiki|embed\"}[1h])) by (status)", "legendFormat": "{{status}}"}
+          ],
+          "description": "Wiki consumer job outcomes: completed=wiki page created/updated, failed=wiki or embedding error"
+        },
+        {
+          "id": 3, "title": "Queue Depth", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {"expr": "ingestion_queue_depth{queue=\"cpu\"}", "legendFormat": "cpu"},
+            {"expr": "ingestion_queue_depth{queue=\"wiki\"}", "legendFormat": "wiki"}
+          ]
+        },
+        {
+          "id": 4, "title": "Job Duration (p95)", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [{"expr": "histogram_quantile(0.95, sum(rate(ingestion_job_duration_seconds_bucket[5m])) by (le, stage))", "legendFormat": "{{stage}}"}]
+        },
+        {
+          "id": 5, "title": "Worker Heartbeat Age", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "targets": [{"expr": "time() - worker_heartbeat_age_seconds", "legendFormat": "{{worker_id}}"}],
+          "description": "Seconds since last successful heartbeat. Should stay < 30s. Spikes indicate worker is stuck or down.",
+          "thresholds": [{"value": 30, "color": "yellow"}, {"value": 60, "color": "red"}]
+        },
+        {
+          "id": 6, "title": "Worker CPU %", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "targets": [{"expr": "worker_cpu_percent", "legendFormat": "{{worker_id}}"}]
+        }
+      ]
+    }

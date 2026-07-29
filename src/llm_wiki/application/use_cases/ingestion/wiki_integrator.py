@@ -67,7 +67,9 @@ logger = logging.getLogger(__name__)
 # Constants (preserved from legacy)
 # ---------------------------------------------------------------------------
 
-COSINE_THRESHOLD = 0.75
+COSINE_THRESHOLD = 0.82
+MAX_MERGE_AGE_DAYS = 30
+MIN_ENTITY_JACCARD = 0.3
 CHUNK_SIZE = 80_000  # chars per chunk for parallel extraction
 OVERLAP = 10_000  # char overlap (12.5% of chunk) to avoid boundary cuts
 
@@ -475,6 +477,7 @@ async def _call_llm_json(
     temperature: float = 0.2,
     max_retries: int = 3,
     pass_label: str = "LLM",
+    max_tokens: int = 16384,
 ) -> dict[str, Any]:
     """Generic helper: call LLM via port, extract JSON, with retry on parse failure.
 
@@ -487,7 +490,7 @@ async def _call_llm_json(
     ]
     try:
         raw_resp = await asyncio.wait_for(
-            llm.chat_completion_raw(messages=messages, temperature=temperature, max_tokens=16384),
+            llm.chat_completion_raw(messages=messages, temperature=temperature, max_tokens=max_tokens),
             timeout=timeout,
         )
     except asyncio.TimeoutError:
@@ -512,7 +515,7 @@ async def _call_llm_json(
         ]
         try:
             raw_resp2 = await asyncio.wait_for(
-                llm.chat_completion_raw(messages=retry_messages, temperature=0.1, max_tokens=16384),
+                llm.chat_completion_raw(messages=retry_messages, temperature=0.1, max_tokens=max_tokens),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -752,6 +755,45 @@ async def _pass_analyze(
     )
 
 
+def _build_page_overview(markdown_content: str) -> str:
+    """Build a structured overview of ALL sections: title + first sentence.
+
+    Instead of raw truncation which leaves the LLM blind to ~70% of a large page,
+    this gives the LLM a complete structural map so it can avoid redundant sections.
+    """
+    import re
+
+    # Split on ## Section headers
+    sections = re.split(r"\n(?=## )", markdown_content)
+    overview_lines = []
+    for i, section in enumerate(sections):
+        section = section.strip()
+        if not section:
+            continue
+        # Extract header line
+        header_match = re.match(r"^## (.+)$", section, re.MULTILINE)
+        if not header_match:
+            continue
+        title = header_match.group(1).strip()
+        # Extract body (everything after the header line)
+        body_start = header_match.end()
+        body = section[body_start:].strip()
+        # First sentence: up to the first period, newline, or 150 chars
+        first_sentence = ""
+        for ch in body:
+            first_sentence += ch
+            if len(first_sentence) > 150 or (ch in ".!?\n" and len(first_sentence) > 20):
+                break
+        first_sentence = first_sentence.strip()
+        overview_lines.append(f"- [{i}] **{title}**: {first_sentence}")
+
+    if not overview_lines:
+        # Fallback: truncate raw content at 8000 chars
+        return markdown_content[:8000]
+
+    return f"Tong so section: {len(overview_lines)}\n\n" + "\n".join(overview_lines)
+
+
 async def _pass_write(
     llm: LLMClientPort,
     transcript_text: str,
@@ -810,7 +852,20 @@ async def _pass_write(
         user_parts.insert(1, frame_info)
 
     if existing_page_content:
-        user_parts.insert(0, f"TRANG WIKI HIEN CO (cap nhat trang nay):\n\n{existing_page_content[:8000]}")
+        # Build structured overview: all section titles + first sentence of each.
+        # Raw truncation at 8000 chars makes the LLM blind to ~70% of existing content
+        # on large pages. A structured summary lets the LLM see ALL sections.
+        overview = _build_page_overview(existing_page_content)
+        user_parts.insert(
+            0,
+            f"**CHE DO: CAP NHAT TRANG HIEN CO**\n"
+            f"Trang wiki da co {overview.count('[')} section. Day la danh sach TAT CA section da co:\n\n"
+            f"{overview}\n\n"
+            f"**QUAN TRONG:** Chi viet CAC SECTION MOI, khong co trong danh sach tren.\n"
+            f"KHONG viet lai, copy, hay tom tat cac section da co.\n"
+            f"Moi section moi phai bo sung goc nhin hoac du lieu CHUA CO trong trang hien tai.\n"
+            f"Neu transcript khong co gi moi, tra ve sections = [].",
+        )
 
     user_content = "\n\n---\n\n".join(user_parts)
     logger.info("Pass 3/3: Composing final wiki page (context: %d chars)", len(user_content))
@@ -821,6 +876,7 @@ async def _pass_write(
         temperature=0.3,
         timeout=timeout,
         pass_label="Pass3-Write",
+        max_tokens=32768,
     )
 
 
@@ -871,6 +927,81 @@ async def _vector_search_existing_pages(
         "Vector search found %d matches above threshold %.2f", len(matches), COSINE_THRESHOLD
     )
     return matches
+
+
+# ---------------------------------------------------------------------------
+# Multi-criteria merge decision
+# ---------------------------------------------------------------------------
+
+
+def _should_merge(
+    new_published_at: datetime | None,
+    existing_page: orm.Page,
+    new_entities: list[str],
+    similarity: float,
+) -> tuple[bool, str]:
+    """Decide whether a new video should UPDATE an existing page or CREATE a new one.
+
+    Replaces the single cosine-threshold decision with a multi-gate system:
+      GATE 1: Cosine similarity >= COSINE_THRESHOLD (0.82)
+      GATE 2: Time gap <= MAX_MERGE_AGE_DAYS (30 days)
+      GATE 3: Entity Jaccard overlap >= MIN_ENTITY_JACCARD (0.3)
+
+    Returns (should_merge: bool, reason: str).
+    """
+    # --- GATE 1: Cosine similarity ---
+    if similarity < COSINE_THRESHOLD:
+        return False, f"cosine too low ({similarity:.3f} < {COSINE_THRESHOLD})"
+
+    # --- GATE 2: Time proximity ---
+    if new_published_at and existing_page.published_at:
+        age_gap_days = abs((new_published_at - existing_page.published_at).days)
+        if age_gap_days > MAX_MERGE_AGE_DAYS:
+            return False, (
+                f"time gap too large ({age_gap_days}d > {MAX_MERGE_AGE_DAYS}d): "
+                f"new={new_published_at.date()} vs "
+                f"existing={existing_page.published_at.date()}"
+            )
+    elif new_published_at and not existing_page.published_at:
+        # Existing page has no date — still allow merge if cosine is high enough
+        logger.debug(
+            "Page '%s' has no published_at — skipping temporal gate",
+            existing_page.title,
+        )
+
+    # --- GATE 3: Entity overlap ---
+    existing_entities = existing_page.key_entities or []
+    if new_entities and existing_entities:
+        new_set = _normalize_entity_set(new_entities)
+        existing_set = _normalize_entity_set(existing_entities)
+        if new_set and existing_set:
+            intersection = new_set & existing_set
+            union = new_set | existing_set
+            jaccard = len(intersection) / len(union) if union else 0.0
+            if jaccard < MIN_ENTITY_JACCARD:
+                return False, (
+                    f"entity overlap too low (Jaccard={jaccard:.2f} < {MIN_ENTITY_JACCARD}): "
+                    f"new={sorted(new_set)[:5]}... vs "
+                    f"existing={sorted(existing_set)[:5]}..."
+                )
+
+    return True, (
+        f"all gates passed: cosine={similarity:.3f}, "
+        f"entities={len(new_entities)} new vs {len(existing_entities)} existing"
+    )
+
+
+def _normalize_entity_set(entities: list[str]) -> set[str]:
+    """Normalize entity names for comparison: lowercase, strip whitespace, remove type suffix."""
+    result: set[str] = set()
+    for e in entities:
+        if not e:
+            continue
+        # Strip "::type" suffix if present
+        name = e.split("::")[0].strip().lower()
+        if name:
+            result.add(name)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -946,7 +1077,7 @@ async def _create_page(
         source_item_id=source_item_id,
         title=data.get("page_title", "Untitled"),
         slug=slug,
-        content_markdown=data.get("content_markdown", ""),
+        content_markdown="",  # regenerated from sections below
         summary=data.get("summary", ""),
         summary_vector=summary_vector,
         published_at=published_at,
@@ -955,23 +1086,40 @@ async def _create_page(
     db.add(page)
     await db.flush()
 
+    valid_sections = []
     for idx, sec in enumerate(data.get("sections", [])):
+        sec_content = sec.get("content_markdown", "")
+        # Guard: reject thin/non-substantive section content (< 200 chars).
+        if not sec_content or len(sec_content.strip()) < 200:
+            logger.warning(
+                "Skipping section '%s' in new page: content too short (%d chars, min 200)",
+                sec.get("title", ""),
+                len(sec_content.strip()),
+            )
+            continue
         section = orm.PageSection(
             page_id=page.id,
             source_id=source_id,
             section_order=sec.get("order", idx),
             title=sec.get("title", ""),
-            content_markdown=sec.get("content_markdown", ""),
+            content_markdown=sec_content,
             source_ref=sec.get("source_ref", f"yt:{source_item_id}"),
         )
         db.add(section)
+        valid_sections.append(section)
+
+    # Regenerate page.content_markdown from all inserted sections.
+    if valid_sections:
+        page.content_markdown = "\n\n".join(
+            f"## {s.title}\n\n{s.content_markdown}" for s in valid_sections
+        )
 
     await db.flush()
     logger.info(
         "Created new page: %s (slug=%s) with %d sections",
         page.title,
         slug,
-        len(data.get("sections", [])),
+        len(valid_sections),
     )
     return page
 
@@ -983,9 +1131,15 @@ async def _update_page(
     source_item_id: UUID,
     db: AsyncSession,
 ) -> orm.Page:
-    """Update an existing wiki page - deduplicate sections from same source, append new ones."""
-    page.content_markdown = data.get("content_markdown", page.content_markdown)
-    page.summary = data.get("summary", page.summary)
+    """Update an existing wiki page - deduplicate sections from same source, append new ones.
+
+    IMPORTANT: Never blindly overwrite page.content_markdown with the LLM's value.
+    The page-level content_markdown is regenerated from ALL sections after the update,
+    so stale/corrupted values from the LLM output don't erase existing content.
+    """
+    # Only update summary from LLM — content_markdown is regenerated from sections below
+    if data.get("summary"):
+        page.summary = data.get("summary", page.summary)
     page.updated_at = datetime.now(timezone.utc)
 
     deleted = await db.execute(
@@ -1006,15 +1160,41 @@ async def _update_page(
     max_order = order_result.scalar() or 0
 
     for idx, sec in enumerate(data.get("sections", [])):
+        sec_content = sec.get("content_markdown", "")
+        # Guard: reject thin/non-substantive section content (< 200 chars).
+        # The WRITE prompt requires "TỐI THIỂU 200 từ" per section. Content below
+        # this threshold is either truncated, a thin duplicate of an existing
+        # section, or an LLM placeholder — not real content.
+        if not sec_content or len(sec_content.strip()) < 200:
+            logger.warning(
+                "Skipping section '%s': content too short (%d chars, min 200)",
+                sec.get("title", ""),
+                len(sec_content.strip()),
+            )
+            continue
         section = orm.PageSection(
             page_id=page.id,
             source_id=source_id,
-            section_order=max_order + idx + 1,
+            section_order=max_order + 1,
             title=sec.get("title", ""),
-            content_markdown=sec.get("content_markdown", ""),
+            content_markdown=sec_content,
             source_ref=sec.get("source_ref", f"yt:{source_item_id}"),
         )
         db.add(section)
+        max_order += 1
+
+    # Regenerate page.content_markdown from ALL sections (old + new) so the
+    # stored value always reflects the real content.
+    all_sections_result = await db.execute(
+        select(orm.PageSection)
+        .where(orm.PageSection.page_id == page.id)
+        .order_by(orm.PageSection.section_order)
+    )
+    all_sections = all_sections_result.scalars().all()
+    if all_sections:
+        page.content_markdown = "\n\n".join(
+            f"## {s.title}\n\n{s.content_markdown}" for s in all_sections
+        )
 
     await db.flush()
     logger.info(
@@ -1302,14 +1482,40 @@ class WikiIntegrator:
                     "description": asset.description or "",
                 })
 
-        # Step 5: Pass 2 + Pass 3 (with existing page context if match)
+        # Step 5: Pass 2 + Pass 3 (with existing page context if match passes multi-criteria gates)
+        # Extract entity names from classification for gate 3 (entity Jaccard)
+        new_entity_names: list[str] = []
+        if effective_classification.get("key_entities"):
+            ke_list = effective_classification["key_entities"]
+            if isinstance(ke_list, list):
+                new_entity_names = [
+                    k["name"] if isinstance(k, dict) else str(k)
+                    for k in ke_list
+                ]
+
+        best_match: orm.Page | None = None
+        matched_similarity: float = 0.0
         if matches:
-            best_match, similarity = matches[0]
-            logger.info(
-                "Match found for page '%s' (similarity=%.3f) - updating",
-                best_match.title,
-                similarity,
-            )
+            for candidate, sim in matches:
+                should_merge, reason = _should_merge(
+                    published_at_val, candidate, new_entity_names, sim,
+                )
+                if should_merge:
+                    best_match = candidate
+                    matched_similarity = sim
+                    logger.info(
+                        "Match accepted for page '%s': %s",
+                        best_match.title,
+                        reason,
+                    )
+                    break
+                logger.info(
+                    "Match rejected for page '%s': %s — trying next candidate",
+                    candidate.title,
+                    reason,
+                )
+
+        if best_match is not None:
             await _save_snapshot(best_match, source_item_id_val, db)
             await db.commit()
 
@@ -1321,12 +1527,18 @@ class WikiIntegrator:
                 for s in existing_sections_result.scalars().all()
             ]
 
+            # Build existing_page_content from ALL sections (not page.content_markdown,
+            # which can be stale/corrupted when prior updates failed).
+            existing_page_content = "\n\n".join(
+                f"## {s['title']}\n\n{s['content_markdown']}" for s in existing_sections
+            ) if existing_sections else best_match.content_markdown
+
             llm_result = await _run_synthesis_passes(
                 self._llm,
                 transcript_text,
                 effective_classification,
                 facts,
-                existing_page_content=best_match.content_markdown,
+                existing_page_content=existing_page_content,
                 frame_urls=frame_urls if frame_urls else None,
                 published_at=published_at_val,
             )
@@ -1336,19 +1548,13 @@ class WikiIntegrator:
 
             if effective_classification.get("domain"):
                 page.domain = effective_classification["domain"]
-            if effective_classification.get("key_entities"):
-                ke_list = effective_classification["key_entities"]
-                if isinstance(ke_list, list):
-                    ke_strs = [
-                        k["name"] if isinstance(k, dict) else str(k)
-                        for k in ke_list
-                    ]
-                    page.key_entities = ke_strs
+            if new_entity_names:
+                page.key_entities = new_entity_names
 
             action = "updated"
             page_id = str(page.id)
         else:
-            logger.info("No matching page found - creating new page")
+            logger.info("No matching page passed merge gates - creating new page")
             llm_result = await _run_synthesis_passes(
                 self._llm,
                 transcript_text,
@@ -1370,14 +1576,8 @@ class WikiIntegrator:
 
             if effective_classification.get("domain"):
                 page.domain = effective_classification["domain"]
-            if effective_classification.get("key_entities"):
-                ke_list = effective_classification["key_entities"]
-                if isinstance(ke_list, list):
-                    ke_strs = [
-                        k["name"] if isinstance(k, dict) else str(k)
-                        for k in ke_list
-                    ]
-                    page.key_entities = ke_strs
+            if new_entity_names:
+                page.key_entities = new_entity_names
 
             stmt = (
                 pg_insert(orm.PageSnapshot)
@@ -1408,7 +1608,7 @@ class WikiIntegrator:
         except Exception as exc:
             logger.warning("Event extraction/linking failed (non-fatal): %s", exc)
 
-        # Step 7: Handle page_links
+        # Step 7: Handle page_links — dedup via ON CONFLICT DO NOTHING
         links = llm_data.get("page_links", [])
         for link_info in links:
             target_slug = link_info.get("slug", "")
@@ -1418,13 +1618,21 @@ class WikiIntegrator:
                 select(orm.Page).where(orm.Page.slug == target_slug).limit(1)
             )
             target_page = target_result.scalar()
-            if target_page and target_page.id != page.id:
-                link = orm.PageLink(
+            # Skip self-links
+            if not target_page or target_page.id == page.id:
+                continue
+            relation_type = link_info.get("relation_type", "related")
+            # Use INSERT ... ON CONFLICT DO NOTHING to prevent duplicate links
+            stmt = (
+                pg_insert(orm.PageLink)
+                .values(
                     from_page_id=page.id,
                     to_page_id=target_page.id,
-                    relation_type=link_info.get("relation_type", "related"),
+                    relation_type=relation_type,
                 )
-                db.add(link)
+                .on_conflict_do_nothing(constraint="uq_page_links_from_to_relation")
+            )
+            await db.execute(stmt)
 
         # Step 8: Link media_assets to the page
         if media_assets:

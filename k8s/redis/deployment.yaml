@@ -26,6 +26,7 @@ spec:
         - ""
         ports:
         - containerPort: 6379
+          name: redis
         volumeMounts:
         - name: redis-data
           mountPath: /data
@@ -39,6 +40,17 @@ spec:
             command: ["valkey-cli", "ping"]
           initialDelaySeconds: 15
           periodSeconds: 30
+      - name: redis-exporter
+        image: oliver006/redis_exporter:v1.62.0
+        args:
+        - "--web.listen-address=:9121"
+        - "--redis.addr=localhost:6379"
+        ports:
+        - containerPort: 9121
+          name: metrics
+        resources:
+          requests: {memory: "16Mi", cpu: "5m"}
+          limits: {memory: "32Mi", cpu: "20m"}
       volumes:
       - name: redis-data
         hostPath:

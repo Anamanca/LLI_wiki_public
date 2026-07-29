@@ -14,6 +14,10 @@ spec:
     metadata:
       labels:
         app: wiki-consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8201"
+        prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 60
       initContainers:
@@ -115,6 +119,16 @@ spec:
             secretKeyRef:
               name: llm-wiki-secrets
               key: ALLOWED_TELEGRAM_CHAT_IDS
+        - name: ENABLE_METRICS
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: ENABLE_METRICS
+        - name: LOG_FORMAT
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LOG_FORMAT
         ports:
         - containerPort: 8201
         startupProbe:

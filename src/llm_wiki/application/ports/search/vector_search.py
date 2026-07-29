@@ -49,6 +49,7 @@ class LLMClientPort(ABC):
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        enable_thinking: bool = True,
     ) -> str: ...
 
     @abstractmethod

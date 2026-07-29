@@ -33,9 +33,14 @@ class OpenAIAdapter(LLMClientPort):
         """Return True when the configured model supports reasoning/thinking."""
         return self._model.startswith("deepseek-v4")
 
-    def _thinking_payload(self) -> dict:
-        """Return thinking parameter based on model and feature flag."""
-        if self._is_reasoning_model() and settings.reasoning_enabled:
+    def _thinking_payload(self, enable_thinking: bool = True) -> dict:
+        """Return thinking parameter based on model, feature flag, and caller preference.
+
+        Callers that don't benefit from chain-of-thought (e.g. JSON extraction,
+        classification) can pass ``enable_thinking=False`` to save tokens and
+        get a clean ``content`` field in the response.
+        """
+        if enable_thinking and self._is_reasoning_model() and settings.reasoning_enabled:
             return {"type": "enabled"}
         return {"type": "disabled"}
 
@@ -56,6 +61,7 @@ class OpenAIAdapter(LLMClientPort):
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        enable_thinking: bool = True,
     ) -> str:
         url = f"{self._base_url}/chat/completions"
         payload = {
@@ -63,18 +69,19 @@ class OpenAIAdapter(LLMClientPort):
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "thinking": self._thinking_payload(),
+            "thinking": self._thinking_payload(enable_thinking),
         }
         async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(url, headers=self._headers(), json=payload)
             resp.raise_for_status()
             data = resp.json()
             self.last_usage = self._extract_usage(data)
-            content = data["choices"][0]["message"].get("content", "")
+            message = (data.get("choices") or [{}])[0].get("message") or {}
+            content = message.get("content", "")
             # Fallback for reasoning models that return reasoning_content
             # when content is empty or missing.
             if not content:
-                content = data["choices"][0]["message"].get("reasoning_content", "")
+                content = message.get("reasoning_content", "")
                 if content:
                     logger.warning("Using reasoning_content as fallback for empty content")
             return content
@@ -84,6 +91,7 @@ class OpenAIAdapter(LLMClientPort):
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        enable_thinking: bool = True,
     ) -> dict:
         url = f"{self._base_url}/chat/completions"
         payload = {
@@ -91,7 +99,7 @@ class OpenAIAdapter(LLMClientPort):
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "thinking": self._thinking_payload(),
+            "thinking": self._thinking_payload(enable_thinking),
         }
         async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(url, headers=self._headers(), json=payload)
@@ -112,7 +120,7 @@ class OpenAIAdapter(LLMClientPort):
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        message = data.get("choices", [{}])[0].get("message", {})
+        message = (data.get("choices") or [{}])[0].get("message") or {}
         content = message.get("content", "") or ""
         reasoning_content = message.get("reasoning_content", "") or ""
         if not content and reasoning_content:
@@ -165,6 +173,15 @@ class OpenAIAdapter(LLMClientPort):
                                     if content:
                                         content_count += 1
                                         yield content
+                                        continue
+                                    # deepseek-v4 reasoning models may emit the final
+                                    # answer inside reasoning_content deltas even when
+                                    # thinking is disabled.  Fall back so the stream
+                                    # never produces zero visible tokens.
+                                    reasoning = delta.get("reasoning_content")
+                                    if reasoning:
+                                        content_count += 1
+                                        yield reasoning
                                     continue
                                 # Usage chunk appears when choices is empty and usage is present.
                                 usage = chunk.get("usage")

@@ -9,12 +9,15 @@ from llm_wiki.domain.value_objects.time_range import TimeRange
 
 logger = logging.getLogger(__name__)
 
+# Default recency decay — adapters accept an optional intent-driven override.
+# See pipeline._RECENCY_LAMBDA_MAP for per-intent values.
 RECENCY_LAMBDA = 0.01
 
 
 class PgVectorSearchAdapter(VectorSearchPort):
-    def __init__(self, session: AsyncSession):
+    def __init__(self, session: AsyncSession, recency_lambda: float | None = None):
         self._session = session
+        self._recency_lambda = recency_lambda if recency_lambda is not None else RECENCY_LAMBDA
 
     def _vector_to_str(self, vector: list[float]) -> str:
         return "[" + ",".join(str(v) for v in vector) + "]"
@@ -50,7 +53,7 @@ class PgVectorSearchAdapter(VectorSearchPort):
                    p.title AS page_title, p.slug AS page_slug, s.name AS source_name,
                    p.published_at,
                    (1 - (ps.section_vector <=> :vec)) *
-                   EXP(-{RECENCY_LAMBDA} * GREATEST(0,
+                   EXP(-{self._recency_lambda} * GREATEST(0,
                        EXTRACT(EPOCH FROM (NOW() - p.published_at)) / 86400.0
                    )) AS similarity
             FROM page_sections ps

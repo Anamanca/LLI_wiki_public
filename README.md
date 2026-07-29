@@ -1,6 +1,6 @@
 # LLM Wiki — Clean Architecture RAG Knowledge System
 
-> **Project version:** backend `2.0.0`, frontend `3.0.0`  
+> **Project version:** backend `2.2.0`, frontend `3.0.1`  
 > **Primary language:** Python 3.12+ (backend), TypeScript / Next.js 14 (frontend)  
 > **Architecture:** Clean Architecture (a.k.a. Onion / Ports & Adapters) with FastAPI.  
 > **Agent notes:** see root [`AGENTS.md`](AGENTS.md), [`frontend/AGENTS.md`](frontend/AGENTS.md), and [`k8s/AGENTS.md`](k8s/AGENTS.md) for environment-specific gotchas.
@@ -11,12 +11,22 @@
 
 LLM Wiki is a knowledge-aggregation system that:
 
-1. **Ingests** multi-source content (currently YouTube videos via transcript / manual upload).
-2. **Converts** raw content into structured wiki pages (`pages` + `page_sections`).
+1. **Ingests** multi-source content (YouTube videos via transcript, manual upload).
+2. **Converts** raw content into structured wiki pages (`pages` + `page_sections`) via a 3-pass LLM integrator.
 3. **Extracts** entities, events, and relations into a knowledge graph.
-4. **Answers** natural-language questions through a RAG pipeline that combines vector search (pgvector) and full-text search (PostgreSQL `tsvector`), with optional time-range filtering and recency scoring, then synthesizes an answer via an OpenAI-compatible LLM.
-5. **Observes** pipeline execution via optional LangSmith tracing and evaluation adapters.
-6. **Exposes** everything through a Next.js 14 admin dashboard: chat, wiki browser, source management, progress monitoring, knowledge graph, cron-job administration, and worker administration.
+4. **Answers** natural-language questions through an **agentic RAG pipeline** that combines:
+   - Vector search (pgvector HNSW) + full-text search (PostgreSQL `tsvector`) + event search + GraphRAG (entity→event traversal)
+   - Reciprocal Rank Fusion (RRF) over 5 retrieval streams
+   - Query analysis (intent, time_range, entities, keywords, bilingual `search_query`, sub_questions, language)
+   - Query rewriting (pronoun resolution from chat history) + query expansion (synonyms)
+   - LLM-based reranking (Cross-Encoder optional)
+   - **Self-reflective loop**: evaluate answer quality → retry with alternate strategies (HyDE, decompose, expand) if below threshold
+   - Three-tier caching: exact match, semantic (cosine ≥0.80), variable TTL (1h time-sensitive / 24h factual)
+   - Temporal filtering with recency decay scoring
+   - Multi-provider LLM backend (OpenCode Zen, Gemini) with API key rotation
+5. **Observes** pipeline execution via optional LangSmith tracing and Prometheus metrics (Port/Adapter pattern).
+6. **Monitors** itself via an in-cluster Prometheus + Grafana + Loki + AlertManager stack with Telegram alerting.
+7. **Exposes** everything through a Next.js 14 admin dashboard: chat, wiki browser, source management, progress monitoring, knowledge graph, cron-job administration, and worker administration.
 
 This README is written for **AI agents and future developers**. It explains the architecture, the core patterns, and the rules you must follow when extending the codebase.
 
@@ -38,7 +48,8 @@ This README is written for **AI agents and future developers**. It explains the 
 │  routes/        use_cases/      entities/   persistence/              │
 │  schemas/       ports/          value_objects  llm/                   │
 │  middleware/    dto/            exceptions.py   search/               │
-│                                                 embedding/            │
+│  metrics/                                       embedding/            │
+│                                                 telemetry/            │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    │
         ┌──────────────────────────┼──────────────────────────┐
@@ -47,12 +58,20 @@ This README is written for **AI agents and future developers**. It explains the 
 │  PostgreSQL  │  │  Redis (cache / queues)      │  │  Ollama       │
 │  + pgvector  │  │  Valkey 8                    │  │  bge-m3 embed │
 │  + tsvector  │  │                              │  │               │
-└──────────────┘  └─────────────────────────────┘  └───────────────┘
-        │
-        │  object storage
-┌───────▼──────┐
-│    MinIO     │
-└──────────────┘
+└──────┬───────┘  └─────────────────────────────┘  └───────────────┘
+       │
+       │  object storage
+┌──────▼──────┐
+│    MinIO    │
+└──────┬──────┘
+       │
+┌──────▼──────────────────────────────────────────────────────────────┐
+│  Monitoring Stack (in-cluster K8s)                                   │
+│  Prometheus (metrics pull) + Grafana (dashboards)                    │
+│  Loki + Promtail (log aggregation)                                   │
+│  AlertManager → Telegram                                             │
+│  Exporters: postgres_exporter, redis_exporter, ollama_exporter        │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key design decisions
@@ -61,10 +80,17 @@ This README is written for **AI agents and future developers**. It explains the 
 |----------|-----------|
 | **Clean Architecture** | Business logic (`domain` + `application`) is isolated from frameworks (FastAPI, SQLAlchemy, Redis, Ollama). You can swap databases or LLM providers without touching use cases. |
 | **Async-first** | FastAPI + SQLAlchemy async (`asyncpg`) + `httpx` for all external calls. |
-| **Hybrid search** | Vector search alone is brittle; combining `pgvector` cosine similarity with `tsvector` keyword search via Reciprocal Rank Fusion (RRF) improves recall. |
-| **Redis answer cache** | Three-tier caching: (1) exact-match via SHA256 of normalized question, (2) semantic cache via embedding cosine similarity (≥0.80), (3) variable TTL: 1h for time-sensitive questions, 24h for factual. Both `/api/query` and `/api/query/stream` (GUI chat) benefit. Cache failures are swallowed (degraded performance, not failure). |
+| **Multi-stream hybrid search** | 5 retrieval streams (pgvector dense, tsvector keyword, event dense, event keyword, GraphRAG entity→event) merged via Reciprocal Rank Fusion (RRF) with intent-aware weights. Diversity capping (max 5/source, 2/page) prevents single-source dominance. |
+| **Self-reflective (Agentic) RAG** | The pipeline evaluates its own answer (faithfulness, completeness, relevance 0–10) and retries with alternate strategies (HyDE, decompose, expand) if quality is below threshold. Controlled via `REASONING_ENABLED=true`. |
+| **Redis answer cache** | Three-tier caching: (1) exact-match via SHA256 of normalized question, (2) semantic cache via embedding cosine similarity (≥0.80), (3) variable TTL: 1h for time-sensitive questions, 24h for factual. Both `/api/query` and `/api/query/stream` benefit. Cache failures are swallowed (degraded performance, not failure). |
+| **Query analysis + keyword extraction** | 1 lightweight LLM call extracts intent, time_range, entities, keywords (bilingual VI+EN), key_phrases, `search_query` (OR-delimited for tsquery), sub_questions, and language. This single call powers RRF weighting, SQL time filters, keyword search input, decompose strategy, and bilingual system prompts — maximum value per LLM token. |
+| **Query rewriting + expansion** | Pronoun resolution via chat history (LLM): "Thế còn hôm qua?" → "Giá vàng ngày 28/07/2026". Synonym expansion for broader keyword recall. |
+| **LLM-based reranking** | After RRF merge, an LLM re-ranks top candidates for relevance. Optional Cross-Encoder (BAAI/bge-reranker-v2-m3) via `CROSS_ENCODER_ENABLED=true`. |
+| **Multi-provider LLM** | API key rotation across providers (OpenCode Zen, Gemini) with priority and rate-limit tracking. Configured per model tier: primary, fallback, chat, analyzer, evaluator. |
 | **Temporal filtering** | Questions like "trong tháng vừa qua" or "past 2 weeks" are parsed into a `TimeRange` and applied to both vector and keyword search; recency decay boosts newer pages. |
-| **Telemetry** | Optional LangSmith tracing spans every pipeline step (embedding, search, synthesis, cache). Disabled by default via `LANGSMITH_TRACING=false`. |
+| **Bilingual search + synthesis** | Search queries include both Vietnamese and English terms so both VI and EN content are retrieved. Answer language matches the user's question — detected by the analyzer LLM (primary) or regex on Vietnamese diacritics (zero-token fallback). System prompts switch between VI and EN at zero additional cost. |
+| **Telemetry** | Optional LangSmith tracing spans every pipeline step (query + ingestion). See [`docs/telemetry-implementation-strategy.md`](docs/telemetry-implementation-strategy.md) for the full trace tree architecture. Disabled by default via `LANGSMITH_TRACING=false`. |
+| **Observability** | Prometheus RED metrics + business metrics via `MetricsPort` ABC, structured JSON logging with `trace_id` correlation, Loki + Promtail for log aggregation, Grafana dashboards, AlertManager → Telegram alerting. All monitoring runs in-cluster (Kind/K3s). |
 | **Ports as abstract classes** | Every external service is hidden behind a port in `application/ports/`. Infrastructure provides concrete adapters. |
 | **Dependency injection** | `dependency-injector` wires singletons (embedder, LLM, cache, telemetry) and per-request factories (pipeline, use cases). |
 
@@ -86,10 +112,10 @@ This README is written for **AI agents and future developers**. It explains the 
 │   ├── infrastructure/                  # Concrete adapters (I/O, frameworks)
 │   │   ├── persistence/postgres/        # SQLAlchemy ORM, mappers, repositories
 │   │   ├── persistence/redis/           # Redis cache adapter
-│   │   ├── llm/                         # OpenAI-compatible LLM adapter
+│   │   ├── llm/                         # OpenAI-compatible LLM adapter + analyzers + reranker
 │   │   ├── embedding/                   # Ollama embedding adapter
-│   │   ├── search/                      # pgvector + tsvector search adapters
-│   │   ├── telemetry/                   # LangSmith / null telemetry adapters
+│   │   ├── search/                      # pgvector, tsvector, event_search, cross_encoder, graph_rag
+│   │   ├── telemetry/                   # LangSmith tracing, Prometheus metrics, JSON logging
 │   │   └── entrypoints/                 # cpu_worker, wiki_consumer, health_server
 │   ├── presentation/                    # FastAPI layer
 │   │   ├── routes/                      # API routers
@@ -113,21 +139,35 @@ This README is written for **AI agents and future developers**. It explains the 
 │   ├── integration/                     # (reserved)
 │   └── unit/                            # Domain / use-case unit tests
 │
+├── docs/                                # Technical documentation
+│   ├── search-strategy.md               # Full RAG pipeline strategy (12-step, agentic)
+│   ├── telemetry-implementation-strategy.md  # LangSmith tracing architecture
+│   └── monitoring-guide.md              # Prometheus + Grafana + Loki + AlertManager guide
+│
 ├── k8s/                                 # Kubernetes manifests (Kind / K3s)
 │   ├── README.md                        # Deployment guide
+│   ├── AGENTS.md                        # Agent notes for K8s operations
 │   ├── backend/                         # FastAPI deployment
 │   ├── frontend/                        # Next.js deployment
 │   ├── postgres/                        # PostgreSQL + pgvector
 │   ├── redis/                           # Valkey
 │   ├── minio/                           # S3-compatible object storage
 │   ├── ollama/                          # Embedding / LLM inference
-│   └── …
+│   ├── monitoring/                      # Prometheus + Grafana + Loki + AlertManager
+│   ├── cpu-worker/                      # CPU-bound background worker
+│   ├── wiki-consumer/                   # Wiki ingestion consumer
+│   └── telegram-bot/
 │
-├── scripts/                             # Dev / deploy helpers
+├── scripts/                             # Dev / deploy helpers (see scripts/AGENTS.md)
 │   ├── dev-local.sh                     # Run backend locally against K8s services
 │   ├── test-apis.sh                     # Run API contract tests
 │   ├── sync-and-test.sh                 # Sync changed files into K8s pods
-│   └── deploy-k8s.sh                    # Build & deploy Docker images to K3s
+│   ├── deploy-k8s.sh                    # Build & deploy Docker images to K3s
+│   ├── deploy-monitoring.sh             # Deploy monitoring stack to Kind
+│   ├── monitoring-socat-forward.sh      # Expose all services via socat (Kind)
+│   ├── port-forward-monitoring.sh       # Expose monitoring UIs via kubectl port-forward
+│   ├── benchmark_rag.py                 # Benchmark RAG pipeline with/without tracing
+│   └── eval_rag.py                      # Evaluate RAG against dataset (LangSmith)
 │
 ├── pyproject.toml                       # Python dependencies & tool config
 ├── pytest.ini                          # Pytest markers & options
@@ -161,8 +201,9 @@ Each use case is a single class with one primary `execute(...)` method.
 |----------|------|----------------|
 | `AskQuestionUseCase` | `query/ask_question.py` | Orchestrates the RAG pipeline for non-streaming queries. |
 | `StreamAnswerUseCase` | `query/stream_answer.py` | Wraps `QueryPipeline.execute_stream()` for SSE. |
-| `QueryPipeline` | `query/pipeline.py` | **Core orchestrator:** cache → embed → vector search → keyword search → RRF merge → LLM synthesis → cache save. |
-| `IntegrateWikiUseCase` | `ingestion/integrate_wiki.py` | Splits markdown into sections, embeds them, persists page + sections. |
+| `QueryPipeline` | `query/pipeline.py` | **Core orchestrator:** cache → rewrite → embed → semantic cache → analyze → 5-stream retrieve → RRF → rerank → diversity cap → LLM synthesis → cache save. |
+| `SelfReflectiveRAGPipeline` | `query/reflective_pipeline.py` | **Agentic RAG:** wraps `QueryPipeline`, evaluates answer quality (faithfulness/completeness/relevance 0–10), retries with alternate strategies (HyDE, decompose, expand) if below threshold. Controlled via `REASONING_ENABLED=true`. |
+| `IntegrateWikiUseCase` | `ingestion/wiki_integrator.py` | 3-pass LLM integrator: (1) Extract — raw sections from transcript, (2) Analyze — entity/event detection + cross-section links, (3) Write — structured wiki sections with citations. |
 | `ProcessVideoUseCase` | `ingestion/process_video.py` | Takes a `SourceItem` with transcript, runs wiki integration, retries on failure. |
 | `ExtractEventsUseCase` | `ingestion/extract_events.py` | Uses LLM to extract events/entities from a page and stores them in the knowledge graph. |
 | `SummarizeTimeRangeUseCase` | `query/summarize_time_range.py` | Generates a summary of events/pages within a date range. |
@@ -181,11 +222,21 @@ application/ports/
 │   ├── event_repository.py       # EventRepository
 │   └── entity_repository.py      # EntityRepository
 ├── search/
-│   └── vector_search.py          # VectorSearchPort, KeywordSearchPort,
-│                                 # LLMClientPort, EmbeddingServicePort, CacheServicePort
+│   ├── vector_search.py          # VectorSearchPort, KeywordSearchPort,
+│   │                             # LLMClientPort, EmbeddingServicePort, CacheServicePort
+│   ├── event_search_port.py      # EventSearchPort — dense + sparse event search
+│   ├── query_analyzer_port.py    # QueryAnalyzerPort — intent, time_range, entities,
+│   │                             # keywords, key_phrases, search_query, sub_questions, language
+│   ├── query_rewriter_port.py    # QueryRewriterPort — resolve pronouns via chat history
+│   ├── query_expander_port.py    # QueryExpanderPort — synonym generation for keyword search
+│   ├── reranker_port.py          # RerankerPort — LLM-based doc relevance scoring
+│   ├── answer_evaluator_port.py  # AnswerEvaluatorPort — faithfulness/completeness/relevance (0-10)
+│   └── graph_rag_port.py         # GraphRAGPort — entity→event graph traversal
 └── telemetry/
-    └── telemetry_port.py         # TelemetryPort for LangSmith / null tracing
+    ├── telemetry_port.py         # TelemetryPort for LangSmith / null tracing
+    └── metrics_port.py           # MetricsPort for Prometheus RED + business metrics
 ```
+**Note:** All new ports (query_analyzer, query_rewriter, query_expander, reranker, answer_evaluator, graph_rag, event_search) are now implemented with concrete adapters — not stubs. See `infrastructure/llm/` and `infrastructure/search/` for adapters.
 
 **Rule for AI agents:** When you add a new external dependency (e.g., a new LLM provider, a new vector DB, a new cache), define a port in `application/ports/` first, then implement the adapter in `infrastructure/`. The use case code should not change.
 
@@ -208,21 +259,53 @@ Plain dataclasses for crossing the application boundary:
 
 #### 4.3.2 External AI services
 
-- **`llm/openai_adapter.py`** — `OpenAIAdapter` implements `LLMClientPort`. Talks to any OpenAI-compatible endpoint (default: OpenCode Zen API with `deepseek-v4-flash`). Supports streaming and reports token usage.
+- **`llm/openai_adapter.py`** — `OpenAIAdapter` implements `LLMClientPort`. Talks to any OpenAI-compatible endpoint. Multi-provider support (OpenCode Zen, Gemini) with API key rotation and rate-limit tracking via `api_key_manager.py`. Supports streaming and reports token usage.
+- **`llm/query_analyzer_adapter.py`** — `LLMQueryAnalyzerAdapter` implements `QueryAnalyzerPort`. Single lightweight LLM call extracts intent, time_range, entities, keywords, key_phrases, search_query, sub_questions, and language for bilingual VI/EN switching.
+- **`llm/query_rewriter_adapter.py`** — `LLMQueryRewriterAdapter` implements `QueryRewriterPort`. Resolves pronouns and implicit references from last 6 chat turns.
+- **`llm/query_expander_adapter.py`** — `LLMQueryExpanderAdapter` implements `QueryExpanderPort`. Generates synonyms and related terms for broader keyword recall.
+- **`llm/reranker_adapter.py`** — `LLMRerankerAdapter` implements `RerankerPort`. LLM-based relevance scoring of search results before synthesis.
+- **`llm/answer_evaluator_adapter.py`** — `LLMAnswerEvaluatorAdapter` implements `AnswerEvaluatorPort`. Scores faithfulness, completeness, relevance (0–10) for self-reflective loop.
 - **`embedding/ollama_adapter.py`** — `OllamaEmbeddingAdapter` implements `EmbeddingServicePort`. Uses model `bge-m3` and produces 1024-dim vectors.
-- **`llm/api_key_manager.py`** — Rotates multiple provider keys with rate-limit tracking.
+- **`llm/api_key_manager.py`** — Rotates multiple provider API keys with priority and rate-limit tracking.
 
 #### 4.3.3 Search
 
 - **`search/pgvector_adapter.py`** — `PgVectorSearchAdapter` implements `VectorSearchPort`. Uses HNSW cosine-distance queries on `page_sections.section_vector` and `event_canonicals.canonical_embedding`. Applies optional `TimeRange` filters and recency scoring (`EXP(-λ * days)`).
 - **`search/tsvector_adapter.py`** — `TsVectorSearchAdapter` implements `KeywordSearchPort`. Uses the persisted `fts_vector` on `page_sections`. Query cleaning preserves Vietnamese diacritics. Also supports `TimeRange` filters and recency scoring.
+- **`search/event_search_adapter.py`** — `EventSearchAdapter` implements `EventSearchPort`. Runs dense (pgvector cosine) and sparse (tsvector) search over `event_observations`. Both modes support `TimeRange` filtering.
+- **`search/graph_rag_adapter.py`** — `GraphRAGAdapter` implements `GraphRAGPort`. Traverses entity→event links: given entities from query analysis, finds related events via `event_entity_links`.
+- **`search/cross_encoder_reranker_adapter.py`** — `CrossEncoderRerankerAdapter` implements `RerankerPort`. Uses sentence-transformers (BAAI/bge-reranker-v2-m3) for pairwise (query, doc) relevance scoring. Optional — enabled via `CROSS_ENCODER_ENABLED=true`.
 
-#### 4.3.4 Telemetry
+#### 4.3.4 Telemetry & Observability
 
-- **`telemetry/langsmith_telemetry_adapter.py`** — Records spans and metadata to LangSmith when `LANGSMITH_TRACING=true`.
+> **Full documentation:** [`docs/telemetry-implementation-strategy.md`](docs/telemetry-implementation-strategy.md) — architecture, trace trees, LangSmith UI guide.  
+> **Monitoring plan:** [`plans/260723-0636-monitoring-strategy/`](plans/260723-0636-monitoring-strategy/) — phased rollout for Prometheus/Grafana/Loki/AlertManager.
+
+**Tracing (LangSmith)**
+
+- **`telemetry/langsmith_telemetry_adapter.py`** — Records spans and metadata to LangSmith when `LANGSMITH_TRACING=true`. Uses `parent_run.create_child()` for proper parent-child trace trees (not isolated root runs).
 - **`telemetry/langsmith_eval_adapter.py`** — Evaluates RAG outputs against labeled datasets (optional batch workflow).
 - **`telemetry/null_telemetry_adapter.py`** — No-op adapter used when tracing is disabled.
-- **Traced wrappers** (`llm/traced_llm_wrapper.py`, `embedding/traced_embedding_wrapper.py`, `search/traced_search_wrapper.py`, `persistence/redis/traced_cache_wrapper.py`) — Wrap ports to emit spans without changing use-case logic.
+- **Traced wrappers** — Wrap ports to emit spans without changing use-case logic: `llm/traced_llm_wrapper.py`, `llm/traced_query_analyzer_wrapper.py`, `embedding/traced_embedding_wrapper.py`, `search/traced_search_wrapper.py`, `search/traced_event_search_wrapper.py`, `persistence/redis/traced_cache_wrapper.py`.
+
+**Metrics (Prometheus — Port/Adapter pattern)**
+
+- **`application/ports/telemetry/metrics_port.py`** — `MetricsPort` ABC defining `counter()`, `histogram()`, `gauge()`. Also defines `MetricsMiddleware` for FastAPI RED metrics (Rate/Error/Duration on HTTP endpoints).
+- **`telemetry/prometheus_metrics_adapter.py`** — `PrometheusMetricsAdapter` — concrete adapter wrapping `prometheus-client`. Lazy metric creation; metrics only appear in `/api/metrics` after first call.
+- **`telemetry/null_metrics_adapter.py`** — `NullMetricsAdapter` — no-op adapter used when `ENABLE_METRICS=false`.
+- **`telemetry/metrics_collector.py`** — `get_metrics()` singleton factory, resolved via `ENABLE_METRICS` config.
+- **`telemetry/business_metrics.py`** — Helper wrappers (`inc_counter`, `track_duration`, `set_gauge`) for pipeline code. Thin layer over `get_metrics()`.
+
+**Structured Logging**
+
+- **`telemetry/logging_config.py`** — JSON-formatted logging with `trace_id`/`span_id` correlation. Controlled via `LOG_FORMAT=text|json`.
+
+**Monitoring Stack (K8s)**
+
+- **`k8s/monitoring/`** — Prometheus, Grafana, Loki, Promtail, AlertManager manifests. Deployed via `scripts/deploy-monitoring.sh`.
+- **Exporter sidecars** on Postgres (`postgres_exporter`), Redis (`redis_exporter`), Ollama (`ollama_exporter`).
+- **Grafana dashboards:** RED (HTTP-level), Business (cache hit rate, LLM tokens, query volume), Ingestion (throughput, queue depth, job duration).
+- **Alerting:** AlertManager → Telegram via `telegram-bot` webhook.
 
 ### 4.4 `presentation/` — FastAPI layer
 
@@ -298,44 +381,70 @@ User Question
 [2. Exact Cache Check] ──hit──▶ return cached answer (0 LLM cost)
     │ miss
     ▼
-[3. Embed Question] ──▶ Ollama bge-m3  ──▶ Embedding(1024)
+[3. Query Rewriting] ──▶ resolve pronouns via chat history (LLM, 6 turns)
     │
     ▼
-[4. Semantic Cache Check] ──▶ cosine similarity ≥ 0.80 against stored embeddings
+[4. Embed Question] ──▶ Ollama bge-m3 ──▶ Embedding(1024)
+    │
+    ▼
+[5. Semantic Cache Check] ──▶ cosine similarity ≥ 0.80 against stored embeddings
     │ hit                              │ miss
     ▼                                  ▼
-[return cached answer]       [5. Time Range Extraction]
-    (embed cost only)              │
+[return cached answer]       [6. Query Analysis] ──▶ 1 lightweight LLM call →
+    (embed cost only)              │                   intent, time_range, entities,
+                                   │                   keywords, key_phrases,
+                                   │                   search_query (OR-delimited, bilingual),
+                                   │                   sub_questions, language
                                    ▼
-                        [6. Vector Search] ──▶ pgvector HNSW cosine + time filter + recency
-                                   │
-                        [7. Keyword Search] ──▶ PostgreSQL tsvector + time filter + recency
-                                   │
-                                   ▼
-                        [8. Reciprocal Rank Fusion] ──▶ merge + re-rank (k=60)
-                                   │
-                                   ▼
-                        [9. Build Context] ──▶ top 20 sections, truncated to 2000 chars, cited [1]..[N]
-                                   │
-                                   ▼
-                        [10. LLM Synthesis] ──▶ OpenAI-compatible, temp=0.3, max_tokens=16384
+                        [7. Multi-Stream Retrieval] ──▶ 5 parallel streams:
+                        │   a) Vector Search (pgvector HNSW cosine + time filter + recency)
+                        │   b) Keyword Search (tsvector + analyzer search_query + time filter + recency)
+                        │   c) Event Dense Search (pgvector on event_observations)
+                        │   d) Event Keyword Search (tsvector on event_observations + search_query)
+                        │   e) Graph RAG (entity→event traversal, if entities detected)
                                    │
                                    ▼
-                        [11. Cache Save] ──▶ exact (TTL 1h/24h) + semantic (embedding)
+                        [8. Reciprocal Rank Fusion] ──▶ merge 5 streams, weights vary by intent
+                        │                              (k=60)
                                    │
                                    ▼
-                        [12. Telemetry Span] ──▶ LangSmith with full input/output
+                        [9. Query Expansion + Rerank] ──▶ expand keywords → rerank via LLM
+                        │                              (or Cross-Encoder if enabled)
                                    │
                                    ▼
-Response: {answer, sources, tokens_used, cache_hit, pipeline_steps}
+                        [10. Diversity Capping] ──▶ max 5/source, 2/page, top 20 to context
+                                   │
+                                   ▼
+                        [11. Build Context] ──▶ top 20 sections, truncated to 2000 chars, cited [1]..[N]
+                                   │
+                                   ▼
+                        [12. LLM Synthesis] ──▶ OpenAI-compatible, bilingual system prompt
+                        │                       (VI/EN switched by detected language),
+                        │                       intent-specific temporal addendum,
+                        │                       temp=0.3, max_tokens=16384
+                                   │
+                                   ▼
+                        [13. Self-Reflective Evaluate] ──▶ if REASONING_ENABLED=true:
+                        │    Score: faithfulness, completeness, relevance (0–10)
+                        │    If score < threshold → retry with alternate strategy:
+                        │      • HyDE (hypothetical document embedding)
+                        │      • Decompose (break into sub-questions)
+                        │      • Expand (synonym keyword expansion)
+                        │    Best answer after budget exhausted
+                                   │
+                                   ▼
+                        [14. Cache Save] ──▶ exact (TTL 1h/24h) + semantic (embedding)
+                                   │
+                                   ▼
+Response: {answer, sources, tokens_used, cache_hit, pipeline_steps, evaluation_scores}
 ```
 
-Streaming version (`/api/query/stream`) follows the same flow: exact cache → embed → semantic cache → retrieval → LLM synthesis → cache save. Cache hits return immediately as a `type: "complete"` SSE event.
+Streaming version (`/api/query/stream`) follows the same flow: exact cache → rewrite → embed → semantic cache → retrieval → rerank → LLM synthesis → self-reflective evaluate → cache save. Cache hits return immediately as a `type: "complete"` SSE event.
 
 SSE events emitted:
 - `status: processing` → `retrieving` → `thinking` → `summarizing`
-- `chunk` / `token` → answer tokens (non-streaming LLM currently returns full answer at once)
-- `complete` → {answer, citations, sources_used, tokens_used}
+- `chunk` / `token` → answer tokens
+- `complete` → {answer, citations, sources_used, tokens_used, evaluation_scores}
 
 **Time range support:** Both `POST /api/query` and `POST /api/query/stream` accept `from_date`/`to_date`. The frontend types expose these as ISO strings (`frontend/types/index.ts` and `frontend/hooks/use-query-stream.ts`).
 
@@ -450,6 +559,7 @@ All backend endpoints are under `/api`. See `01_API_list.md` for full details.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/health` | `{status, version, db, pending_count, requires_membership_count, failed_count}`. |
+| GET | `/api/metrics` | Prometheus text format metrics (enabled when `ENABLE_METRICS=true`). |
 | POST | `/api/query` | Non-streaming RAG. Returns `{answer, sources, tokens_used, cache_hit, pipeline_steps}`. |
 | POST | `/api/query/stream` | SSE streaming RAG. |
 | GET | `/api/summarize` | Time-range summary: `{summary, time_range, stats, top_events, top_pages}`. |
@@ -508,8 +618,18 @@ npm run dev
 | `./scripts/dev-local.sh` | Install deps and start backend locally (manual frontend step). |
 | `./scripts/test-apis.sh [URL]` | Run contract tests against running backend. |
 | `./scripts/test-apis.sh --critical-only` | Run only frontend-breaking tests. |
+| `./scripts/test-apis.sh --report` | Run all + generate JSON report. |
 | `./scripts/sync-and-test.sh` | Copy changed files into K8s pods and run tests. |
+| `./scripts/sync-and-test.sh --backend` | Sync backend files only. |
+| `./scripts/sync-and-test.sh --frontend` | Rebuild + reload frontend image. |
+| `./scripts/sync-and-test.sh --test-only` | Just run tests against port-forwarded backend. |
 | `./scripts/deploy-k8s.sh` | Build images and deploy to K3s. |
+| `./scripts/deploy-monitoring.sh` | Deploy Prometheus + Grafana + Loki + AlertManager to Kind. |
+| `./scripts/monitoring-socat-forward.sh` | Expose all services (app + monitoring) via socat on LAN-accessible ports. |
+| `./scripts/port-forward-monitoring.sh` | Expose monitoring UIs (Grafana, Prometheus, AlertManager) via `kubectl port-forward`. |
+| `python scripts/benchmark_rag.py` | Benchmark RAG pipeline latency/throughput with tracing on/off. |
+| `python scripts/eval_rag.py` | Evaluate RAG quality against a labeled dataset (LangSmith). |
+| See `scripts/AGENTS.md` | AI agent usage guide for all scripts. |
 
 ### K8s deployment
 
@@ -619,12 +739,15 @@ API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
 1. **Route shadowing:** `GET /api/pages/{slug}` is served by `pages.py`, not the richer version in `stubs.py`. If you need the enriched shape, either merge the implementations or change registration order.
 2. **DI container passes `None` for session-bound deps:** `query_pipeline`, `integrate_wiki_use_case`, etc. are declared with `None` for repository/search args because they need a per-request `AsyncSession`. The real objects are built in route handlers or dependencies.
 3. **Chat sessions use file-backed storage:** persisted to `CHAT_HISTORY_DIR` (default `/data/chat-history`). In K8s this is a `hostPath` volume. Sessions auto-title from the first user message.
-4. **API key create/update endpoints return 501:** only list, delete, and activate are implemented.
+4. **Chat session mutation endpoints return 501:** POST/PUT/DELETE on `/api/chat/sessions` are stubs. Chat history read works; CRUD mutations are not yet implemented.
 5. **Frontend streaming proxy:** `frontend/app/api/query/stream/route.ts` proxies the SSE stream from the backend to the browser. In K8s it uses the internal service DNS; for local dev, set `NEXT_PUBLIC_API_URL`.
 6. **Cache failures are silent:** if Redis is down, the system still works but answers are not cached.
 7. **Embedding dimension mismatch:** `Embedding` validates 1024 dims. If you change the embedding model, update `Embedding.dimensions` and all `Vector(...)` columns in `models.py`.
 8. **Docker DNS on this host:** the default Docker bridge cannot resolve `registry.npmjs.org` reliably. Build the frontend image with `--network=host` (see `frontend/AGENTS.md`).
 9. **K8s CronJob status requires RBAC:** the backend ServiceAccount must be bound to `k8s/backend/rbac.yaml` before `/api/admin/cron-jobs` can report real K8s state.
+10. **Self-reflective pipeline adds latency:** with `REASONING_ENABLED=true`, the pipeline may make 2–4 additional LLM calls per query (evaluate + retry). Monitor token usage and response times.
+11. **Cross-Encoder requires GPU for reasonable speed:** `CROSS_ENCODER_ENABLED=true` with `BAAI/bge-reranker-v2-m3` adds ~1–2s per query on CPU. Leave disabled (`false`) for CPU-only deployments.
+12. **`data/` directory is git-ignored:** the `data/` directory contains PostgreSQL data, MinIO objects, Redis dumps, and other sensitive runtime state — it is excluded from version control via `.gitignore`.
 
 ---
 
@@ -633,16 +756,27 @@ API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
 | I want to… | Look at / Run |
 |------------|---------------|
 | Understand the RAG pipeline | `src/llm_wiki/application/use_cases/query/pipeline.py` |
+| Understand the agentic/reflective loop | `src/llm_wiki/application/use_cases/query/reflective_pipeline.py` |
+| Understand the full search strategy | `docs/search-strategy.md` |
 | Add a new API endpoint | `src/llm_wiki/presentation/routes/`, `schemas/common.py`, `tests/test_all_apis.py` |
 | Add a new DB table | `models.py` → `mappers.py` → `repositories/` → `ports/` → `routes/` |
+| Add a new search port+adapter | `application/ports/search/<new>_port.py` → `infrastructure/search/<new>_adapter.py` → wire in `query/pipeline.py` |
 | Change LLM provider | `infrastructure/llm/openai_adapter.py` + `config.py` + `dependencies.py` |
 | Change embedding model | `infrastructure/embedding/ollama_adapter.py` + `domain/value_objects/embedding.py` + `models.py` |
+| Add a new business metric | `infrastructure/telemetry/business_metrics.py` → call `inc_counter`/`track_duration` in pipeline code |
+| View Prometheus metrics | `GET /api/metrics` (Prometheus text format) or Grafana at `http://<host>:3100` (after `monitoring-socat-forward.sh`) |
+| View monitoring dashboards | `./scripts/monitoring-socat-forward.sh` (all services) or `./scripts/port-forward-monitoring.sh` (monitoring only) |
 | Run all contract tests | `API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v` |
-| Deploy to K8s | `./scripts/deploy-k8s.sh` (K3s) or follow `k8s/README.md` (Kind) |
+| Sync code to K8s + test | `./scripts/sync-and-test.sh` |
+| Deploy to K3s | `./scripts/deploy-k8s.sh` |
+| Deploy to Kind | See `k8s/README.md` quick-start + `k8s/AGENTS.md` for order + RBAC |
+| Deploy monitoring stack | `./scripts/deploy-monitoring.sh` |
 | Run frontend locally | `cd frontend && npm install && npm run dev` |
 | Build frontend Docker image | `docker build --network=host -t 32_llm_wiki_clean_arch-frontend:latest -f frontend/Dockerfile frontend/` (see `frontend/AGENTS.md`) |
-| Deploy to Kind | `k8s/AGENTS.md` for order + RBAC |
+| Run RAG benchmarks | `LANGSMITH_TRACING=false python scripts/benchmark_rag.py --questions eval/questions.jsonl` |
+| Evaluate RAG quality | `python scripts/eval_rag.py --dataset eval/rag_eval_dataset.jsonl --run` |
+| Analyze LangSmith traces | Use the trace-analyzer skill or open `https://smith.langchain.com` |
 
 ---
 
-*Last updated for backend v2.1.1 / frontend v3.0.1 — added nodejs to Dockerfile runtime deps, fixed KG 3D viewport with ResizeObserver and proper containment, fixed started_at incorrectly cleared on job completion.*
+*Last updated for backend v2.2.0 / frontend v3.0.1 — agentic RAG with self-reflective pipeline, 5-stream hybrid retrieval, LLM reranking + Cross-Encoder, multi-provider LLM, Prometheus metrics (Port/Adapter), Grafana/Loki/AlertManager stack, structured JSON logging with trace_id.*

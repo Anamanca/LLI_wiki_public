@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: llm-wiki
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+      slack_api_url: ''
+
+    route:
+      group_by: ['alertname', 'severity']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      receiver: 'default'
+      routes:
+      - match:
+          severity: critical
+        receiver: 'critical'
+        continue: true
+      - match:
+          severity: warning
+        receiver: 'warning'
+
+    receivers:
+    - name: 'default'
+    - name: 'critical'
+    - name: 'warning'
+
+    # --- Production notification setup ---
+    # To enable Slack notifications:
+    # 1. Create a Slack webhook URL
+    # 2. Add SLACK_WEBHOOK_URL to llm-wiki-secrets
+    # 3. Uncomment the slack_configs block below and mount the secret as env:
+    #    receivers:
+    #    - name: 'critical'
+    #      slack_configs:
+    #      - api_url: '${SLACK_WEBHOOK_URL}'
+    #        channel: '#alerts-critical'
+    #        title: '[{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}'
+    #        text: |
+    #          *Severity*: {{ .CommonLabels.severity }}
+    #          *Summary*: {{ .CommonAnnotations.summary }}
+    #          *Description*: {{ .CommonAnnotations.description }}
+    #          *Runbook*: {{ .CommonAnnotations.runbook }}
+    #
+    # For email (SMTP):
+    #   global:
+    #     smtp_smarthost: 'smtp.example.com:587'
+    #     smtp_from: 'alertmanager@example.com'
+    #     smtp_auth_username: 'alertmanager@example.com'
+    #     smtp_auth_password: '...'
+    #   receivers:
+    #   - name: 'critical'
+    #     email_configs:
+    #     - to: 'oncall@example.com'

@@ -136,7 +136,8 @@ class TracedLLMWrapper(LLMClientPort):
             if isinstance(data, dict):
                 choices = data.get("choices", [{}])
                 if choices:
-                    content = choices[0].get("message", {}).get("content", "") or ""
+                    message = choices[0].get("message") or {}
+                    content = message.get("content", "") or ""
             await self._telemetry.end_span(
                 span=span,
                 outputs={
@@ -192,8 +193,8 @@ class TracedLLMWrapper(LLMClientPort):
             latency_ms = (time.time() - t0) * 1000
             usage = getattr(self._inner, "last_usage", None)
             self.last_usage = usage
-            content = result.get("content", "")
-            reasoning_content = result.get("reasoning_content", "")
+            content = (result or {}).get("content", "")
+            reasoning_content = (result or {}).get("reasoning_content", "")
             if usage:
                 if usage.get("prompt_tokens"):
                     inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "input"}, usage["prompt_tokens"])

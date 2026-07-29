@@ -31,17 +31,31 @@ kubectl apply -f k8s/frontend/
 kubectl apply -f k8s/ollama/
 kubectl apply -f k8s/telegram-bot/
 
-# 5. Ingress
+# 5. Monitoring (after app pods are running)
+kubectl apply -f k8s/monitoring/
+# Or use the convenience script:
+# ./scripts/deploy-monitoring.sh
+
+# 6. Ingress
 kubectl apply -f k8s/ingress.yaml
 ```
 
 ## Loading Images into kind
 
 Images must be loaded into the kind node before the cluster can use `IfNotPresent`:
+
 ```bash
+# Backend — only rebuild when pyproject.toml changes (hostPath handles code changes)
+docker build -t 32_llm_wiki_clean_arch-backend:latest .
 kind load docker-image 32_llm_wiki_clean_arch-backend:latest --name llm-wiki
+
+# Frontend — rebuild for EVERY code change (production standalone, no hostPath)
+cd frontend
+docker build --network=host -t 32_llm_wiki_clean_arch-frontend:latest .
 kind load docker-image 32_llm_wiki_clean_arch-frontend:latest --name llm-wiki
 ```
+
+> `--network=host` is required for frontend builds in this environment so npm can reach the network.
 
 ## Backend RBAC is Required
 
@@ -71,6 +85,20 @@ The frontend maps these strings to badges in `frontend/components/admin/cron-job
 - Backend deployment sets `serviceAccountName: backend-v2`. Do not remove it.
 - `imagePullPolicy: IfNotPresent` is used everywhere. Load images into kind after each rebuild.
 - The `youtube-daily-scan` CronJob triggers the backend via `wget` POST to `/api/admin/cron-jobs/youtube-daily-scan/start`.
+- **Prometheus scrape annotations** (`prometheus.io/scrape: "true"`, `prometheus.io/port`, `prometheus.io/path`) must be present on pod templates for auto-discovery. Backend, cpu-worker, and wiki-consumer pods already have them.
+- **Monitoring stack** (`k8s/monitoring/`) deploys Prometheus, Grafana, Loki, Promtail, and AlertManager. Expose UIs via `./scripts/monitoring-socat-forward.sh` (Grafana → :3100, Prometheus → :9090, AlertManager → :9093, Loki → :3200, Frontend → :3000, Backend → :8000).
+- **Postgres/Redis/Ollama exporters** run as sidecar containers in their respective pods. Metrics flow through Prometheus pod annotations.
+
+## Deploy After Code Changes
+
+```
+Changed backend code (.py)    → kubectl -n llm-wiki rollout restart deploy/backend-v2  (hostPath sync, just restart)
+Changed frontend code (.tsx)  → docker build --network=host → kind load → kubectl rollout restart deploy/frontend
+Changed pyproject.toml        → docker build → kind load → kubectl rollout restart deploy/backend-v2
+Changed package.json          → docker build --network=host → kind load → kubectl rollout restart deploy/frontend
+```
+
+> **Backend hostPath caveat:** `uvicorn --reload` may not detect file changes through Docker-in-Docker (kind). If in doubt, restart the pod.
 
 ## Entity Graph API Notes
 

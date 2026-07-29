@@ -9,6 +9,7 @@ from typing import Any
 
 from llm_wiki.application.dto.query_dto import QueryInput
 from llm_wiki.application.ports.search.event_search_port import EventSearchPort
+from llm_wiki.application.ports.search.graph_rag_port import GraphRAGPort
 from llm_wiki.application.ports.search.query_analyzer_port import (
     QueryAnalysis,
     QueryAnalyzerPort,
@@ -29,6 +30,47 @@ from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
 
 root_logger = logging.getLogger()
 logger = logging.getLogger(__name__)
+
+# ── Adaptive recency decay (Phase 1) ──────────────────────────────────
+# Different intents need different freshness horizons.
+# current_state: half-life ~14 days  |  timeline / historical: no decay
+# comparative: mild ~138 days        |  general: default ~69 days
+
+_RECENCY_LAMBDA_MAP: dict[str, float] = {
+    "current_state": 0.05,   # ~14 ngày half-life
+    "general":       0.01,   # ~69 ngày
+    "historical":    0.0,    # không decay — cần thông tin cũ
+    "timeline":      0.0,    # không decay — diễn biến cần mọi thời điểm
+    "comparative":   0.005,  # ~138 ngày
+}
+
+
+def _build_keyword_query(question: str, analysis: QueryAnalysis | None = None) -> str:
+    """Build an effective keyword-search query from the question + analysis.
+
+    When the analyzer provides ``keywords`` and ``search_query``, we use the
+    ``search_query`` (OR-delimited, bilingual) for the primary keyword search
+    and fall back to the OR-joined keywords if ``search_query`` is empty.
+
+    Without analyzer output, returns the raw question as-is — the adapter's
+    ``plainto_tsquery`` will handle the AND logic.
+    """
+    if analysis and analysis.search_query:
+        # Analyzer-provided OR query — use directly for to_tsquery
+        return analysis.search_query
+
+    if analysis and analysis.keywords:
+        # Join keywords with OR for better recall than raw question
+        return " | ".join(analysis.keywords)
+
+    # Fallback: raw question (existing behavior)
+    return question
+
+
+def recency_decay_for_intent(intent: str) -> float:
+    """Return the recency decay rate (λ) appropriate for *intent*."""
+    return _RECENCY_LAMBDA_MAP.get(intent, 0.01)
+
 
 # ── Cache tuning constants (P3: variable TTL) ──────────────────────────
 
@@ -170,20 +212,25 @@ INTENT_WEIGHTS: dict[str, dict[str, float]] = {
     "general":       {"events": 0.4, "sections": 1.0},
 }
 
-# Fixed weights for non-intent-driven streams
-RRF_FIXED_WEIGHTS = {
-    "keyword_sections": 0.5,
-    "keyword_events": 0.3,
-}
+# Keyword streams get this fraction of their corresponding vector stream weight.
+# A 50 % discount reflects that keyword search is supplementary — it reinforces
+# vector results but should not dominate RRF fusion.
+_KW_DISCOUNT = 0.5
 
 
 def _build_rrf_weights(intent: str) -> dict[str, float]:
-    """Return per-stream RRF weights driven by query intent."""
+    """Return per-stream RRF weights driven by query intent.
+
+    Keyword stream weights are derived from their vector counterparts
+    multiplied by ``_KW_DISCOUNT``, keeping all streams intent-consistent.
+    Graph weight is handled separately by callers.
+    """
     iw = INTENT_WEIGHTS.get(intent, INTENT_WEIGHTS["general"])
     return {
         "sections": iw["sections"],
         "events": iw["events"],
-        **RRF_FIXED_WEIGHTS,
+        "keyword_sections": iw["sections"] * _KW_DISCOUNT,
+        "keyword_events": iw["events"] * _KW_DISCOUNT,
     }
 
 
@@ -235,30 +282,129 @@ def _diversify(
     return result
 
 
-def _temporal_addendum(intent: str) -> str:
+def _get_relevant_timestamp(r: SearchResult) -> datetime | None:
+    """Extract the most semantically relevant timestamp from a SearchResult.
+
+    For event observations, uses ``normalized_date`` (actual event date).
+    For page sections, uses ``published_at`` (content publication date).
+    Returns None when no parseable date is found in metadata.
+    """
+    if not r.metadata:
+        return None
+
+    if r.content_type == "event_observation":
+        date_str = r.metadata.get("normalized_date") or r.metadata.get("event_date")
+    else:
+        date_str = r.metadata.get("published_at")
+
+    if not date_str:
+        return None
+
+    try:
+        date_str_clean = str(date_str)[:10]
+        return datetime.strptime(date_str_clean, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def _enforce_time_boundary(
+    results: list[SearchResult],
+    time_range: TimeRange | None,
+) -> list[SearchResult]:
+    """Hard-filter results to only those whose date falls within *time_range*.
+
+    Uses ``_get_relevant_timestamp`` to determine the semantically correct
+    date for each result (event occurrence date for events, publication date
+    for page sections).  Results without a parseable date pass through
+    (cannot prove they're out of range).
+
+    When *time_range* is None, returns all results unchanged — no time
+    constraint means no filtering.
+    """
+    if time_range is None:
+        return results
+
+    filtered: list[SearchResult] = []
+    for r in results:
+        relevant_date = _get_relevant_timestamp(r)
+        if relevant_date is None:
+            filtered.append(r)
+            continue
+
+        if time_range.start <= relevant_date <= time_range.end:
+            filtered.append(r)
+
+    return filtered
+# ── Language detection ─────────────────────────────────────────────────
+# Zero-token regex-based detection. The analyzer also outputs "language",
+# but this regex fallback covers the case where the analyzer fails or is
+# disabled.  Vietnamese is detected by the presence of diacritic characters
+# that are unique to the Vietnamese alphabet.
+_VI_DIACRITICS = re.compile(
+    r"[àáảãạăắằẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôồốỗổộơớờởỡợùúủũụưứừửữựỳýỷỹỵ]"
+)
+
+
+def _detect_language(question: str) -> str:
+    """Return ``"vi"`` if the question contains Vietnamese diacritics, else ``"en"``.
+
+    Edge case: Vietnamese-without-diacritics (e.g. "cho toi biet ve AI") will
+    be classified as ``"en"``. The query analyzer's ``language`` field is the
+    authoritative source; this regex serves as a zero-token fallback.
+    """
+    return "vi" if _VI_DIACRITICS.search(question.lower()) else "en"
+
+
+def _temporal_addendum(intent: str, language: str = "vi") -> str:
     """Return intent-specific temporal instructions for the LLM synthesis prompt."""
-    if intent == "timeline":
-        return (
-            "\n\nLƯU Ý: Người dùng cần DIỄN BIẾN THEO THỜI GIAN. "
-            "Sắp xếp câu trả lời theo trình tự thời gian. "
-            "Mỗi mốc phải có ngày tháng năm cụ thể."
-        )
-    elif intent == "historical":
-        return (
-            "\n\nLƯU Ý: Người dùng hỏi về SỰ KIỆN TRONG QUÁ KHỨ. "
-            "Ghi rõ ngày tháng năm cụ thể cho mọi thông tin."
-        )
-    elif intent == "current_state":
-        return (
-            "\n\nLƯU Ý: Người dùng hỏi về TÌNH HÌNH HIỆN TẠI. "
-            "Ưu tiên thông tin mới nhất, ghi rõ ngày tháng."
-        )
-    elif intent == "comparative":
-        return (
-            "\n\nLƯU Ý: Người dùng muốn SO SÁNH. "
-            "Trình bày đối chiếu rõ ràng, ghi rõ thời điểm của từng dữ liệu."
-        )
-    return ""
+    if language == "en":
+        # English variants
+        if intent == "timeline":
+            return (
+                "\n\nNOTE: The user needs a CHRONOLOGICAL TIMELINE. "
+                "Sort the answer by chronological order. "
+                "Each milestone MUST have a specific date (day-month-year)."
+            )
+        elif intent == "historical":
+            return (
+                "\n\nNOTE: The user is asking about PAST EVENTS. "
+                "Include specific dates for all information."
+            )
+        elif intent == "current_state":
+            return (
+                "\n\nNOTE: The user is asking about the CURRENT STATE. "
+                "Prioritize the most recent information, include specific dates."
+            )
+        elif intent == "comparative":
+            return (
+                "\n\nNOTE: The user wants a COMPARISON. "
+                "Present a clear side-by-side comparison with dates for each data point."
+            )
+        return ""
+    else:
+        # Vietnamese variants (default)
+        if intent == "timeline":
+            return (
+                "\n\nLƯU Ý: Người dùng cần DIỄN BIẾN THEO THỜI GIAN. "
+                "Sắp xếp câu trả lời theo trình tự thời gian. "
+                "Mỗi mốc phải có ngày tháng năm cụ thể."
+            )
+        elif intent == "historical":
+            return (
+                "\n\nLƯU Ý: Người dùng hỏi về SỰ KIỆN TRONG QUÁ KHỨ. "
+                "Ghi rõ ngày tháng năm cụ thể cho mọi thông tin."
+            )
+        elif intent == "current_state":
+            return (
+                "\n\nLƯU Ý: Người dùng hỏi về TÌNH HÌNH HIỆN TẠI. "
+                "Ưu tiên thông tin mới nhất, ghi rõ ngày tháng."
+            )
+        elif intent == "comparative":
+            return (
+                "\n\nLƯU Ý: Người dùng muốn SO SÁNH. "
+                "Trình bày đối chiếu rõ ràng, ghi rõ thời điểm của từng dữ liệu."
+            )
+        return ""
 
 
 def _set_parent_on_wrappers(
@@ -318,6 +464,7 @@ class QueryPipeline:
         rewriter: QueryRewriterPort | None = None,
         analyzer: QueryAnalyzerPort | None = None,
         event_search: EventSearchPort | None = None,
+        graph_rag: GraphRAGPort | None = None,
     ):
         self._embedder = embedder
         self._vector_search = vector_search
@@ -328,6 +475,7 @@ class QueryPipeline:
         self._rewriter = rewriter
         self._analyzer = analyzer
         self._event_search = event_search
+        self._graph_rag = graph_rag
 
     # ── Cache helpers (P1: normalization, P3: variable TTL) ────────────
 
@@ -474,28 +622,49 @@ class QueryPipeline:
         return [item[0] for item in sorted_items]
 
     def _build_context(self, results: list[SearchResult]) -> str:
-        """Build context for LLM synthesis with full date + source metadata.
+        """Build context for LLM synthesis with full date + source + quality metadata.
 
-        Includes published_at so the LLM can reason about WHEN each document
-        was published — the #1 fix for time-related questions.
+        For event observations, includes the actual event occurrence date
+        (normalized_date), observer stance, observation count, and sentiment
+        score — giving the LLM richer signals to weigh source credibility and
+        temporal relevance.
         """
         context_parts = []
         for i, result in enumerate(results[:20], start=1):
             source = result.metadata.get("source_name", "unknown") if result.metadata else "unknown"
             page_title = result.metadata.get("page_title", "") if result.metadata else ""
             published_at = result.metadata.get("published_at", "") if result.metadata else ""
+            normalized_date = result.metadata.get("normalized_date", "") if result.metadata else ""
             event_date = result.metadata.get("event_date", "") if result.metadata else ""
 
+            # Prefer normalized_date (actual event date) for event-type results;
+            # fall back to event_date, then published_at.
             date_str = ""
-            if published_at and isinstance(published_at, str):
+            if normalized_date:
+                date_str = f", ngày sự kiện: {str(normalized_date)[:10]}"
+            elif event_date and isinstance(event_date, str):
+                date_str = f", sự kiện: {event_date[:10]}"
+            elif published_at and isinstance(published_at, str):
                 date_str = f", {published_at[:10]}"
             elif published_at:
                 date_str = f", {str(published_at)[:10]}"
-            if event_date and isinstance(event_date, str):
-                date_str = f", sự kiện: {event_date[:10]}"
+
+            # Event-specific quality indicators
+            observation_count = result.metadata.get("observation_count") if result.metadata else None
+            stance = result.metadata.get("stance", "") if result.metadata else ""
+            sentiment_score = result.metadata.get("sentiment_score") if result.metadata else None
+
+            quality_parts = []
+            if observation_count is not None:
+                quality_parts.append(f"số quan sát: {observation_count}")
+            if stance:
+                quality_parts.append(f"quan điểm: {stance}")
+            if sentiment_score is not None:
+                quality_parts.append(f"cảm xúc: {sentiment_score:+.1f}")
+            quality_str = f" ({'; '.join(quality_parts)})" if quality_parts else ""
 
             heading = f" {result.title}" if result.title else ""
-            prefix = f"[{i}]{heading} (nguồn: {source}{date_str})"
+            prefix = f"[{i}]{heading} (nguồn: {source}{date_str}){quality_str}"
             if page_title:
                 prefix += f" (trang: {page_title})"
             context_parts.append(f"{prefix}\n{result.content[:2000]}")
@@ -508,13 +677,21 @@ class QueryPipeline:
         time_range: TimeRange | None,
         intent: str = "general",
         rewritten_question: str | None = None,
+        entities: list[dict] | None = None,
+        analysis: QueryAnalysis | None = None,
     ) -> tuple[dict[str, list[SearchResult]], list[SearchResult], dict[str, float]]:
         """Run parallel multi-retrieval + weighted RRF fusion + diversity.
 
         Returns (all_result_sets, top_results_after_diversity, step_times).
+
+        When *analysis* provides keyword extraction, it is used for keyword
+        and event-keyword streams instead of the raw question string.
         """
         step_times: dict[str, float] = {}
         search_query = rewritten_question or input.question
+
+        # Build keyword-search-ready queries from analysis (when available)
+        kw_query = _build_keyword_query(search_query, analysis)
 
         # Build parallel tasks — always at least vector + keyword sections
         async def _vec_sections():
@@ -525,7 +702,7 @@ class QueryPipeline:
 
         async def _kw_sections():
             return await self._keyword_search.search_keyword(
-                search_query, top_k=input.top_k, time_range=time_range,
+                kw_query, top_k=input.top_k, time_range=time_range,
             )
 
         tasks: list[tuple[str, Any]] = [
@@ -541,11 +718,19 @@ class QueryPipeline:
 
             async def _kw_events():
                 return await self._event_search.search_events_keyword(
-                    search_query, top_k=input.top_k, time_range=time_range,
+                    kw_query, top_k=input.top_k, time_range=time_range,
                 )
 
             tasks.append(("events", _timed(_vec_events)))
             tasks.append(("keyword_events", _timed(_kw_events)))
+
+        # GraphRAG: traverse knowledge graph when entities are detected
+        if self._graph_rag and entities:
+            async def _graph():
+                return await self._graph_rag.traverse(
+                    entities, top_k=10, time_range=time_range,
+                )
+            tasks.append(("graph", _timed(_graph)))
 
         # Run all tasks in parallel
         coros = [t[1] for t in tasks]
@@ -560,13 +745,19 @@ class QueryPipeline:
             else:
                 result_sets[name], step_times[name] = raw
 
-        # Weighted RRF fusion
+        # Weighted RRF fusion (with graph weight)
         weights = _build_rrf_weights(intent)
+        if "graph" in result_sets:
+            weights["graph"] = 0.6
         merged = _weighted_rrf_fusion(result_sets, weights)
 
         # Diversity cap
         diversified = _diversify(merged, max_per_source=5, max_per_page=2)
-        top_results = diversified[:input.top_k]
+
+        # Hard time-boundary enforcement: when the user asks about a specific
+        # time range, exclude results whose date falls outside it.
+        in_range = _enforce_time_boundary(diversified, time_range)
+        top_results = in_range[:input.top_k]
 
         return result_sets, top_results, step_times
 
@@ -699,34 +890,58 @@ class QueryPipeline:
         _, top_results, search_step_times = await self._retrieve_and_merge(
             input, query_embedding, time_range,
             intent=intent, rewritten_question=rewritten,
+            entities=analysis.entities if analysis.entities else None,
+            analysis=analysis,
         )
         step_times.update(search_step_times)
 
         # ── Build context with dates ─────────────────────────────────
         context = self._build_context(top_results)
 
-        # ── System prompt with temporal addendum + today's date ─────
+        # ── System prompt with language + temporal addendum + today's date ─
+        lang = analysis.language or _detect_language(input.question)
         today_str = datetime.now(UTC).strftime("%Y-%m-%d")
-        system_prompt = (
-            "Bạn là một trợ lý nghiên cứu chuyên sâu. "
-            "Hãy trả lời câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
-            "Câu trả lời phải bao gồm: "
-            "(1) một câu tóm tắt ngắn gọn ở đầu; "
-            "(2) phân tích chi tiết từng khía cạnh liên quan, "
-            "kèm ví dụ cụ thể từ ngữ cảnh; "
-            "(3) giải thích mối liên hệ giữa các ý; "
-            "(4) kết luận tổng thể ở cuối. "
-            "Trích dẫn nguồn bằng [N]. "
-            "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
-            "thay vì bịa đặt. "
-            "Hãy trả lời đầy đủ, súc tích nhưng không sơ xài.\n\n"
-            f"LƯU Ý QUAN TRỌNG: Hôm nay là {today_str}. "
-            "Khi trả lời, PHẢI ghi rõ ngày tháng năm cụ thể cho mọi thông tin. "
-            "KHÔNG được dùng từ tương đối như 'gần đây', 'mới đây', "
-            "'cách đây vài tháng', 'trong thời gian gần đây'. "
-            "Luôn trích dẫn ngày tháng chính xác từ ngữ cảnh được cung cấp."
-        )
-        system_prompt += _temporal_addendum(intent)
+        if lang == "en":
+            system_prompt = (
+                "You are a deep-research assistant. "
+                "Answer the question based ON THE PROVIDED CONTEXT. "
+                "Your answer MUST include: "
+                "(1) a concise summary at the beginning; "
+                "(2) detailed analysis of each relevant aspect, "
+                "with specific examples from the context; "
+                "(3) explanation of connections between ideas; "
+                "(4) an overall conclusion at the end. "
+                "Cite sources using [N]. "
+                "If the context is insufficient, clearly state which parts "
+                "are missing rather than fabricating. "
+                "Be thorough and concise, not superficial.\n\n"
+                f"IMPORTANT: Today is {today_str}. "
+                "When answering, you MUST include specific dates (day-month-year) "
+                "for all information. "
+                "DO NOT use relative terms like 'recently', 'a few months ago'. "
+                "Always cite exact dates from the provided context."
+            )
+        else:
+            system_prompt = (
+                "Bạn là một trợ lý nghiên cứu chuyên sâu. "
+                "Hãy trả lời câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
+                "Câu trả lời phải bao gồm: "
+                "(1) một câu tóm tắt ngắn gọn ở đầu; "
+                "(2) phân tích chi tiết từng khía cạnh liên quan, "
+                "kèm ví dụ cụ thể từ ngữ cảnh; "
+                "(3) giải thích mối liên hệ giữa các ý; "
+                "(4) kết luận tổng thể ở cuối. "
+                "Trích dẫn nguồn bằng [N]. "
+                "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
+                "thay vì bịa đặt. "
+                "Hãy trả lời đầy đủ, súc tích nhưng không sơ xài.\n\n"
+                f"LƯU Ý QUAN TRỌNG: Hôm nay là {today_str}. "
+                "Khi trả lời, PHẢI ghi rõ ngày tháng năm cụ thể cho mọi thông tin. "
+                "KHÔNG được dùng từ tương đối như 'gần đây', 'mới đây', "
+                "'cách đây vài tháng', 'trong thời gian gần đây'. "
+                "Luôn trích dẫn ngày tháng chính xác từ ngữ cảnh được cung cấp."
+            )
+        system_prompt += _temporal_addendum(intent, language=lang)
 
         messages = [{"role": "system", "content": system_prompt}]
         for h in (input.chat_history or [])[-6:]:
@@ -921,6 +1136,8 @@ class QueryPipeline:
             _, top_results, search_step_times = await self._retrieve_and_merge(
                 input, query_embedding, time_range,
                 intent=intent, rewritten_question=rewritten,
+                entities=analysis.entities if analysis.entities else None,
+                analysis=analysis,
             )
             step_times.update(search_step_times)
 
@@ -928,27 +1145,49 @@ class QueryPipeline:
 
             context = self._build_context(top_results)
 
+            lang_stream = analysis.language or _detect_language(input.question)
             today_str_stream = datetime.now(UTC).strftime("%Y-%m-%d")
-            system_prompt = (
-                "Bạn là một trợ lý nghiên cứu chuyên sâu. "
-                "Hãy trả lời câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
-                "Câu trả lời phải bao gồm: "
-                "(1) một câu tóm tắt ngắn gọn ở đầu; "
-                "(2) phân tích chi tiết từng khía cạnh liên quan, "
-                "kèm ví dụ cụ thể từ ngữ cảnh; "
-                "(3) giải thích mối liên hệ giữa các ý; "
-                "(4) kết luận tổng thể ở cuối. "
-                "Trích dẫn nguồn bằng [N]. "
-                "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
-                "thay vì bịa đặt. "
-                "Hãy trả lời đầy đủ, súc tích nhưng không sơ xài.\n\n"
-                f"LƯU Ý QUAN TRỌNG: Hôm nay là {today_str_stream}. "
-                "Khi trả lời, PHẢI ghi rõ ngày tháng năm cụ thể cho mọi thông tin. "
-                "KHÔNG được dùng từ tương đối như 'gần đây', 'mới đây', "
-                "'cách đây vài tháng', 'trong thời gian gần đây'. "
-                "Luôn trích dẫn ngày tháng chính xác từ ngữ cảnh được cung cấp."
-            )
-            system_prompt += _temporal_addendum(intent)
+            if lang_stream == "en":
+                system_prompt = (
+                    "You are a deep-research assistant. "
+                    "Answer the question based ON THE PROVIDED CONTEXT. "
+                    "Your answer MUST include: "
+                    "(1) a concise summary at the beginning; "
+                    "(2) detailed analysis of each relevant aspect, "
+                    "with specific examples from the context; "
+                    "(3) explanation of connections between ideas; "
+                    "(4) an overall conclusion at the end. "
+                    "Cite sources using [N]. "
+                    "If the context is insufficient, clearly state which parts "
+                    "are missing rather than fabricating. "
+                    "Be thorough and concise, not superficial.\n\n"
+                    f"IMPORTANT: Today is {today_str_stream}. "
+                    "When answering, you MUST include specific dates (day-month-year) "
+                    "for all information. "
+                    "DO NOT use relative terms like 'recently', 'a few months ago'. "
+                    "Always cite exact dates from the provided context."
+                )
+            else:
+                system_prompt = (
+                    "Bạn là một trợ lý nghiên cứu chuyên sâu. "
+                    "Hãy trả lời câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
+                    "Câu trả lời phải bao gồm: "
+                    "(1) một câu tóm tắt ngắn gọn ở đầu; "
+                    "(2) phân tích chi tiết từng khía cạnh liên quan, "
+                    "kèm ví dụ cụ thể từ ngữ cảnh; "
+                    "(3) giải thích mối liên hệ giữa các ý; "
+                    "(4) kết luận tổng thể ở cuối. "
+                    "Trích dẫn nguồn bằng [N]. "
+                    "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
+                    "thay vì bịa đặt. "
+                    "Hãy trả lời đầy đủ, súc tích nhưng không sơ xài.\n\n"
+                    f"LƯU Ý QUAN TRỌNG: Hôm nay là {today_str_stream}. "
+                    "Khi trả lời, PHẢI ghi rõ ngày tháng năm cụ thể cho mọi thông tin. "
+                    "KHÔNG được dùng từ tương đối như 'gần đây', 'mới đây', "
+                    "'cách đây vài tháng', 'trong thời gian gần đây'. "
+                    "Luôn trích dẫn ngày tháng chính xác từ ngữ cảnh được cung cấp."
+                )
+            system_prompt += _temporal_addendum(intent, language=lang_stream)
 
             stream_messages = [{"role": "system", "content": system_prompt}]
             for h in (input.chat_history or [])[-6:]:
@@ -975,6 +1214,25 @@ class QueryPipeline:
                 full_answer += token
                 yield {"type": "token", "data": token}
             step_times["synthesize"] = time.time() - t0_synth
+
+            # Fallback: when the stream yields zero tokens (e.g. reasoning
+            # model emits everything in reasoning_content deltas), fall
+            # back to a non-streaming call so the user still gets an answer.
+            if not full_answer:
+                root_logger.warning("[STREAM] zero tokens yielded, falling back to non-streaming")
+                try:
+                    full_answer = await self._llm.chat_completion(
+                        messages=stream_messages,
+                        temperature=0.3,
+                        max_tokens=16384,
+                    )
+                    # Chunk the fallback result so the UI receives tokens
+                    for i in range(0, len(full_answer), 30):
+                        yield {"type": "token", "data": full_answer[i:i + 30]}
+                except Exception:
+                    full_answer = "Xin lỗi, không thể tạo câu trả lời. Vui lòng thử lại."
+                    for i in range(0, len(full_answer), 30):
+                        yield {"type": "token", "data": full_answer[i:i + 30]}
             root_logger.warning("[STREAM] answer_len=%d", len(full_answer))
 
             yield {"type": "status", "data": {"status": "summarizing"}}
@@ -1047,4 +1305,15 @@ class QueryPipeline:
                     error=str(exc),
                     metadata={"error_type": type(exc).__name__},
                 )
-            raise
+            # Always yield a "complete" event so the frontend stops the
+            # loading indicator and shows the error to the user.
+            error_answer = f"Xin lỗi, đã xảy ra lỗi khi xử lý câu hỏi: {exc}"
+            yield {
+                "type": "complete",
+                "data": {
+                    "answer": error_answer,
+                    "citations": [],
+                    "sources_used": [],
+                    "tokens_used": 0,
+                },
+            }

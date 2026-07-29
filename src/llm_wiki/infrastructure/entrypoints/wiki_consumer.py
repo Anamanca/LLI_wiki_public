@@ -20,6 +20,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -43,9 +44,16 @@ from llm_wiki.infrastructure.entrypoints.health_server import start_health_serve
 from llm_wiki.presentation.dependencies import traced_llm, traced_embedder
 from llm_wiki.application.use_cases.ingestion.wiki_integrator import WikiIntegrator
 from llm_wiki.infrastructure.embedding.ollama_adapter import OllamaEmbeddingAdapter
+from llm_wiki.infrastructure.telemetry import create_telemetry_adapter
+from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter, set_gauge
+from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
 
 CONSUMER_ID = int(os.getenv("CONSUMER_ID", str(settings.consumer_id)))
 logger = logging.getLogger(f"wiki-consumer-{CONSUMER_ID}")
+
+# One telemetry adapter per consumer process — reused across all jobs.
+# Each job creates its own root span under this adapter.
+_telemetry = create_telemetry_adapter()
 
 _shutdown_requested = False
 
@@ -165,6 +173,8 @@ async def _save_section_vectors(page_id_str: str | None, db: AsyncSession) -> in
 
 async def process_wiki_job(item_id: UUID) -> None:
     """Read item from DB, run wiki integration, embed sections, mark completed."""
+    import time as _time
+    _job_start = _time.monotonic()
     async with async_session_factory() as db:
         item = await db.get(SourceItem, item_id)
         if item is None:
@@ -206,6 +216,20 @@ async def process_wiki_job(item_id: UUID) -> None:
         # Max wiki consumer retries before permanent fail
         WIKI_MAX_RETRIES = 5
 
+        # Create a root span for EVERY job — both fresh wiki integration
+        # and cached-page retry paths. This ensures end_span is always
+        # callable regardless of which branch we take.
+        root_span = await _telemetry.start_span(
+            name="process_wiki_job",
+            kind="chain",
+            inputs={
+                "video_id": item.external_id or str(item.id),
+                "source_name": source_name,
+                "transcript_length": len(transcript.get("raw_text", "")),
+                "main_topic": classification.get("main_topic", ""),
+            },
+        )
+
         # Retry fast-path: if wiki page already exists from a previous attempt,
         # skip the expensive Pass 1→2→3 pipeline and go straight to embedding.
         cached_page_id = data.get("_wiki_page_id")
@@ -218,14 +242,20 @@ async def process_wiki_job(item_id: UUID) -> None:
                 cached_page_id,
             )
             await _log_event(db, item.id, "wiki_start", "Skipping wiki integration (page already created) — retrying embedding")
+            await _telemetry.add_metadata(root_span, {"fast_path": True, "cached_page_id": cached_page_id})
             wiki_result = {"action": "updated", "page_id": cached_page_id, "page_title": item.title or cached_page_id}
         else:
             await _log_event(db, item.id, "wiki_start", "Integrating into wiki (async consumer)")
 
-            # --- Wiki Integrate ---
-            # New clean-arch WikiIntegrator with 3-pass pipeline + LangSmith tracing
             llm = traced_llm("wiki_integrator")
             embedder = traced_embedder("section_embedding")
+            # Wire the root span as parent so all nested spanned calls
+            # appear under one trace in LangSmith.
+            for wrapped in (llm, embedder):
+                fn = getattr(wrapped, "set_parent_span", None)
+                if callable(fn):
+                    fn(root_span)
+
             integrator = WikiIntegrator(
                 llm=llm,
                 embedder=embedder,
@@ -247,6 +277,7 @@ async def process_wiki_job(item_id: UUID) -> None:
                     timeout=1800.0,
                 )
             except asyncio.TimeoutError:
+                await _telemetry.end_span(span=root_span, error="Wiki integration timed out after 30 min")
                 logger.error("Wiki consumer %d: wiki integrate timed out for %s", CONSUMER_ID, item.id)
                 await db.rollback()
                 item.retry_count = (item.retry_count or 0) + 1
@@ -255,6 +286,7 @@ async def process_wiki_job(item_id: UUID) -> None:
                 if item.retry_count > WIKI_MAX_RETRIES:
                     item.status = "failed"
                     item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: timeout"
+                    inc_counter("ingestion_jobs_total", {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)})
                     logger.warning(
                         "Wiki consumer %d: %s permanently failed after %d wiki attempts",
                         CONSUMER_ID,
@@ -269,6 +301,7 @@ async def process_wiki_job(item_id: UUID) -> None:
                     await push_wiki_job(item.id)
                 return
             except Exception as exc:
+                await _telemetry.end_span(span=root_span, error=str(exc)[:500])
                 error_str = str(exc)
                 logger.error("Wiki consumer %d: wiki integrate failed for %s: %s", CONSUMER_ID, item.id, exc)
                 await db.rollback()
@@ -278,6 +311,7 @@ async def process_wiki_job(item_id: UUID) -> None:
                 if item.retry_count > WIKI_MAX_RETRIES:
                     item.status = "failed"
                     item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: {error_str[:400]}"
+                    inc_counter("ingestion_jobs_total", {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)})
                     logger.warning(
                         "Wiki consumer %d: %s permanently failed after %d wiki attempts",
                         CONSUMER_ID,
@@ -311,9 +345,21 @@ async def process_wiki_job(item_id: UUID) -> None:
         await _log_event(db, item.id, "section_embed_start", "Embedding section vectors")
         set_worker_state(CONSUMER_ID, "wiki", item.id, "section_embed", 0)
         page_id_str = wiki_result.get("page_id")
+        # Child span for section embedding under the root job span
+        embed_span = await _telemetry.start_span(
+            name="section_embedding",
+            kind="embedding",
+            inputs={"page_id": page_id_str or ""},
+            parent=root_span,
+        )
         try:
             section_count = await _save_section_vectors(page_id_str, db)
+            await _telemetry.end_span(
+                span=embed_span,
+                outputs={"section_count": section_count},
+            )
         except asyncio.TimeoutError:
+            await _telemetry.end_span(span=embed_span, error="section embedding timeout")
             logger.error("Wiki consumer %d: section embedding timed out for %s", CONSUMER_ID, item.id)
             await db.rollback()
             item.retry_count = (item.retry_count or 0) + 1
@@ -322,6 +368,7 @@ async def process_wiki_job(item_id: UUID) -> None:
             if item.retry_count > WIKI_MAX_RETRIES:
                 item.status = "failed"
                 item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: section embedding timeout"
+                inc_counter("ingestion_jobs_total", {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)})
                 logger.warning(
                     "Wiki consumer %d: %s permanently failed after %d embed attempts",
                     CONSUMER_ID,
@@ -336,6 +383,7 @@ async def process_wiki_job(item_id: UUID) -> None:
                 await push_wiki_job(item.id)
             return
         except Exception as exc:
+            await _telemetry.end_span(span=embed_span, error=str(exc)[:500])
             logger.error("Wiki consumer %d: section embedding failed for %s: %s", CONSUMER_ID, item.id, exc)
             await db.rollback()
             item.retry_count = (item.retry_count or 0) + 1
@@ -344,6 +392,7 @@ async def process_wiki_job(item_id: UUID) -> None:
             if item.retry_count > WIKI_MAX_RETRIES:
                 item.status = "failed"
                 item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: section embedding error"
+                inc_counter("ingestion_jobs_total", {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)})
                 logger.warning(
                     "Wiki consumer %d: %s permanently failed after %d embed attempts",
                     CONSUMER_ID,
@@ -363,6 +412,8 @@ async def process_wiki_job(item_id: UUID) -> None:
         item.status = "completed"
         item.error_message = None
         await db.commit()
+        inc_counter("ingestion_jobs_total", {"status": "completed", "stage": "wiki", "worker_id": str(CONSUMER_ID)})
+        get_metrics().histogram("ingestion_job_duration_seconds", _time.monotonic() - _job_start, {"stage": "wiki"})
 
         # Clean up snapshots
         await db.execute(
@@ -386,20 +437,38 @@ async def process_wiki_job(item_id: UUID) -> None:
             wiki_result["action"],
         )
 
+        # End the root span for this job (cached_page_id path or newly created)
+        await _telemetry.end_span(
+            span=root_span,
+            outputs={
+                "action": wiki_result.get("action", "unknown"),
+                "page_id": wiki_result.get("page_id", ""),
+                "page_title": wiki_result.get("page_title", ""),
+                "section_count": section_count,
+            },
+        )
+
 
 async def _heartbeat_loop(consumer_id: int) -> None:
     """Periodic heartbeat to worker_heartbeats — reads from shared state."""
     while not _shutdown_requested:
         try:
             state = get_worker_state(consumer_id) or {}
+            cpu_val = state.get("cpu", 0)
+            set_gauge("worker_cpu_percent", float(cpu_val), {"worker_id": str(consumer_id)})
             await write_heartbeat(
                 consumer_id,
                 status=state.get("status", "idle"),
                 current_job_id=state.get("job_id"),
                 current_stage=state.get("stage"),
-                cpu_percent=state.get("cpu", 0),
+                cpu_percent=cpu_val,
                 error_message=state.get("error"),
             )
+            # Heartbeat age: store wall-clock timestamp of last successful
+            # write. Grafana panel computes `time() - worker_heartbeat_age_seconds`
+            # to show true age. If write_heartbeat throws the gauge is NOT
+            # reset — it climbs until the next successful write.
+            set_gauge("worker_heartbeat_age_seconds", time.time(), {"worker_id": str(consumer_id)})
         except asyncio.CancelledError:
             raise
         except Exception:

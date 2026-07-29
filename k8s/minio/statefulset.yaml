@@ -13,6 +13,10 @@ spec:
     metadata:
       labels:
         app: minio
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
+        prometheus.io/path: "/minio/v2/metrics/cluster"
     spec:
       containers:
       - name: minio
@@ -33,6 +37,8 @@ spec:
             secretKeyRef:
               name: llm-wiki-secrets
               key: minio-password
+        - name: MINIO_PROMETHEUS_AUTH_TYPE
+          value: public
         - name: TZ
           value: Asia/Ho_Chi_Minh
         ports:

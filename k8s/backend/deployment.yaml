@@ -14,6 +14,10 @@ spec:
     metadata:
       labels:
         app: backend-v2
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/api/metrics"
     spec:
       serviceAccountName: backend-v2
       initContainers:
@@ -175,6 +179,28 @@ spec:
               key: LANGSMITH_API_KEY
         - name: ENABLE_STUB_ROUTES
           value: "true"
+        - name: ENABLE_METRICS
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: ENABLE_METRICS
+        - name: LOG_FORMAT
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LOG_FORMAT
+        - name: CROSS_ENCODER_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: CROSS_ENCODER_ENABLED
+        - name: CROSS_ENCODER_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: CROSS_ENCODER_MODEL
+        - name: HF_HOME
+          value: /models/huggingface
         - name: CHAT_HISTORY_DIR
           value: "/data/chat-history"
         ports:
@@ -193,13 +219,28 @@ spec:
           periodSeconds: 30
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "100m"
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "6Gi"
+            cpu: "4"
         volumeMounts:
         - name: chat-history
           mountPath: /data/chat-history
+        - name: backend-src
+          mountPath: /app/src
+        - name: reranker-model
+          mountPath: /models/huggingface
       volumes:
       - name: chat-history
         hostPath:
           path: /data/chat-history
+          type: DirectoryOrCreate
+      - name: backend-src
+        hostPath:
+          path: /code/backend-src
+          type: Directory
+      - name: reranker-model
+        hostPath:
+          path: /data/models/huggingface
           type: DirectoryOrCreate

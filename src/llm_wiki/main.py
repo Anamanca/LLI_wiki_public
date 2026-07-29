@@ -9,7 +9,7 @@ from llm_wiki.presentation.middleware.request_logging import RequestLoggingMiddl
 from llm_wiki.presentation.routes import query, health, sources, pages, search, admin, chat_sessions
 from llm_wiki.presentation.routes.admin import restart_source
 
-app = FastAPI(title="LLM Wiki", version="2.0.0")
+app = FastAPI(title="LLM Wiki", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,6 +18,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(RequestLoggingMiddleware)
+
+from llm_wiki.config import settings
+
+# Structured logging — must be called before any logging happens
+from llm_wiki.infrastructure.telemetry.logging_config import setup_logging
+setup_logging(service_name="backend-v2", log_format=settings.log_format)
+
+if settings.enable_metrics:
+    from llm_wiki.presentation.middleware.metrics_middleware import MetricsMiddleware
+    from llm_wiki.presentation.routes import metrics as metrics_routes
+
+    app.add_middleware(MetricsMiddleware)
+    app.include_router(metrics_routes.router, prefix="/api", tags=["metrics"])
 
 app.add_exception_handler(DomainException, domain_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)

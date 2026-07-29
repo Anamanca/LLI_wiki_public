@@ -19,6 +19,7 @@ import os
 import random
 import signal
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -43,8 +44,14 @@ from llm_wiki.infrastructure.persistence.postgres.worker_heartbeat import set_wo
 from llm_wiki.infrastructure.cpu_guard import cpu_safe_to_proceed, get_current_cpu
 from llm_wiki.infrastructure.notifier import push_error_web, send_telegram_alert
 from llm_wiki.infrastructure.entrypoints.health_server import start_health_server, set_health_state
+from llm_wiki.infrastructure.telemetry import create_telemetry_adapter
+from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter, set_gauge
+from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
 
 logger = logging.getLogger(__name__)
+
+# One telemetry adapter per worker process — reused across all jobs.
+_telemetry = create_telemetry_adapter()
 
 # Global shutdown flag
 _shutdown_requested = False
@@ -265,6 +272,8 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
     Stages: extract → classify → embed → wiki_integrate
     Each stage has a timeout — exceeding it raises TimeoutError and triggers retry.
     """
+    import time as _time
+    _job_start = _time.monotonic()
     ctx = await _build_job_context(item, db)
     logger.info(
         "Worker %d: Processing job %s: %s (%s)",
@@ -272,6 +281,18 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
         ctx["video_id"],
         ctx["video_title"][:80],
         ctx["source_name"],
+    )
+
+    # Root telemetry span for this CPU pipeline job.
+    root_span = await _telemetry.start_span(
+        name="process_cpu_job",
+        kind="chain",
+        inputs={
+            "video_id": ctx["video_id"],
+            "video_title": (ctx["video_title"] or "")[:120],
+            "source_name": ctx["source_name"],
+            "has_cached_transcript": bool(item.transcript_text),
+        },
     )
 
     def _heartbeat(stage: str, error: str | None = None) -> None:
@@ -317,6 +338,7 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
             err_msg = str(exc)
             new_status, is_permanent = classify_extract_error(err_msg)
             if is_permanent:
+                await _telemetry.end_span(span=root_span, error=f"extract: {err_msg[:400]}")
                 if new_status == "scheduled":
                     item.status = "pending"
                     item.retry_after = datetime.now(timezone.utc) + timedelta(hours=12)
@@ -330,10 +352,12 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
                     item.error_message = f"Video not accessible: {new_status}"
                     await _log_event(db, item.id, "video_inaccessible", item.error_message)
                     await db.commit()
+                    inc_counter("ingestion_jobs_total", {"status": new_status, "stage": "extract", "worker_id": str(WORKER_ID)})
                     logger.info("Worker %d: Job %s: permanently %s — skipping", WORKER_ID, ctx["video_id"], new_status)
                 return
             else:
                 # Transient error — queue for retry with backoff
+                await _telemetry.end_span(span=root_span, error=f"extract transient: {err_msg[:400]}")
                 logger.warning("Worker %d: Job %s: extract transient error: %s", WORKER_ID, ctx["video_id"], exc)
                 await handle_job_failure(item, exc, db)
                 return
@@ -341,11 +365,13 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
     if transcript_dict is None or not transcript_dict.get("segments"):
         reason = "no_captions_t3_fail" if transcript_dict is None else "no_captions"
         log_msg = "All 4 tiers exhausted — no captions available" if transcript_dict is None else "No caption segments found"
+        await _telemetry.end_span(span=root_span, error=log_msg)
         item.status = reason
         item.started_at = None
         item.error_message = log_msg
         await _log_event(db, item.id, reason, log_msg)
         await db.commit()
+        inc_counter("ingestion_jobs_total", {"status": reason, "stage": "extract", "worker_id": str(WORKER_ID)})
         logger.info("Worker %d: Job %s: %s — skipping", WORKER_ID, ctx["video_id"], log_msg)
         return
 
@@ -373,14 +399,24 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
         _heartbeat("classifying")
         from llm_wiki.application.use_cases.ingestion.classifier import classify_transcript
         from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter
+        from llm_wiki.infrastructure.llm.traced_llm_wrapper import TracedLLMWrapper
 
-        llm_client = OpenAIAdapter()
+        raw_llm = OpenAIAdapter()
+        # Wrap classifier LLM with tracing so each API call appears
+        # as a child span under process_cpu_job.
+        llm_client = TracedLLMWrapper(
+            raw_llm,
+            _telemetry,
+            model=getattr(raw_llm, "model", "unknown"),
+            parent_span=root_span,
+        )
         try:
             classification_data = await asyncio.wait_for(
                 classify_transcript(transcript_dict, llm_client),
                 timeout=STAGE_TIMEOUTS["classifying"],
             )
         except Exception as exc:
+            await _telemetry.end_span(span=root_span, error=f"classify failed: {str(exc)[:400]}")
             logger.error("Worker %d: Classification failed for %s: %s", WORKER_ID, item.id, exc)
             await handle_job_failure(item, exc, db)
             return
@@ -430,10 +466,25 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
     item.started_at = None
     await db.commit()
 
-    await push_wiki_job(item.id)
+    queue_len = await push_wiki_job(item.id)
+    set_gauge("ingestion_queue_depth", float(queue_len), {"queue": "wiki"})
+    inc_counter("ingestion_jobs_total", {"status": "classified", "stage": "cpu_done", "worker_id": str(WORKER_ID)})
+    get_metrics().histogram("ingestion_job_duration_seconds", _time.monotonic() - _job_start, {"stage": "cpu"})
     sections_count = len(classification_data.get("subtopics", []) or [])
     await _log_event(db, item.id, "wiki_queued", f"Queued for wiki integration (topics: {sections_count})")
     await db.commit()
+
+    # End the root telemetry span — job is done from cpu_worker's perspective.
+    await _telemetry.end_span(
+        span=root_span,
+        outputs={
+            "status": "classified",
+            "main_topic": classification_data.get("main_topic", ""),
+            "language": classification_data.get("language", ""),
+            "transcript_segments": len(transcript_dict.get("segments", [])),
+            "merge_classify_enabled": merge_classify_enabled,
+        },
+    )
 
     _heartbeat("idle")
     logger.info("Worker %d: Job %s classified and queued for wiki", WORKER_ID, ctx["video_id"])
@@ -537,6 +588,13 @@ async def worker_loop() -> None:
                 job = await claim_job(db)
                 if job is None:
                     set_worker_state(WORKER_ID, "idle", cpu=int(get_current_cpu()))
+                    # Report pending queue depth every idle cycle
+                    from sqlalchemy import select, func
+                    from llm_wiki.infrastructure.persistence.postgres.models import SourceItem as SI
+                    pending_count = (await db.execute(
+                        select(func.count()).select_from(SI).where(SI.status == "pending")
+                    )).scalar() or 0
+                    set_gauge("ingestion_queue_depth", float(pending_count), {"queue": "cpu"})
                     await asyncio.sleep(10)
                     continue
 
@@ -585,14 +643,22 @@ async def _heartbeat_loop() -> None:
     while not _shutdown_requested:
         try:
             state = get_worker_state(WORKER_ID) or {}
+            cpu_val = state.get("cpu", 0)
+            # Emit worker Prometheus gauges
+            set_gauge("worker_cpu_percent", float(cpu_val), {"worker_id": str(WORKER_ID)})
             await write_hb(
                 WORKER_ID,
                 status=state.get("status", "idle"),
                 current_job_id=state.get("job_id"),
                 current_stage=state.get("stage"),
-                cpu_percent=state.get("cpu", 0),
+                cpu_percent=cpu_val,
                 error_message=state.get("error"),
             )
+            # Heartbeat age: store wall-clock timestamp of last successful
+            # write. Grafana panel computes `time() - worker_heartbeat_age_seconds`
+            # to show true age. If write_hb throws the gauge is NOT reset —
+            # it climbs until the next successful write, surfacing the stall.
+            set_gauge("worker_heartbeat_age_seconds", time.time(), {"worker_id": str(WORKER_ID)})
         except asyncio.CancelledError:
             raise
         except Exception:

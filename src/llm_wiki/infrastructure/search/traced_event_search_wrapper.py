@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from llm_wiki.application.ports.search.event_search_port import EventSearchPort
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
 from llm_wiki.domain.value_objects.embedding import Embedding, SearchResult
 from llm_wiki.domain.value_objects.time_range import TimeRange
+from llm_wiki.infrastructure.search.traced_search_wrapper import _result_summary
 from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
 
 
@@ -37,6 +39,7 @@ class TracedEventSearchWrapper(EventSearchPort):
             name="event_search",
             kind="retriever",
             inputs={
+                "embedding_dimensions": embedding.dimensions if embedding else None,
                 "top_k": top_k,
                 "time_range": (
                     f"{time_range.start.isoformat()}→{time_range.end.isoformat()}"
@@ -55,9 +58,12 @@ class TracedEventSearchWrapper(EventSearchPort):
                 span=span,
                 outputs={
                     "result_count": len(results),
-                    "top_score": results[0].score if results else 0.0,
+                    "results": _result_summary(results),
                 },
-                metadata={"latency_ms": round(latency_s * 1000, 2)},
+                metadata={
+                    "latency_ms": round(latency_s * 1000, 2),
+                    "top_score": round(results[0].score, 4) if results else 0.0,
+                },
             )
             return results
         except Exception as exc:
@@ -82,7 +88,7 @@ class TracedEventSearchWrapper(EventSearchPort):
             name="event_keyword_search",
             kind="retriever",
             inputs={
-                "query_length": len(query),
+                "query": query,
                 "top_k": top_k,
                 "time_range": (
                     f"{time_range.start.isoformat()}→{time_range.end.isoformat()}"
@@ -101,9 +107,12 @@ class TracedEventSearchWrapper(EventSearchPort):
                 span=span,
                 outputs={
                     "result_count": len(results),
-                    "top_score": results[0].score if results else 0.0,
+                    "results": _result_summary(results),
                 },
-                metadata={"latency_ms": round(latency_s * 1000, 2)},
+                metadata={
+                    "latency_ms": round(latency_s * 1000, 2),
+                    "top_score": round(results[0].score, 4) if results else 0.0,
+                },
             )
             return results
         except Exception as exc:

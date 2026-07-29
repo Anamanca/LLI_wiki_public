@@ -31,7 +31,7 @@ class TracedQueryAnalyzerWrapper(QueryAnalyzerPort):
         span = await self._telemetry.start_span(
             name="query_analyze",
             kind="chain",
-            inputs={"question_length": len(question)},
+            inputs={"question": question},
             parent=self._parent_span,
         )
         t0 = time.time()
@@ -47,13 +47,22 @@ class TracedQueryAnalyzerWrapper(QueryAnalyzerPort):
                 span=span,
                 outputs={
                     "intent": analysis.intent,
+                    "language": analysis.language,
                     "time_range": time_range_info,
                     "entities_count": len(analysis.entities),
+                    "keywords_count": len(analysis.keywords),
+                    "key_phrases_count": len(analysis.key_phrases),
+                    "sub_questions_count": len(analysis.sub_questions),
                 },
                 metadata={
                     "latency_ms": round(latency_ms, 2),
                     "intent": analysis.intent,
+                    "language": analysis.language,
                     "entities": analysis.entities[:10],
+                    "keywords": analysis.keywords,
+                    "key_phrases": analysis.key_phrases,
+                    "search_query": analysis.search_query,
+                    "sub_questions": analysis.sub_questions,
                 },
             )
             return analysis

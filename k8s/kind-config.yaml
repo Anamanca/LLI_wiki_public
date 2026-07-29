@@ -6,6 +6,9 @@ nodes:
   - containerPort: 30080
     hostPort: 30080
     protocol: TCP
+  - containerPort: 30081
+    hostPort: 30081
+    protocol: TCP
   - containerPort: 9000
     hostPort: 9000
     protocol: TCP
@@ -32,3 +35,7 @@ nodes:
     containerPath: /code/telegram-bot
   - hostPath: /home/hieunt/32_LLM_wiki_clean_arch/frontend
     containerPath: /code/frontend
+  - hostPath: /home/hieunt/32_LLM_wiki_clean_arch/src
+    containerPath: /code/backend-src
+  - hostPath: /home/hieunt/32_LLM_wiki_clean_arch/data/postgres
+    containerPath: /data/postgres

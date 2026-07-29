@@ -12,6 +12,10 @@ spec:
     metadata:
       labels:
         app: cpu-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8101"
+        prometheus.io/path: "/metrics"
     spec:
       initContainers:
       - name: wait-for-postgres
@@ -183,6 +187,16 @@ spec:
             secretKeyRef:
               name: llm-wiki-secrets
               key: ALLOWED_TELEGRAM_CHAT_IDS
+        - name: ENABLE_METRICS
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: ENABLE_METRICS
+        - name: LOG_FORMAT
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LOG_FORMAT
         command: ["python3", "-m", "llm_wiki.infrastructure.entrypoints.cpu_worker"]
         ports:
         - containerPort: 8101

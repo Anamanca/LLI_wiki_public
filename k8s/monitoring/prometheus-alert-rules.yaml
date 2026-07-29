@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alert-rules
+  namespace: llm-wiki
+data:
+  app-alerts.yml: |
+    groups:
+    - name: llm-wiki-application
+      rules:
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+          / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          service: backend
+        annotations:
+          summary: "HTTP 5xx error rate > 5%"
+          description: "{{ $value | humanizePercentage }} error rate over 5m"
+          runbook: "Check backend logs: kubectl logs -n llm-wiki deploy/backend-v2 --tail=100"
+
+      - alert: QueryLatencyHigh
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{path=~"/api/query.*"}[5m])) by (le, path)) > 30
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 query latency > 30s"
+          description: "P95 latency on {{ $labels.path }} is {{ $value }}s"
+          runbook: "Check LLM provider status and Ollama embedding latency"
+
+      - alert: WorkerStalled
+        expr: (time() - timestamp(worker_heartbeat_age_seconds)) > 120
+        for: 2m
+        labels:
+          severity: critical
+          service: worker
+        annotations:
+          summary: "Worker {{ $labels.worker_id }} not heartbeating"
+          description: "Worker heartbeat missing for > 2 min"
+          runbook: "Check worker pod: kubectl logs -n llm-wiki deploy/cpu-worker -c cpu-worker"
+
+      - alert: QueueBacklogHigh
+        expr: ingestion_queue_depth{queue="cpu"} > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ingestion queue depth > 100"
+          description: "{{ $value }} items pending in {{ $labels.queue }} queue"
+
+      - alert: LLMApiErrorRate
+        expr: rate(llm_api_errors_total[15m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          service: llm
+        annotations:
+          summary: "LLM API error rate elevated"
+          description: "Provider {{ $labels.provider }}: {{ $value }} errors/sec"
+          runbook: "Check API key quota and provider status"
+
+      - alert: LLMApiErrorsSpike
+        expr: increase(llm_api_errors_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          service: llm
+        annotations:
+          summary: "LLM API error spike detected"
+          description: "Provider {{ $labels.provider }}: {{ $value }} errors in last 5m"
+          runbook: "Check provider status and rate limits"
+
+    - name: llm-wiki-infrastructure
+      rules:
+
+      - alert: PostgresDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL exporter unreachable"
+          runbook: "Check Postgres pod: kubectl get pods -n llm-wiki -l app=postgres"
+
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis exporter unreachable (cache degraded, app still functional)"
+
+      - alert: DiskSpaceLow
+        expr: |
+          (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes) < 0.10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk space < 10% on {{ $labels.instance }}"

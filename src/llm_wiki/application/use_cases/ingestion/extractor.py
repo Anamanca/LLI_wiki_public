@@ -175,7 +175,16 @@ async def _run_ytdlp(args: list[str], timeout: float = 300.0) -> str:
     """
     await _wait_yt_cooldown()
 
-    full_args = ["yt-dlp", "--js-runtimes", "node", *args]
+    # NOTE: yt-dlp enables deno by default. Do NOT pass --js-runtimes "deno,node"
+    #       (that is treated as one runtime named "deno,node" and silently ignored).
+    # --impersonate chrome:windows-10 + curl_cffi bypass YouTube anti-bot detection.
+    # --remote-components ejs:github downloads the JS challenge solver script.
+    full_args = [
+        "yt-dlp",
+        "--impersonate", "chrome:windows-10",
+        "--remote-components", "ejs:github",
+        *args,
+    ]
 
     proc = await asyncio.create_subprocess_exec(
         *full_args,

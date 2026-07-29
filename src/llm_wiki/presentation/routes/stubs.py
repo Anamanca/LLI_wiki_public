@@ -81,11 +81,24 @@ async def progress(db: AsyncSession = Depends(get_db)):
             "percent": round(done / total * 100, 1) if total > 0 else 0,
         })
 
-    # latest ingestion alerts — only error/warning types
+    # latest ingestion alerts — error/warning types for items that are
+    # still active. Once an item reaches a terminal state (completed, failed,
+    # unavailable, etc.) its stale error/retry logs are no longer relevant.
     alert_types = ["error", "rate_limit", "retry", "api_limit"]
+    terminal_done = ["completed", "published", "skipped", "unavailable", "failed",
+                     "requires_membership", "no_captions", "no_captions_t3_fail",
+                     "scheduled", "rate_limited"]
     alerts_q = (
         select(orm.IngestionLog)
         .where(orm.IngestionLog.event_type.in_(alert_types))
+        .where(
+            # Keep alert if there's no associated item (system-level alert)
+            orm.IngestionLog.source_item_id.is_(None)
+            # Keep alert only if item is still active (not terminal)
+            | orm.IngestionLog.source_item_id.not_in(
+                select(orm.SourceItem.id).where(orm.SourceItem.status.in_(terminal_done))
+            )
+        )
         .order_by(orm.IngestionLog.created_at.desc())
         .limit(20)
     )

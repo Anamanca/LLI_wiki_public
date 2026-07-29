@@ -42,6 +42,12 @@ class Settings(BaseSettings):
 
     temporal_precision_enabled: bool = True
     reranker_enabled: bool = Field(default=True, validation_alias="RERANKER_ENABLED")
+    cross_encoder_enabled: bool = Field(
+        default=False, validation_alias="CROSS_ENCODER_ENABLED"
+    )
+    cross_encoder_model: str = Field(
+        default="BAAI/bge-reranker-v2-m3", validation_alias="CROSS_ENCODER_MODEL"
+    )
     reasoning_enabled: bool = Field(default=True, validation_alias="REASONING_ENABLED")
 
     # LangSmith observability & evaluation
@@ -65,6 +71,10 @@ class Settings(BaseSettings):
     worker_id: int = Field(default=1, validation_alias="WORKER_ID")
     consumer_id: int = Field(default=101, validation_alias="CONSUMER_ID")
     minio_bucket: str = Field(default="llm-wiki-media", validation_alias="MINIO_BUCKET")
+
+    # Monitoring
+    enable_metrics: bool = Field(default=False, validation_alias="ENABLE_METRICS")
+    log_format: str = Field(default="text", validation_alias="LOG_FORMAT")
 
 
 settings = Settings()

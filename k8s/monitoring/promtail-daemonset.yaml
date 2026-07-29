@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: llm-wiki
+data:
+  promtail.yaml: |
+    server:
+      http_listen_port: 9080
+    clients:
+    - url: http://loki.llm-wiki.svc.cluster.local:3100/loki/api/v1/push
+    positions:
+      filename: /tmp/positions.yaml
+    scrape_configs:
+    - job_name: containers
+      static_configs:
+      - targets: [localhost]
+        labels:
+          job: containers
+          __path__: /var/log/pods/llm-wiki_*/*/*.log
+      pipeline_stages:
+      - cri: {}
+      - labels:
+          app:
+      - static_labels:
+          namespace: llm-wiki
+      relabel_configs:
+      - source_labels: [__path__]
+        target_label: __path__
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: promtail
+  namespace: llm-wiki
+spec:
+  selector:
+    matchLabels:
+      app: promtail
+  template:
+    metadata:
+      labels:
+        app: promtail
+    spec:
+      serviceAccountName: prometheus
+      containers:
+      - name: promtail
+        image: grafana/promtail:3.1.0
+        args: ["-config.file=/etc/promtail/promtail.yaml"]
+        ports:
+        - containerPort: 9080
+        volumeMounts:
+        - name: config
+          mountPath: /etc/promtail
+        - name: varlog
+          mountPath: /var/log
+          readOnly: true
+        - name: podlogs
+          mountPath: /var/log/pods
+          readOnly: true
+        resources:
+          requests: {memory: "64Mi", cpu: "25m"}
+          limits: {memory: "128Mi", cpu: "100m"}
+      volumes:
+      - name: config
+        configMap:
+          name: promtail-config
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: podlogs
+        hostPath:
+          path: /var/log/pods
