@@ -3,6 +3,8 @@ from typing import Optional
 import time
 from datetime import datetime, timedelta
 
+from llm_wiki.shared.datetime_utils import now
+
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Query as FastQuery
@@ -267,8 +269,8 @@ async def summarize_time_range(
     db: AsyncSession = Depends(get_db),
 ):
     from llm_wiki.presentation.dependencies import traced_llm
-    now = datetime.utcnow()
-    start = now - timedelta(days=days)
+    now_ts = now()
+    start = now_ts - timedelta(days=days)
     use_case = SummarizeTimeRangeUseCase(
         session=db,
         event_repo=PostgresEventRepository(db),
@@ -276,7 +278,7 @@ async def summarize_time_range(
     )
     result = await use_case.execute(TimeRangeSummaryInput(
         start=start,
-        end=now,
+        end=now_ts,
     ))
     return {
         "summary": result.summary_text,

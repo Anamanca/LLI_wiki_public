@@ -10,6 +10,8 @@ from llm_wiki.domain.value_objects.identifiers import EventId, PageId
 from llm_wiki.application.ports.repositories.entity_repository import EntityRepository
 
 from datetime import datetime
+
+from llm_wiki.shared.datetime_utils import now
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
@@ -43,14 +45,14 @@ class ExtractEventsUseCase:
                 kind="llm",
                 inputs={"page_title": page_title, "content_length": len(content_markdown)},
             )
-        t0 = datetime.utcnow()
+        t0 = now()
         try:
             result = await self._run_extraction(page_id, page_title, content_markdown)
             if span:
                 await self._telemetry.end_span(
                     span=span,
                     outputs={"event_count": len(result)},
-                    metadata={"latency_ms": (datetime.utcnow() - t0).total_seconds() * 1000},
+                    metadata={"latency_ms": (now() - t0).total_seconds() * 1000},
                 )
             return result
         except Exception as exc:
@@ -107,7 +109,7 @@ class ExtractEventsUseCase:
                         category=evt.get("category"),
                         entities=evt.get("entities", {}),
                         importance_score=0.5,
-                        first_seen_at=datetime.utcnow(),
+                        first_seen_at=now(),
                         observation_count=1,
                     )
 
@@ -126,7 +128,7 @@ class ExtractEventsUseCase:
                     observation_type="initial_report",
                     description=evt.get("description", ""),
                     confidence=0.7,
-                    extracted_at=datetime.utcnow(),
+                    extracted_at=now(),
                 )
                 await self._event_repo.save_observation(observation)
 
@@ -139,7 +141,7 @@ class ExtractEventsUseCase:
                             id=EventId(str(uuid4())),
                             name=ent.get("name", "Unknown"),
                             type=ent.get("type", "other"),
-                            first_seen_at=datetime.utcnow(),
+                            first_seen_at=now(),
                         )
                         entity = await self._entity_repo.save(entity)
 
@@ -149,7 +151,7 @@ class ExtractEventsUseCase:
                         entity_id=entity.id,
                         relationship_type="mentions",
                         confidence=0.7,
-                        extracted_at=datetime.utcnow(),
+                        extracted_at=now(),
                     )
                     await self._entity_repo.save_event_link(link)
 

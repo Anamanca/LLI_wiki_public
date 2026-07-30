@@ -23,7 +23,7 @@ from llm_wiki.config import settings
 
 # Structured logging — must be called before any logging happens
 from llm_wiki.infrastructure.telemetry.logging_config import setup_logging
-setup_logging(service_name="backend-v2", log_format=settings.log_format)
+setup_logging(service_name="backend-v2", log_format=settings.log_format, log_level=settings.log_level)
 
 if settings.enable_metrics:
     from llm_wiki.presentation.middleware.metrics_middleware import MetricsMiddleware

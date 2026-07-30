@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -10,7 +10,7 @@ class WorkerHeartbeat:
     current_job_id: Optional[str] = None
     current_stage: Optional[str] = None
     stage_started_at: Optional[datetime] = None
-    last_heartbeat: datetime = field(default_factory=datetime.utcnow)
+    last_heartbeat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     cpu_percent: Optional[int] = None
     error_message: Optional[str] = None
 
@@ -19,14 +19,14 @@ class WorkerHeartbeat:
 class TelegramSubscriber:
     chat_id: int
     username: Optional[str] = None
-    subscribed_at: datetime = field(default_factory=datetime.utcnow)
+    subscribed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     is_active: bool = True
 
 
 @dataclass
 class ScanLock:
     scan_date: "date"
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
 
 
@@ -41,8 +41,8 @@ class ApiKey:
     rate_limited_until: Optional[datetime] = None
     usage_count: int = 0
     last_used_at: Optional[datetime] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -56,5 +56,5 @@ class CronJob:
     managed: bool = True
     enabled: bool = True
     command: Optional[str] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

@@ -20,7 +20,8 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime
+from llm_wiki.shared.datetime_utils import now
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -1140,7 +1141,7 @@ async def _update_page(
     # Only update summary from LLM — content_markdown is regenerated from sections below
     if data.get("summary"):
         page.summary = data.get("summary", page.summary)
-    page.updated_at = datetime.now(timezone.utc)
+    page.updated_at = now()
 
     deleted = await db.execute(
         delete(orm.PageSection).where(

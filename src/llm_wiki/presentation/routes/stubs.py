@@ -4,7 +4,8 @@ Optional stub/read-only routes for the admin UI. Admin operational routes
 via src/llm_wiki/presentation/routes/admin.py.
 """
 import os
-from datetime import datetime, timezone
+from datetime import datetime
+from llm_wiki.shared.datetime_utils import now
 from uuid import UUID
 
 import psutil
@@ -23,7 +24,7 @@ MASK = "***"
 
 
 async def _count_done_today(db: AsyncSession) -> int:
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = now().replace(hour=0, minute=0, second=0, microsecond=0)
     q = select(func.count(orm.SourceItem.id)).where(
         orm.SourceItem.status.in_(["completed", "published"]),
         orm.SourceItem.started_at >= today_start,
@@ -127,7 +128,7 @@ async def progress(db: AsyncSession = Depends(get_db)):
     for item, src_name in result.all():
         elapsed = 0
         if item.started_at:
-            elapsed = (datetime.now(timezone.utc) - item.started_at).total_seconds()
+            elapsed = (now() - item.started_at).total_seconds()
         stage_label_map = {
             "transcribe": "Transcribe",
             "wiki": "Generate Wiki",
@@ -777,7 +778,7 @@ async def list_workers(db: AsyncSession = Depends(get_db)):
     for w in result.scalars():
         ago = 999
         if w.last_heartbeat:
-            ago = (datetime.now(timezone.utc) - w.last_heartbeat).total_seconds()
+            ago = (now() - w.last_heartbeat).total_seconds()
         workers.append({
             "worker_id": w.worker_id,
             "status": w.status or "idle",

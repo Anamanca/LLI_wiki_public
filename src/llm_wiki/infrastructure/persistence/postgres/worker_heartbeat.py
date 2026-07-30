@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
+from llm_wiki.shared.datetime_utils import now
 from uuid import UUID
 
 from sqlalchemy import text
@@ -60,7 +61,7 @@ async def write_heartbeat(
                     "status": status,
                     "job_id": str(current_job_id) if current_job_id else None,
                     "stage": current_stage,
-                    "now": datetime.now(timezone.utc),
+                    "now": now(),
                     "cpu": cpu_percent,
                     "error": error_message[:1000] if error_message else None,
                 },

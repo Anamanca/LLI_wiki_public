@@ -197,6 +197,11 @@ spec:
             configMapKeyRef:
               name: llm-wiki-config
               key: LOG_FORMAT
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LOG_LEVEL
         command: ["python3", "-m", "llm_wiki.infrastructure.entrypoints.cpu_worker"]
         ports:
         - containerPort: 8101

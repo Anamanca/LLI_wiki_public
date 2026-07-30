@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -11,7 +11,7 @@ class Entity:
     canonical_name: Optional[str] = None
     ticker: Optional[str] = None
     metadata: dict = field(default_factory=dict)
-    first_seen_at: datetime = field(default_factory=datetime.utcnow)
+    first_seen_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -21,7 +21,7 @@ class EventEntityLink:
     entity_id: "EntityId"
     relationship_type: str = "mentions"
     confidence: float = 0.5
-    extracted_at: datetime = field(default_factory=datetime.utcnow)
+    extracted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -33,4 +33,4 @@ class EntityRelation:
     properties: dict = field(default_factory=dict)
     confidence: float = 0.5
     source_event_id: Optional["EventId"] = None
-    extracted_at: datetime = field(default_factory=datetime.utcnow)
+    extracted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

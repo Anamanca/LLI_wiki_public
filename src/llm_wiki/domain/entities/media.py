@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from llm_wiki.domain.value_objects.identifiers import PageId, SourceItemId
@@ -16,4 +16,4 @@ class MediaAsset:
     mime_type: Optional[str] = None
     file_size_bytes: Optional[int] = None
     description: Optional[str] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

@@ -38,6 +38,7 @@ async def create_source(
         config=result.config if result.config else {},
         added_at=str(result.added_at) if result.added_at else None,
         last_checked_at=str(result.last_checked_at) if result.last_checked_at else None,
+        last_video_published_at=str(result.last_video_published_at) if result.last_video_published_at else None,
     )
 
 
@@ -56,6 +57,7 @@ async def list_sources(db: AsyncSession = Depends(get_db)):
             config=s.config if s.config else {},
             added_at=str(s.added_at) if s.added_at else None,
             last_checked_at=str(s.last_checked_at) if s.last_checked_at else None,
+            last_video_published_at=str(s.last_video_published_at) if s.last_video_published_at else None,
         )
         for s in sources
     ]

@@ -5,7 +5,8 @@ Mounted unconditionally because the K8s CronJob depends on them.
 import json
 import logging
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
+from llm_wiki.shared.datetime_utils import now
 from uuid import UUID
 
 import httpx
@@ -14,7 +15,12 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.infrastructure.persistence.postgres import models as orm
-from llm_wiki.application.use_cases.ingestion.youtube_poller import poll_channel, YouTubeQuotaExceeded
+from llm_wiki.application.use_cases.ingestion.youtube_poller import (
+    poll_channel,
+    write_scan_log,
+    PollResult,
+    YouTubeQuotaExceeded,
+)
 from llm_wiki.presentation.dependencies import get_db
 
 router = APIRouter(prefix="/admin")
@@ -27,7 +33,21 @@ _WORKER_HEARTBEAT_TIMEOUT_SECONDS = 60
 
 
 def _today_utc() -> date:
-    return datetime.now(timezone.utc).date()
+    return now().date()
+
+
+async def _prune_scan_logs(db: AsyncSession, retention_days: int = 10) -> int:
+    """Delete scan_logs older than retention_days. Returns number of rows deleted."""
+    cutoff = now() - timedelta(days=retention_days)
+    result = await db.execute(
+        delete(orm.ScanLog).where(orm.ScanLog.started_at < cutoff)
+    )
+    await db.commit()
+    deleted = result.rowcount
+    if deleted:
+        logger = logging.getLogger(__name__)
+        logger.info("Pruned %d scan_logs older than %d days", deleted, retention_days)
+    return deleted
 
 
 async def _run_youtube_scan(
@@ -40,18 +60,24 @@ async def _run_youtube_scan(
     This is the actual execution triggered by the daily cron job. It writes the
     scan_lock row so the GUI can report "done" for today, and it inserts any new
     videos as pending source_items for the workers to process.
+
+    Each source gets an independent scan_logs row so quota burn and errors are
+    auditable per channel. Old scan_logs rows (10+ days) are pruned at the start.
     """
+    # Prune old scan logs before starting this run.
+    await _prune_scan_logs(db)
+
     today = _today_utc()
     scan_date = today
 
     # Mark scan started (idempotent for the day).
     lock = await db.get(orm.ScanLock, scan_date)
-    now = datetime.now(timezone.utc)
+    now_ts = now()
     if lock is None:
-        lock = orm.ScanLock(scan_date=scan_date, started_at=now)
+        lock = orm.ScanLock(scan_date=scan_date, started_at=now_ts)
         db.add(lock)
     else:
-        lock.started_at = now
+        lock.started_at = now_ts
     await db.commit()
 
     sources_result = await db.execute(
@@ -64,36 +90,57 @@ async def _run_youtube_scan(
 
     total_found = 0
     total_inserted = 0
+    total_quota_used = 0
+    total_api_calls = 0
     quota_exceeded = False
     errors: list[str] = []
 
+    log = logging.getLogger(__name__)
+
     for source in sources:
         try:
-            found = await poll_channel(source, db, backfill=backfill)
-            total_found += len(found)
+            result = await poll_channel(source, db, backfill=backfill)
+            total_found += result.found
+            total_inserted += result.inserted
+            total_quota_used += result.quota_used
+            total_api_calls += result.api_calls
+            if result.error:
+                errors.append(f"{source.name}: {result.error}")
+                if "quota" in (result.error or "").lower():
+                    quota_exceeded = True
+            # Write scan log regardless of outcome.
+            await write_scan_log(
+                db,
+                str(source.id),
+                source.name,
+                scan_type="backfill" if backfill else "daily",
+                result=result,
+            )
         except YouTubeQuotaExceeded:
             quota_exceeded = True
             errors.append(f"quota exceeded for {source.name}")
-            break
+            await write_scan_log(
+                db,
+                str(source.id),
+                source.name,
+                scan_type="backfill" if backfill else "daily",
+                result=PollResult(error="YouTube daily quota exhausted"),
+            )
+            continue  # Don't break — other sources may still succeed
         except Exception as exc:
-            logger = logging.getLogger(__name__)
-            logger.exception("Daily scan failed for source %s", source.name)
-            errors.append(f"{source.name}: {exc}")
+            log.exception("Daily scan failed for source %s", source.name)
+            error_msg = str(exc)[:500]
+            errors.append(f"{source.name}: {error_msg}")
+            await write_scan_log(
+                db,
+                str(source.id),
+                source.name,
+                scan_type="backfill" if backfill else "daily",
+                result=PollResult(error=error_msg),
+            )
             continue
 
-    # Re-query source counts for newly inserted items.
-    # poll_channel already commits per source; we just need a summary.
-    pending_count = (
-        await db.execute(
-            select(func.count(orm.SourceItem.id)).where(
-                orm.SourceItem.status == "pending",
-                orm.SourceItem.created_at >= now,
-            )
-        )
-    ).scalar() or 0
-    total_inserted = int(pending_count)
-
-    lock.completed_at = datetime.now(timezone.utc)
+    lock.completed_at = now()
     await db.commit()
 
     return {
@@ -104,6 +151,8 @@ async def _run_youtube_scan(
         "sources_scanned": len(sources),
         "videos_found": total_found,
         "new_items": total_inserted,
+        "quota_used": total_quota_used,
+        "api_calls": total_api_calls,
         "quota_exceeded": quota_exceeded,
         "errors": errors,
     }
@@ -273,7 +322,7 @@ async def _background_task_status(db: AsyncSession) -> tuple[str, int]:
         running    - At least one worker has heartbeat within timeout
         no_workers - No workers have reported recently
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(
+    cutoff = now() - timedelta(
         seconds=_WORKER_HEARTBEAT_TIMEOUT_SECONDS
     )
     result = await db.execute(
@@ -387,6 +436,60 @@ async def stop_cron_job(job_id: str, db: AsyncSession = Depends(get_db)):
         pass
 
     return {"success": True, "message": f"Cron job {job_id} stopped"}
+
+
+# ---------------------------------------------------------------------------
+# Scan logs — audit trail for YouTube API usage per channel
+# ---------------------------------------------------------------------------
+
+@router.get("/scan-logs")
+async def get_scan_logs(
+    source_id: str | None = None,
+    days: int = 7,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return recent scan log entries for analysis.
+
+    Query params:
+      source_id  — filter to a specific source (optional, returns all if omitted)
+      days       — lookback window, default 7
+      limit      — max rows, default 100
+    """
+    q = (
+        select(orm.ScanLog)
+        .order_by(orm.ScanLog.started_at.desc())
+        .limit(limit)
+    )
+    if source_id:
+        try:
+            sid = UUID(source_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid source ID")
+        q = q.where(orm.ScanLog.source_id == sid)
+    if days > 0:
+        cutoff = now() - timedelta(days=days)
+        q = q.where(orm.ScanLog.started_at >= cutoff)
+
+    result = await db.execute(q)
+    logs = result.scalars().all()
+    return [
+        {
+            "id": l.id,
+            "source_id": str(l.source_id),
+            "source_name": l.source_name,
+            "scan_type": l.scan_type,
+            "started_at": l.started_at.isoformat(),
+            "completed_at": l.completed_at.isoformat() if l.completed_at else None,
+            "api_calls": l.api_calls,
+            "quota_used": l.quota_used,
+            "videos_found": l.videos_found,
+            "videos_inserted": l.videos_inserted,
+            "error_message": l.error_message,
+            "success": l.success,
+        }
+        for l in logs
+    ]
 
 
 @router.get("/health")

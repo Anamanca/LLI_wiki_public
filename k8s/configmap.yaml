@@ -33,3 +33,4 @@ data:
   LANGSMITH_EVALUATOR_MODEL: "deepseek-v4-flash"
   ENABLE_METRICS: "true"
   LOG_FORMAT: "json"
+  LOG_LEVEL: "INFO"

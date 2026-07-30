@@ -22,7 +22,8 @@ import signal
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
+from llm_wiki.shared.datetime_utils import now
 from typing import Any
 from uuid import UUID
 
@@ -183,7 +184,7 @@ async def process_wiki_job(item_id: UUID) -> None:
 
         # Mark as wiki-processing with heartbeat
         item.status = "wiki_processing"
-        item.started_at = datetime.now(timezone.utc)
+        item.started_at = now()
         await db.commit()
 
         set_worker_state(CONSUMER_ID, "wiki", item.id, "wiki_integrate", 0)
@@ -536,9 +537,13 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
+    from llm_wiki.config import settings
+    from llm_wiki.infrastructure.telemetry.logging_config import setup_logging
+
+    setup_logging(
+        service_name="wiki-consumer",
+        log_format=settings.log_format,
+        log_level=settings.log_level,
+        worker_id=settings.consumer_id,
     )
     asyncio.run(main())

@@ -41,6 +41,7 @@ class Source(Base):
     url = Column(String(512), nullable=False)
     added_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
     last_checked_at = Column(DateTime(timezone=True), nullable=True)
+    last_video_published_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(20), nullable=False, default="active")
     config = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
 
@@ -232,6 +233,28 @@ class ScanLock(Base):
     scan_date = Column(Date, primary_key=True)
     started_at = Column(DateTime(timezone=True), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class ScanLog(Base):
+    """Per-source YouTube scan audit trail — one row per source per scan run."""
+
+    __tablename__ = "scan_logs"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    source_id = Column(UUID(as_uuid=True), ForeignKey("sources.id", ondelete="CASCADE"), nullable=False)
+    source_name = Column(String(255), nullable=False)
+    scan_type = Column(String(20), nullable=False, default="daily")
+    started_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    api_calls = Column(Integer, nullable=False, default=0)
+    quota_used = Column(Integer, nullable=False, default=0)
+    videos_found = Column(Integer, nullable=False, default=0)
+    videos_inserted = Column(Integer, nullable=False, default=0)
+    error_message = Column(Text, nullable=True)
+    success = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    source = relationship("Source")
 
 
 class WorkerHeartbeat(Base):

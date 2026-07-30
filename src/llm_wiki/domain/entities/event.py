@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from llm_wiki.domain.value_objects.identifiers import EventId, PageId, SourceId
@@ -15,8 +15,8 @@ class EventCanonical:
     entities: dict = field(default_factory=dict)
     importance_score: float = 0.0
     canonical_embedding: Optional[list[float]] = None
-    first_seen_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    first_seen_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     observation_count: int = 0
     consensus_summary: Optional[str] = None
     consensus_generated_at: Optional[datetime] = None
@@ -29,7 +29,7 @@ class EventObservation:
     source_id: Optional[SourceId] = None
     page_id: Optional[PageId] = None
     source_published_at: Optional[datetime] = None
-    extracted_at: datetime = field(default_factory=datetime.utcnow)
+    extracted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     observation_type: str = "initial_report"
     description: Optional[str] = None
     impact_direction: Optional[str] = None
@@ -49,4 +49,4 @@ class EventTimelineChain:
     relation_type: str = "causes"
     description: Optional[str] = None
     confidence: float = 0.5
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

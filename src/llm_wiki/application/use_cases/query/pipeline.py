@@ -4,7 +4,9 @@ import json
 import logging
 import re
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
+
+from llm_wiki.shared.datetime_utils import now
 from typing import Any
 
 from llm_wiki.application.dto.query_dto import QueryInput
@@ -167,7 +169,7 @@ def _month_year_delta(m: re.Match) -> timedelta | None:
 
 def _year_delta(m: re.Match) -> timedelta | None:
     year = int(m.group(1))
-    now = datetime.now(UTC).replace(tzinfo=None)
+    now_ts = now().replace(tzinfo=None)
     if year < 2000 or year > now.year:
         return None
     start = datetime(year, 1, 1)
@@ -183,7 +185,7 @@ _TIME_KEYWORDS = re.compile(
 
 
 def _extract_time_range(question: str) -> TimeRange | None:
-    now = datetime.now(UTC).replace(tzinfo=None)
+    now_ts = now().replace(tzinfo=None)
     for pattern, delta_fn in _TIME_PATTERNS:
         m = re.search(pattern, question, re.IGNORECASE)
         if not m:
@@ -563,7 +565,7 @@ class QueryPipeline:
         }
 
     async def _extract_time_range_with_llm(self, question: str) -> TimeRange | None:
-        now = datetime.now(UTC).replace(tzinfo=None)
+        now_ts = now().replace(tzinfo=None)
         prompt = (
             'Extract the time range from this question. '
             'Return ONLY a JSON object: {"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"} '
@@ -582,7 +584,7 @@ class QueryPipeline:
             if data.get("start_date"):
                 start = datetime.fromisoformat(data["start_date"])
                 end_str = data.get("end_date", "now")
-                end = now if end_str == "now" else datetime.fromisoformat(end_str)
+                end = now() if end_str == "now" else datetime.fromisoformat(end_str)
                 return TimeRange(start=start, end=end)
         except Exception:
             logger.debug("LLM time extraction failed")
@@ -900,7 +902,7 @@ class QueryPipeline:
 
         # ── System prompt with language + temporal addendum + today's date ─
         lang = analysis.language or _detect_language(input.question)
-        today_str = datetime.now(UTC).strftime("%Y-%m-%d")
+        today_str = now().strftime("%Y-%m-%d")
         if lang == "en":
             system_prompt = (
                 "You are a deep-research assistant. "
@@ -1146,7 +1148,7 @@ class QueryPipeline:
             context = self._build_context(top_results)
 
             lang_stream = analysis.language or _detect_language(input.question)
-            today_str_stream = datetime.now(UTC).strftime("%Y-%m-%d")
+            today_str_stream = now().strftime("%Y-%m-%d")
             if lang_stream == "en":
                 system_prompt = (
                     "You are a deep-research assistant. "

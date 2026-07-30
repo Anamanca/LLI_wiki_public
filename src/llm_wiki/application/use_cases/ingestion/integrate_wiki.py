@@ -10,6 +10,8 @@ from llm_wiki.domain.exceptions import IngestionFailedError
 
 import re
 from datetime import datetime
+
+from llm_wiki.shared.datetime_utils import now
 from uuid import uuid4
 
 
@@ -57,7 +59,7 @@ class IntegrateWikiUseCase:
             domain=domain,
             key_entities=key_entities or [],
             status="published",
-            updated_at=datetime.utcnow(),
+            updated_at=now(),
         )
 
         page = await self._page_repo.save(page)
@@ -86,7 +88,7 @@ class IntegrateWikiUseCase:
                 content_markdown=section_content,
                 section_vector=section_embedding,
                 source_ref=f"source:{source_id.value}",
-                created_at=datetime.utcnow(),
+                created_at=now(),
             )
             await self._section_repo.save(section)
 

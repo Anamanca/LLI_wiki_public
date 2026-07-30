@@ -1,4 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import timedelta
+
+from llm_wiki.shared.datetime_utils import now
 
 from fastapi import APIRouter, Depends, Query as FastQuery
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,8 +20,8 @@ async def summarize_time_range(
     days: int = FastQuery(default=30, ge=1, le=365, description="Number of days to look back"),
     db: AsyncSession = Depends(get_db),
 ):
-    now = datetime.utcnow()
-    start = now - timedelta(days=days)
+    now_ts = now()
+    start = now_ts - timedelta(days=days)
     use_case = SummarizeTimeRangeUseCase(
         session=db,
         event_repo=PostgresEventRepository(db),
@@ -27,7 +29,7 @@ async def summarize_time_range(
     )
     result = await use_case.execute(TimeRangeSummaryInput(
         start=start,
-        end=now,
+        end=now_ts,
     ))
     return {
         "summary": result.summary_text,

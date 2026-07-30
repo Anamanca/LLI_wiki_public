@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
+from llm_wiki.shared.datetime_utils import now
 from typing import Callable
 
 from llm_wiki.application.ports.repositories.source_repository import SourceItemRepository
@@ -33,7 +34,7 @@ class RetryableIngestion:
                 if attempt < max_retries - 1:
                     item.status = retry_status
                     item.error_message = "timeout"
-                    item.retry_after = datetime.now(tz=timezone.utc)
+                    item.retry_after = now()
                     await self._repo.save(item)
                 else:
                     item.status = "failed"
@@ -74,7 +75,7 @@ class ProcessVideoUseCase:
 
     async def execute(self, item: SourceItem) -> SourceItem:
         item.status = "processing"
-        item.started_at = datetime.now(tz=timezone.utc)
+        item.started_at = now()
         await self._source_item_repo.save(item)
 
         async def _process(item: SourceItem) -> SourceItem:

@@ -6,7 +6,8 @@ They replace the stub implementations in ``stubs.py``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
+from llm_wiki.shared.datetime_utils import now
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -57,7 +58,7 @@ class ChatSessionResponse(BaseModel):
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now().isoformat()
 
 
 def _serialize_session(session) -> ChatSessionResponse:

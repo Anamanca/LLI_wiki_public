@@ -14,11 +14,19 @@ logger = logging.getLogger(__name__)
 _current_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_trace_id", default=None
 )
+_current_span_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_span_id", default=None
+)
 
 
 def get_current_trace_id() -> str | None:
     """Return the LangSmith RunTree id for the current asyncio task, if any."""
     return _current_trace_id.get()
+
+
+def get_current_span_id() -> str | None:
+    """Return the current application span id for the current asyncio task, if any."""
+    return _current_span_id.get()
 
 
 def _safe_extra(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -96,6 +104,7 @@ class LangSmithTelemetryAdapter(TelemetryPort):
             run.post()
             self._runs[span_id] = run
             _current_trace_id.set(str(run.id))
+            _current_span_id.set(span_id)
         except Exception as exc:
             logger.debug("LangSmith start_span failed: %s", exc, exc_info=True)
             return TelemetrySpan(span_id=span_id, name=name, kind=kind, metadata=metadata or {})

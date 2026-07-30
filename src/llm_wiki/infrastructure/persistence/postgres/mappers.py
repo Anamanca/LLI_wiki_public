@@ -41,6 +41,7 @@ class SourceMapper:
             url=m.url,
             added_at=m.added_at,
             last_checked_at=m.last_checked_at,
+            last_video_published_at=m.last_video_published_at,
             status=m.status,
             config=m.config or {},
         )
@@ -53,6 +54,7 @@ class SourceMapper:
         target.external_id = d.external_id
         target.url = d.url
         target.last_checked_at = d.last_checked_at
+        target.last_video_published_at = d.last_video_published_at
         target.status = d.status
         target.config = d.config
         return target

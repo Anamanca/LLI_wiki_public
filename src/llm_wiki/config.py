@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     # Monitoring
     enable_metrics: bool = Field(default=False, validation_alias="ENABLE_METRICS")
     log_format: str = Field(default="text", validation_alias="LOG_FORMAT")
+    log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
 
 
 settings = Settings()

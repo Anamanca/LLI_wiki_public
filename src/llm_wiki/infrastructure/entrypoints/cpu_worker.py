@@ -20,7 +20,8 @@ import random
 import signal
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from llm_wiki.shared.datetime_utils import now
 from typing import Any
 from uuid import UUID
 
@@ -75,7 +76,7 @@ async def claim_job(db: AsyncSession) -> SourceItem | None:
         .where(SourceItem.status == "pending")
         .where(
             # Skip items that are rate-limited (retry_after in the future)
-            (SourceItem.retry_after.is_(None)) | (SourceItem.retry_after <= datetime.now(timezone.utc))
+            (SourceItem.retry_after.is_(None)) | (SourceItem.retry_after <= now())
         )
         .order_by(SourceItem.priority.asc(), SourceItem.published_at.desc().nullslast())
         .limit(1)
@@ -88,7 +89,7 @@ async def claim_job(db: AsyncSession) -> SourceItem | None:
 
     # Mark as processing with heartbeat timestamp
     item.status = "processing"
-    item.started_at = datetime.now(timezone.utc)
+    item.started_at = now()
     item.error_message = None  # Clear stale error from previous attempt
     await db.commit()
     await db.refresh(item)
@@ -341,7 +342,7 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
                 await _telemetry.end_span(span=root_span, error=f"extract: {err_msg[:400]}")
                 if new_status == "scheduled":
                     item.status = "pending"
-                    item.retry_after = datetime.now(timezone.utc) + timedelta(hours=12)
+                    item.retry_after = now() + timedelta(hours=12)
                     item.error_message = f"Video not yet available: {new_status}"
                     await _log_event(db, item.id, "video_scheduled", item.error_message)
                     await db.commit()
@@ -526,7 +527,7 @@ async def handle_job_failure(
         # Rate-limit/402: reset to pending with 24-hour backoff (pending until manual reset or next day)
         # DON'T increment retry_count
         item.status = "pending"
-        item.retry_after = datetime.now(timezone.utc) + timedelta(hours=24)
+        item.retry_after = now() + timedelta(hours=24)
         await _log_event(db, item.id, "retry", f"Quota/Payment/Rate-limited, queued for retry in 24h: {error_msg[:200]}")
         logger.warning("Worker %d: Job %s rate-limited/402, retry after %s", WORKER_ID, item.id, item.retry_after)
         await push_error_web(item.id, error_msg, db, event_type="api_limit")
@@ -541,7 +542,7 @@ async def handle_job_failure(
         item.retry_count = (item.retry_count or 0) + 1
         if item.retry_count <= 2:
             item.status = "pending"
-            item.retry_after = datetime.now(timezone.utc) + timedelta(seconds=60)
+            item.retry_after = now() + timedelta(seconds=60)
             await _log_event(db, item.id, "retry", f"Failed attempt {item.retry_count}, queued for retry: {error_msg[:200]}")
             logger.warning("Worker %d: Job %s queued for retry (attempt %d)", WORKER_ID, item.id, item.retry_count)
         else:
@@ -701,9 +702,13 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
+    from llm_wiki.config import settings
+    from llm_wiki.infrastructure.telemetry.logging_config import setup_logging
+
+    setup_logging(
+        service_name="cpu-worker",
+        log_format=settings.log_format,
+        log_level=settings.log_level,
+        worker_id=settings.worker_id,
     )
     asyncio.run(main())

@@ -10,9 +10,11 @@ import json
 import os
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from llm_wiki.shared.datetime_utils import now
 
 from llm_wiki.application.ports.repositories.chat_session_repository import (
     ChatMessage,
@@ -25,7 +27,7 @@ _SAFE_ID = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 def _now() -> datetime:
-    return datetime.now(UTC)
+    return now()
 
 
 def _to_iso(dt: datetime) -> str:

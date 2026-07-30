@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
+
+from llm_wiki.shared.datetime_utils import now
 
 
 @dataclass(frozen=True)
@@ -20,7 +22,7 @@ class TelemetrySpan:
     span_id: str
     name: str
     kind: str
-    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    start_time: datetime = field(default_factory=now)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

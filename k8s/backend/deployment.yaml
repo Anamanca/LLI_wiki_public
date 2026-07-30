@@ -189,6 +189,11 @@ spec:
             configMapKeyRef:
               name: llm-wiki-config
               key: LOG_FORMAT
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LOG_LEVEL
         - name: CROSS_ENCODER_ENABLED
           valueFrom:
             configMapKeyRef:

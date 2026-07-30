@@ -56,3 +56,4 @@ class SourceResponse(BaseModel):
     config: dict
     added_at: Optional[str] = None
     last_checked_at: Optional[str] = None
+    last_video_published_at: Optional[str] = None

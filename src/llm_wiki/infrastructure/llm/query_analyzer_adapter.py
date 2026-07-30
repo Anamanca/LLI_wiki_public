@@ -2,7 +2,8 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
+from llm_wiki.shared.datetime_utils import now
 
 from llm_wiki.application.ports.search.query_analyzer_port import (
     QueryAnalysis,
@@ -126,7 +127,7 @@ class LLMQueryAnalyzerAdapter(QueryAnalyzerPort):
             return None
         try:
             start = datetime.fromisoformat(start_str)
-            end = datetime.fromisoformat(end_str) if end_str else datetime.now(timezone.utc)
+            end = datetime.fromisoformat(end_str) if end_str else now()
             return TimeRange(start=start, end=end)
         except (ValueError, TypeError):
             return None

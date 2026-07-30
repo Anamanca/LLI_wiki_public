@@ -23,7 +23,9 @@ import asyncio
 import json
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import datetime
+
+from llm_wiki.shared.datetime_utils import now
 from typing import Any
 
 from llm_wiki.application.dto.query_dto import QueryInput
@@ -840,7 +842,7 @@ class SelfReflectiveRAGPipeline:
 
     def _build_messages(self, input: QueryInput, state: dict) -> list[dict]:
         """Build LLM messages from state (shared by _generate and execute_stream)."""
-        today_str = datetime.now(UTC).strftime("%Y-%m-%d")
+        today_str = now().strftime("%Y-%m-%d")
         intent = state["intent"]
         analysis = state.get("analysis")
         lang = analysis.language if analysis and analysis.language else "vi"

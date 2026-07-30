@@ -142,7 +142,8 @@ This README is written for **AI agents and future developers**. It explains the 
 ├── docs/                                # Technical documentation
 │   ├── search-strategy.md               # Full RAG pipeline strategy (12-step, agentic)
 │   ├── telemetry-implementation-strategy.md  # LangSmith tracing architecture
-│   └── monitoring-guide.md              # Prometheus + Grafana + Loki + AlertManager guide
+│   ├── monitoring-guide.md              # Prometheus + Grafana + Loki + AlertManager guide
+│   └── observability-guide.md           # Full SRE 4-pillar reference (metrics, logs, traces, alerts)
 │
 ├── k8s/                                 # Kubernetes manifests (Kind / K3s)
 │   ├── README.md                        # Deployment guide

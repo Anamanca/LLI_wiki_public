@@ -10,7 +10,8 @@ import asyncio
 import hashlib
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime
+from llm_wiki.shared.datetime_utils import now, get_system_tz
 from typing import Any
 
 from sqlalchemy import select, update
@@ -251,7 +252,7 @@ class ApiKeyManager:
 
     async def mark_rate_limited(self, key_id: str, until: float) -> None:
         """Mark a key as rate-limited in both in-memory cache and DB."""
-        until_dt = datetime.fromtimestamp(until, tz=timezone.utc)
+        until_dt = datetime.fromtimestamp(until, tz=get_system_tz())
 
         for k in self._keys:
             if k["id"] == key_id:
@@ -278,7 +279,7 @@ class ApiKeyManager:
         if not key_id:
             return
 
-        now = datetime.now(tz=timezone.utc)
+        now_ts = now()
         for k in self._keys:
             if k["id"] == key_id:
                 k["usage_count"] = k.get("usage_count", 0) + 1
@@ -289,7 +290,7 @@ class ApiKeyManager:
                 await session.execute(
                     update(ApiKey)
                     .where(ApiKey.id == key_id)
-                    .values(usage_count=ApiKey.usage_count + 1, last_used_at=now)
+                    .values(usage_count=ApiKey.usage_count + 1, last_used_at=now_ts)
                 )
                 await session.commit()
         except Exception:
@@ -306,7 +307,7 @@ class ApiKeyManager:
         while True:
             try:
                 await asyncio.sleep(30)
-                now = datetime.now(tz=timezone.utc)
+                now_ts = now()
 
                 recovered = 0
                 for k in self._keys:
@@ -322,7 +323,7 @@ class ApiKeyManager:
                     result = await session.execute(
                         select(ApiKey).where(
                             ApiKey.status == "rate_limited",
-                            ApiKey.rate_limited_until <= now,
+                            ApiKey.rate_limited_until <= now_ts,
                         )
                     )
                     stale = result.scalars().all()

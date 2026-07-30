@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime
+from llm_wiki.shared.datetime_utils import now
 from typing import Optional
 
 from sqlalchemy import select, or_
@@ -90,7 +91,7 @@ class PostgresSourceItemRepository(SourceItemRepository):
             .where(
                 or_(
                     orm.SourceItem.retry_after.is_(None),
-                    orm.SourceItem.retry_after <= datetime.now(tz=timezone.utc),
+                    orm.SourceItem.retry_after <= now(),
                 )
             )
             .order_by(orm.SourceItem.priority.desc(), orm.SourceItem.created_at)
@@ -101,7 +102,7 @@ class PostgresSourceItemRepository(SourceItemRepository):
         if not orm_item:
             return None
         orm_item.status = "processing"
-        orm_item.started_at = datetime.now(tz=timezone.utc)
+        orm_item.started_at = now()
         orm_item.error_message = None
         await self._session.commit()
         return self._mapper.to_domain(orm_item)

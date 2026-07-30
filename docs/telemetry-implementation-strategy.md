@@ -1,6 +1,6 @@
 # Telemetry Implementation Strategy
 
-> **Last updated:** 2026-07-29
+> **Last updated:** 2026-07-30
 > **Status:** Implemented & deployed
 > **Observability platform:** LangSmith (by LangChain)
 
@@ -90,6 +90,15 @@ else:
 ```
 
 **Why `create_child()` is essential:** `RunTree(parent=...)` creates a new root trace that references the parent by ID but appears **isolated** in the LangSmith UI — you see 261 flat runs instead of one tree. `create_child()` links the new run into the parent's trace DNA, producing **a single hierarchical tree**.
+
+**About `span_id` — internal, nothing to configure:** The adapter maintains two `contextvars.ContextVar` for log correlation:
+
+| Var | Source | Purpose |
+|-----|--------|---------|
+| `_current_trace_id` | LangSmith `run.id` (returned by `run.post()`) | Correlate logs → LangSmith trace |
+| `_current_span_id` | `uuid4()` auto-generated in `start_span()` | Correlate logs → specific span within a trace |
+
+Both are **internal implementation details** — auto-generated at runtime, injected into log records by `TraceIdFilter`. There is **no env var, no config field, nothing to declare**. They "just work."
 
 ### 2.3 `NullTelemetryAdapter` — graceful degradation
 

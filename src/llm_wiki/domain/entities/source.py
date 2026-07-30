@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from llm_wiki.domain.value_objects.identifiers import SourceId
@@ -12,8 +12,9 @@ class Source:
     platform: str = "youtube"
     external_id: str = ""
     url: str = ""
-    added_at: datetime = field(default_factory=datetime.utcnow)
+    added_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_checked_at: Optional[datetime] = None
+    last_video_published_at: Optional[datetime] = None
     status: str = "active"
     config: dict = field(default_factory=dict)
 
@@ -34,4 +35,4 @@ class SourceItem:
     error_message: Optional[str] = None
     transcript_text: Optional[str] = None
     transcript_json: Optional[dict] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
