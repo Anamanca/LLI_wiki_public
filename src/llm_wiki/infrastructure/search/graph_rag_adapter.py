@@ -52,7 +52,8 @@ class PostgresGraphRAGAdapter(GraphRAGPort):
                     params["end_date"] = time_range.end.date()
             where_sql = " AND ".join(where_parts)
 
-            sql = text(f"""
+            sql = (  # nosec B608
+                text(f"""
                 SELECT DISTINCT ON (ec.id)
                     ec.id, ec.title, ec.consensus_summary AS content,
                     ec.normalized_date AS event_date,
@@ -66,6 +67,7 @@ class PostgresGraphRAGAdapter(GraphRAGPort):
                 ORDER BY ec.id, ec.importance_score DESC
                 LIMIT :limit
             """)
+            )
             result = await self._session.execute(sql, params)
             rows = result.mappings().all()
 

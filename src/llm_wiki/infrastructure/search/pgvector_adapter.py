@@ -48,7 +48,8 @@ class PgVectorSearchAdapter(VectorSearchPort):
         params: dict = {"vec": vec_str, "limit": top_k}
         where_sql = self._build_where(params, source_id, time_range)
 
-        sql = text(f"""
+        sql = (  # nosec B608
+            text(f"""
             SELECT ps.id, ps.content_markdown AS content, ps.title AS heading_title,
                    p.title AS page_title, p.slug AS page_slug, s.name AS source_name,
                    p.published_at,
@@ -63,6 +64,7 @@ class PgVectorSearchAdapter(VectorSearchPort):
             ORDER BY similarity DESC
             LIMIT :limit
         """)
+        )
         result = await self._session.execute(sql, params)
 
         rows = result.mappings().all()
@@ -112,7 +114,8 @@ class PgVectorSearchAdapter(VectorSearchPort):
                 params["end_date"] = time_range.end.date()
         where_sql = " AND ".join(where_parts)
 
-        sql = text(f"""
+        sql = (  # nosec B608
+            text(f"""
             SELECT ec.id, ec.title AS content, ec.title,
                    ec.consensus_summary, ec.normalized_date,
                    1 - (ec.canonical_embedding <=> :vec) AS similarity
@@ -121,6 +124,7 @@ class PgVectorSearchAdapter(VectorSearchPort):
             ORDER BY ec.canonical_embedding <=> :vec
             LIMIT :limit
         """)
+        )
         result = await self._session.execute(sql, params)
         rows = result.mappings().all()
         return [

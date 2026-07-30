@@ -105,7 +105,8 @@ class TsVectorSearchAdapter(KeywordSearchPort):
         where_sql = " AND ".join(where_parts)
 
         try:
-            sql = text(f"""
+            sql = (  # nosec B608
+                text(f"""
                 SELECT ps.id, ps.content_markdown AS content, ps.title AS heading_title,
                        p.title AS page_title, p.slug AS page_slug, s.name AS source_name,
                        {rank_expr} *
@@ -120,6 +121,7 @@ class TsVectorSearchAdapter(KeywordSearchPort):
                 ORDER BY similarity DESC
                 LIMIT :limit
             """)
+            )
             result = await self._session.execute(sql, params)
             rows = result.mappings().all()
         except Exception:

@@ -68,7 +68,7 @@ def _find_cookie_file() -> str | None:
             cookie_path,
             (time.time() - mtime) / 3600,
         )
-    tmp_path = f"/tmp/{COOKIE_FILE_NAME}"
+    tmp_path = f"/tmp/{COOKIE_FILE_NAME}"  # nosec B108 — yt-dlp cookie file, no user input
     try:
         import shutil
 

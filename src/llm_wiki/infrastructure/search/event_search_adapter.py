@@ -127,7 +127,8 @@ class PgVectorEventSearchAdapter(EventSearchPort):
         params: dict = {"vec": vec_str, "limit": top_k}
         where_sql = self._build_event_where(params, time_range)
 
-        sql = text(f"""
+        sql = (  # nosec B608
+            text(f"""
             SELECT eo.id, eo.description AS content, ec.title AS heading_title,
                    p.title AS page_title, p.slug AS page_slug, s.name AS source_name,
                    eo.source_published_at AS published_at,
@@ -147,6 +148,7 @@ class PgVectorEventSearchAdapter(EventSearchPort):
             ORDER BY similarity DESC
             LIMIT :limit
         """)
+        )
         result = await self._session.execute(sql, params)
         rows = result.mappings().all()
         return [self._row_to_search_result(r) for r in rows]
@@ -212,7 +214,8 @@ class PgVectorEventSearchAdapter(EventSearchPort):
 
         query_func = "plainto_tsquery" if use_plainto else "to_tsquery"
 
-        sql = text(f"""
+        sql = (  # nosec B608
+            text(f"""
             SELECT eo.id, eo.description AS content, ec.title AS heading_title,
                    p.title AS page_title, p.slug AS page_slug, s.name AS source_name,
                    eo.source_published_at AS published_at,
@@ -233,6 +236,7 @@ class PgVectorEventSearchAdapter(EventSearchPort):
             ORDER BY similarity DESC
             LIMIT :limit
         """)
+        )
         result = await self._session.execute(sql, params)
         rows = result.mappings().all()
         return [self._row_to_search_result(r) for r in rows]

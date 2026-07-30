@@ -85,7 +85,7 @@ async def handle_health(reader, writer) -> None:
 
 
 async def start_health_server() -> None:
-    bind_addr = "0.0.0.0" if _ENABLE_METRICS else "127.0.0.1"
+    bind_addr = "0.0.0.0" if _ENABLE_METRICS else "127.0.0.1"  # nosec B104 — gated by config flag
     server = await asyncio.start_server(handle_health, bind_addr, HEALTH_PORT)
     async with server:
         await server.serve_forever()
