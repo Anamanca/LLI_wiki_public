@@ -1,0 +1,33 @@
+{
+  "title": "Code Quality",
+  "panels": [
+    {
+      "title": "Test Coverage",
+      "type": "gauge",
+      "targets": [
+        {
+          "expr": "code_coverage_percent",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": 0, "color": "red" },
+              { "value": 50, "color": "yellow" },
+              { "value": 70, "color": "green" }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 }
+    }
+  ],
+  "refresh": "1h",
+  "schemaVersion": 38
+}

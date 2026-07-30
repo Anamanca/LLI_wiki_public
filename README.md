@@ -1,3 +1,5 @@
+[![CI](https://github.com/Anamanca/LLI_wiki_public/actions/workflows/ci.yml/badge.svg)](https://github.com/Anamanca/LLI_wiki_public/actions/workflows/ci.yml)
+
 # LLM Wiki — Clean Architecture RAG Knowledge System
 
 > **Project version:** backend `2.2.0`, frontend `3.0.1`  

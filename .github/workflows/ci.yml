@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - run: sudo apt-get install -y gcc libpq-dev
+      - run: pip install ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: PYTHONPATH=src mypy src/llm_wiki
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - run: sudo apt-get install -y gcc libpq-dev
+      - run: pip install ".[dev]"
+      - name: Run tests with coverage
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:test@localhost:5432/test
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+        run: PYTHONPATH=src pytest --cov=llm_wiki --cov-report=xml --cov-report=term --cov-fail-under=70 -m "not slow"
+      - name: Push quality metrics
+        env:
+          PUSHGATEWAY_URL: ${{ secrets.PUSHGATEWAY_URL }}
+        run: python scripts/collect-quality-metrics.py
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  # Advisory-only: findings do not block merge. Tune thresholds during
+  # the 2-week tuning window (phase-03), then remove || true to enforce.
+  security-scan-advisory:
+    needs: lint
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - run: pip install ".[dev]"
+      - name: SAST scan (bandit)
+        run: bandit -r src/ -c .bandit --severity-level medium
+      - name: Dependency CVE scan (safety)
+        run: safety check --full-report
+      - name: Build Docker (backend)
+        run: docker build -t llm-wiki-backend:ci-test .
+      - name: Build Docker (frontend)
+        run: docker build --network=host -t llm-wiki-frontend:ci-test -f frontend/Dockerfile frontend/

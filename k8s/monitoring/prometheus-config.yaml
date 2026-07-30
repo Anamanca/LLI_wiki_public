@@ -50,3 +50,8 @@ data:
       - targets: ['redis.llm-wiki.svc.cluster.local:9121']
         labels:
           app: redis
+
+    - job_name: 'pushgateway'
+      honor_labels: true
+      static_configs:
+      - targets: ['pushgateway.llm-wiki.svc.cluster.local:9091']
