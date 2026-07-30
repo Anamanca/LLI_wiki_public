@@ -9,8 +9,8 @@ set -euo pipefail
 
 KIND_CONTAINER="llm-wiki-control-plane"
 
-# Resolve Kind node IP
-KIND_IP=$(docker inspect "${KIND_CONTAINER}" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)
+# Resolve Kind node IP (use docker inspect with Go template — works in both shell and systemd)
+KIND_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${KIND_CONTAINER}" 2>/dev/null)
 if [ -z "${KIND_IP}" ]; then
   echo "ERROR: cannot find Kind container '${KIND_CONTAINER}'" >&2
   exit 1
@@ -19,40 +19,31 @@ fi
 echo "Kind node: ${KIND_CONTAINER} → ${KIND_IP}"
 echo "Starting socat forwarders..."
 
-# Kill existing socat forwarders
-pkill -f "socat TCP-LISTEN:3000" 2>/dev/null || true
-pkill -f "socat TCP-LISTEN:3100" 2>/dev/null || true
-pkill -f "socat TCP-LISTEN:3200" 2>/dev/null || true
-pkill -f "socat TCP-LISTEN:8000" 2>/dev/null || true
-pkill -f "socat TCP-LISTEN:9090" 2>/dev/null || true
-pkill -f "socat TCP-LISTEN:9093" 2>/dev/null || true
+# Kill existing socat forwarders on these ports
+for port in 3000 3100 3200 8000 9090 9093 30000 30909 30310 30903; do
+  pkill -f "socat TCP-LISTEN:${port}," 2>/dev/null || true
+done
 sleep 1
 
-# ── App Services ──
-# Frontend: host 3000 → NodePort 30080
-socat TCP-LISTEN:3000,bind=0.0.0.0,fork,reuseaddr TCP:${KIND_IP}:30080 &
-echo "  Frontend       0.0.0.0:3000 → ${KIND_IP}:30080  PID=$!"
+# ── Monitoring and App Services ──
+# Match original NodePorts so Tailscale/LAN URLs stay consistent.
+# host :port  → Kind node :NodePort
 
-# Backend API: host 8000 → NodePort 30081
-socat TCP-LISTEN:8000,bind=0.0.0.0,fork,reuseaddr TCP:${KIND_IP}:30081 &
-echo "  Backend API    0.0.0.0:8000 → ${KIND_IP}:30081  PID=$!"
+declare -A FORWARDS=(
+  # Service           Host port  → NodePort
+  [3000]="${KIND_IP}:30080"    # Frontend
+  [8000]="${KIND_IP}:30081"    # Backend API
+  [30000]="${KIND_IP}:30000"   # Grafana (NodePort itself, but reached via socat)
+  [30909]="${KIND_IP}:30909"   # Prometheus
+  [30903]="${KIND_IP}:30903"   # AlertManager
+  [30310]="${KIND_IP}:30310"   # Loki
+)
 
-# ── Monitoring Services ──
-# Grafana: host 3100 → NodePort 30000
-socat TCP-LISTEN:3100,bind=0.0.0.0,fork,reuseaddr TCP:${KIND_IP}:30000 &
-echo "  Grafana        0.0.0.0:3100 → ${KIND_IP}:30000  PID=$!"
-
-# Prometheus: host 9090 → NodePort 30909
-socat TCP-LISTEN:9090,bind=0.0.0.0,fork,reuseaddr TCP:${KIND_IP}:30909 &
-echo "  Prometheus     0.0.0.0:9090 → ${KIND_IP}:30909  PID=$!"
-
-# AlertManager: host 9093 → NodePort 30903
-socat TCP-LISTEN:9093,bind=0.0.0.0,fork,reuseaddr TCP:${KIND_IP}:30903 &
-echo "  AlertManager   0.0.0.0:9093 → ${KIND_IP}:30903  PID=$!"
-
-# Loki: host 3200 → NodePort 30310
-socat TCP-LISTEN:3200,bind=0.0.0.0,fork,reuseaddr TCP:${KIND_IP}:30310 &
-echo "  Loki           0.0.0.0:3200 → ${KIND_IP}:30310  PID=$!"
+for host_port in 3000 8000 30000 30909 30903 30310; do
+  target="${FORWARDS[$host_port]}"
+  socat TCP-LISTEN:${host_port},bind=0.0.0.0,fork,reuseaddr TCP:${target} &
+  echo "  0.0.0.0:${host_port} → ${target}  PID=$!"
+done
 
 sleep 1
 
@@ -61,26 +52,22 @@ TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "")
 LAN_IP=$(ip -4 addr show scope global | grep -oP 'inet \K192\.168\.\d+\.\d+' | grep -v 127.0.0.1 | head -1)
 
 echo ""
-echo "=== Access URLs ==="
+echo "=== Access URLs (port = original K8s NodePort) ==="
 echo ""
 echo "  App:"
-echo "    Frontend:      http://localhost:3000"
-[ -n "${LAN_IP}" ] && echo "    Frontend:      http://${LAN_IP}:3000     (LAN)"
-[ -n "${TAILSCALE_IP}" ] && echo "    Frontend:      http://${TAILSCALE_IP}:3000     (Tailscale)"
+echo "    Frontend:      http://localhost:30080"
+[ -n "${LAN_IP}" ] && echo "    Frontend:      http://${LAN_IP}:30080     (LAN)"
+[ -n "${TAILSCALE_IP}" ] && echo "    Frontend:      http://${TAILSCALE_IP}:30080     (Tailscale)"
 echo ""
 echo "  Monitoring:"
-echo "    Grafana:       http://localhost:3100"
-[ -n "${TAILSCALE_IP}" ] && echo "    Grafana:       http://${TAILSCALE_IP}:3100     (Tailscale)"
-echo "    Prometheus:    http://localhost:9090"
-[ -n "${TAILSCALE_IP}" ] && echo "    Prometheus:    http://${TAILSCALE_IP}:9090     (Tailscale)"
-echo "    AlertManager:  http://localhost:9093"
-[ -n "${TAILSCALE_IP}" ] && echo "    AlertManager:  http://${TAILSCALE_IP}:9093     (Tailscale)"
-echo "    Loki:          http://localhost:3200"
-[ -n "${TAILSCALE_IP}" ] && echo "    Loki:          http://${TAILSCALE_IP}:3200     (Tailscale)"
-echo ""
-echo "  API:"
-echo "    Backend API:   http://localhost:8000/api/metrics"
-[ -n "${TAILSCALE_IP}" ] && echo "    Backend API:   http://${TAILSCALE_IP}:8000/api/metrics     (Tailscale)"
+echo "    Grafana:       http://localhost:30000"
+[ -n "${TAILSCALE_IP}" ] && echo "    Grafana:       http://${TAILSCALE_IP}:30000     (Tailscale)"
+echo "    Prometheus:    http://localhost:30909"
+[ -n "${TAILSCALE_IP}" ] && echo "    Prometheus:    http://${TAILSCALE_IP}:30909     (Tailscale)"
+echo "    AlertManager:  http://localhost:30903"
+[ -n "${TAILSCALE_IP}" ] && echo "    AlertManager:  http://${TAILSCALE_IP}:30903     (Tailscale)"
+echo "    Loki:          http://localhost:30310"
+[ -n "${TAILSCALE_IP}" ] && echo "    Loki:          http://${TAILSCALE_IP}:30310     (Tailscale)"
 echo ""
 echo "  Kill: pkill -f 'socat TCP-LISTEN'"
 echo ""

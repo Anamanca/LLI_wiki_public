@@ -183,12 +183,49 @@ kubectl -n llm-wiki rollout restart deployment/backend-v2
 
 Process khác đang chiếm port. Tìm và kill: `sudo lsof -i :30080`
 
-### Muốn truy cập từ máy khác trong mạng LAN
+### Muốn truy cập từ máy khác trong mạng LAN / Tailscale
 
-Sửa `extraPortMappings` trong kind-config, thêm `hostPort` và đảm bảo bind đúng interface. Hoặc dùng `kubectl port-forward`:
-```bash
-kubectl port-forward -n llm-wiki svc/frontend 3000:3000 --address 0.0.0.0
+Kind cluster chỉ expose các port được liệt kê trong `kind-config.yaml` → `extraPortMappings`.
+Monitoring NodePorts (30000, 30909, 30310, 30903) **không được map ra host** → không reachable từ bên ngoài.
+
+**Solution:** `monitoring-socat-forward.sh` + systemd service.
+
+#### Cơ chế
+
 ```
+Host                          Kind Docker container (172.23.0.2)
+────                          ──────────────────────────────────
+socat TCP-LISTEN:30000  ──►  NodePort 30000 → grafana svc → grafana pod :3000
+socat TCP-LISTEN:30909  ──►  NodePort 30909 → prometheus svc → prometheus pod :9090
+socat TCP-LISTEN:30903  ──►  NodePort 30903 → alertmanager svc → alertmanager pod :9093
+socat TCP-LISTEN:30310  ──►  NodePort 30310 → loki svc → loki pod :3100
+socat TCP-LISTEN:30080  ──►  NodePort 30080 → frontend svc → frontend pod :3000
+socat TCP-LISTEN:8000   ──►  NodePort 30081 → backend-v2 svc → backend pod :8000
+```
+
+#### Systemd service
+
+```bash
+# Service: ~/.config/systemd/user/llm-wiki-socat-forward.service
+# Script:  scripts/monitoring-socat-forward.sh
+# Status:  enabled, auto-start on boot (user linger enabled)
+
+systemctl --user status llm-wiki-socat-forward.service
+systemctl --user restart llm-wiki-socat-forward.service   # restart nếu cần
+```
+
+#### Access URLs (qua Tailscale IP `100.115.181.93`)
+
+| Service | URL |
+|---------|-----|
+| Frontend | `http://100.115.181.93:30080` |
+| Backend API | `http://100.115.181.93:8000/api/metrics` |
+| Grafana | `http://100.115.181.93:30000` (admin / secret `GRAFANA_ADMIN_PASSWORD`) |
+| Prometheus | `http://100.115.181.93:30909` |
+| AlertManager | `http://100.115.181.93:30903` |
+| Loki | `http://100.115.181.93:30310` |
+
+> **Note:** `k8s-frontend-portforward.service` (system service, `/etc/systemd/system/`) is superseded by this — socat handles frontend + backend + all monitoring in one place. It'll crash-loop since socat already binds port 30080. Can be disabled if you have sudo: `sudo systemctl disable --now k8s-frontend-portforward.service`.
 
 ### Backend pod báo "No module named..." sau khi thêm file mới
 

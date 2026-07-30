@@ -31,6 +31,17 @@ data:
     limits_config:
       retention_period: 168h
       max_entries_limit_per_query: 5000
+    ruler:
+      storage:
+        type: local
+        local:
+          directory: /loki/rules
+      rule_path: /etc/loki/rules
+      alertmanager_url: http://alertmanager.llm-wiki.svc.cluster.local:9093
+      ring:
+        kvstore:
+          store: inmemory
+      enable_api: true
     compactor:
       working_directory: /loki/compactor
       retention_enabled: true
@@ -52,6 +63,7 @@ spec:
       labels:
         app: loki
     spec:
+      serviceAccountName: default
       containers:
       - name: loki
         image: grafana/loki:3.1.0
@@ -63,6 +75,9 @@ spec:
           mountPath: /etc/loki
         - name: data
           mountPath: /loki
+        - name: ruler-config
+          mountPath: /etc/loki/rules
+          readOnly: true
         resources:
           requests: {memory: "128Mi", cpu: "50m"}
           limits: {memory: "512Mi", cpu: "200m"}
@@ -70,8 +85,17 @@ spec:
       - name: config
         configMap:
           name: loki-config
-      - name: data
-        emptyDir: {}
+      - name: ruler-config
+        configMap:
+          name: loki-alert-rules
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
 ---
 apiVersion: v1
 kind: Service

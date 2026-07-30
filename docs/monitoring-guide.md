@@ -1,8 +1,11 @@
 # LLM Wiki Monitoring Guide
 
-> **Last updated:** 2026-07-29
+> **Last updated:** 2026-07-30
 > **Status:** Deployed & operational
-> **Stack:** Prometheus + Grafana + Loki + AlertManager (all in-cluster K8s)
+> **Stack:** Prometheus + Grafana + Loki (persistent storage, ruler, structured logs) + AlertManager (all in-cluster K8s)
+>
+> **Access:** Monitored via socat forward bridges (host → Kind container), managed by systemd user service.
+> See `k8s/README.md` "Muốn truy cập từ máy khác trong mạng LAN / Tailscale" for access URLs and troubleshooting.
 
 ---
 
@@ -52,7 +55,7 @@ The monitoring stack follows the **Google SRE 4-pillar model**:
 | **Metrics** | Prometheus + Grafana | RED metrics, business KPIs, infra health — "is the system working?" |
 | **Logging** | Loki + Promtail | Structured JSON logs, trace_id correlation — "what happened during this request?" |
 | **Tracing** | LangSmith (existing) | Full parent-child span tree per query — "which step was slow?" |
-| **Alerting** | AlertManager | 8 PromQL alert rules → Telegram — "someone needs to know NOW" |
+| **Alerting** | AlertManager + Loki Ruler | 8 PromQL + 3 LogQL alert rules → Telegram — "someone needs to know NOW" |
 
 ### Clean Architecture Pattern
 
@@ -144,6 +147,8 @@ The standard Google SRE RED dashboard (Rate, Errors, Duration).
 | **P95 Latency** | `histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))` | Per-endpoint P95 latency breakdown |
 | **Request Rate by Endpoint** | `sum(rate(http_requests_total[5m])) by (path, method)` | Traffic distribution across API endpoints |
 | **Status Code Distribution** | `sum(rate(http_requests_total[5m])) by (status)` | Pie chart of 2xx/3xx/4xx/5xx split |
+| **Log Volume by Level (5m)** | `sum by (level) (count_over_time({namespace="llm-wiki", level=~"ERROR\|WARNING"} [5m]))` | LogQL — ERROR/WARNING log line counts per 5m window |
+| **Recent Errors** | `{namespace="llm-wiki"} \|~ "(?i)error\|exception\|traceback"` | LogQL — live tail of recent error log lines |
 
 **Interview talking point:** This dashboard proves we instrument every HTTP request with path normalization (UUID→`:uuid`, numbers→`:num`) to prevent label cardinality explosion.
 
@@ -162,6 +167,7 @@ Shows the business value of monitoring: cache efficiency, LLM costs, query perfo
 | **Query Count / min** | `sum(rate(query_total{status="success"}[1m]))` | Successful queries per minute |
 | **Avg Synthesis Latency** | `rate(llm_synthesis_duration_seconds_sum[5m]) / rate(llm_synthesis_duration_seconds_count[5m])` | Average LLM answer generation time |
 | **Pipeline Stage Durations (P95)** | `histogram_quantile(0.95, ...)` on embedding, vector search, keyword search, LLM synthesis | Bottleneck detection across RAG stages |
+| **Query Error Logs** | `{service="backend-v2"} \|~ "(?i)error\|exception"` | LogQL — live tail of query-related errors |
 
 **Interview talking point:** This dashboard directly connects to business value — cache hit rate → lower LLM costs, token tracking → budget control, stage breakdown → optimization targets.
 
@@ -180,6 +186,8 @@ Tracks the YouTube transcript → wiki integration pipeline.
 | **Job Duration (p95)** | `histogram_quantile(0.95, sum(rate(ingestion_job_duration_seconds_bucket[5m])) by (le, stage))` | Per-stage processing time |
 | **Worker Status** | `worker_heartbeat_age_seconds` | How recently each worker emitted a heartbeat |
 | **Worker CPU %** | `worker_cpu_percent` | CPU utilization per worker |
+| **Worker Error Log Volume** | `sum by (service) (count_over_time({service=~"cpu-worker\|wiki-consumer", level="ERROR"} [5m]))` | LogQL — worker error log count per service |
+| **Recent Worker Errors** | `{service=~"cpu-worker\|wiki-consumer"} \|~ "(?i)error\|exception\|traceback"` | LogQL — live tail of worker error log lines |
 
 **Interview talking point:** Worker heartbeats + queue depth = proving your pipeline has back-pressure awareness. The 3-pass wiki integrator stages are visible.
 
@@ -279,6 +287,18 @@ All 8 alert rules are defined in `k8s/monitoring/prometheus-alert-rules.yaml`.
 | **RedisDown** | 🟡 warning | `up{job="redis"} == 0` | 1m | Cache degraded but app still functional on DB fallback |
 | **DiskSpaceLow** | 🔴 critical | Root filesystem < 10% free | 5m | Clean old logs, containers, or expand disk |
 
+### Loki Alert Rules (LogQL-based)
+
+4 log-based alert rules are defined in `k8s/monitoring/loki-alert-rules.yaml` and evaluated by the Loki Ruler (configured in `loki-statefulset.yaml`).
+
+| Alert | Severity | Trigger | For | Runbook |
+|-------|----------|---------|-----|---------|
+| **HighErrorLogRate** | 🟡 warning | Error log rate > 0.05 lines/s over 5m | 5m | Grafana → Explore → Loki → `{namespace="llm-wiki"} \|= "ERROR"` |
+| **ServiceCrashLoop** | 🔴 critical | Crash/shutdown/fatal message in logs | — | `kubectl -n llm-wiki get pods \| grep -v Running` |
+| **WorkerProcessingErrorSpike** | 🟡 warning | Worker error rate > 0.05 lines/s over 10m | 10m | Check Ingestion dashboard "Recent Worker Errors" panel |
+
+Loki alerts complement Prometheus alerts — they catch text patterns metrics cannot see (crash messages, specific error strings).
+
 ### Viewing alerts
 
 ```bash
@@ -336,48 +356,88 @@ Every entrypoint calls `setup_logging()` once at startup:
 ```python
 # In main.py (backend) or entrypoint (cpu_worker, wiki_consumer)
 from llm_wiki.infrastructure.telemetry.logging_config import setup_logging
-setup_logging(service_name="backend-v2", log_format=settings.log_format)
+setup_logging(
+    service_name="backend-v2",
+    log_format=settings.log_format,
+    log_level=settings.log_level,
+    worker_id=settings.worker_id,  # cpu-worker / wiki-consumer only
+)
 ```
 
 This installs:
-- **`JsonFormatter`** — emits `{"timestamp": "...", "level": "INFO", "service": "backend-v2", "trace_id": "...", "message": "..."}` when `LOG_FORMAT=json`
-- **`TraceIdFilter`** — reads the LangSmith `trace_id` from a `contextvars.ContextVar` and injects it into every log record — async-safe across asyncio tasks
+- **`JsonFormatter`** — emits `{"timestamp": "...", "level": "INFO", "service": "backend-v2", "worker_id": 1, "trace_id": "...", "span_id": "...", "message": "..."}` when `LOG_FORMAT=json`. Any `extra` dict keys passed to the logger are merged automatically.
+- **`ServiceNameFilter`** — injects `record.service` so JSON logs always carry the correct service identifier
+- **`TraceIdFilter`** — reads the LangSmith `trace_id` and `span_id` from `contextvars.ContextVar` — async-safe across asyncio tasks
+- **`WorkerIdFilter`** — injects `record.worker_id` from the pre-resolved worker/consumer id
+- **`LOG_LEVEL`** env var controls root log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`)
 
 ### How trace_id propagates
 
 ```
 LangSmith RunTree.start_span()
-  └─ _current_trace_id.set(str(run.id))    ← contextvars, async-safe
+  ├─ _current_trace_id.set(str(run.id))    ← contextvars, async-safe
+  └─ _current_span_id.set(span_id)          ← application span UUID
          │
          ▼
   Any logging.getLogger().info("processing...")
          │
          ▼
   TraceIdFilter.filter()
-    └─ get_current_trace_id() → injects "trace_id" field
+    ├─ get_current_trace_id() → injects "trace_id" field
+    └─ get_current_span_id()  → injects "span_id" field
          │
          ▼
   JsonFormatter formats as JSON line
          │
          ▼
-  stdout → Promtail → Loki
+  stdout → Promtail (JSON pipeline stage parses level, service)
+         │
+         ▼
+  Loki (low-cardinality labels: level, service; structured metadata: trace_id)
 ```
+```
+
+### Structured log fields
+
+When `LOG_FORMAT=json`, every log line contains:
+
+| Field | Source | Example |
+|-------|--------|---------|
+| `timestamp` | ISO 8601 UTC | `2026-07-30T03:45:00.123Z` |
+| `level` | Log record level | `INFO`, `ERROR`, `WARNING` |
+| `logger` | Python logger name | `llm_wiki.application.use_cases...` |
+| `service` | `ServiceNameFilter` | `backend-v2`, `cpu-worker`, `wiki-consumer` |
+| `worker_id` | `WorkerIdFilter` (from `WORKER_ID` or `CONSUMER_ID` env) | `1`, `101` |
+| `trace_id` | `TraceIdFilter` (from LangSmith ContextVar) | `4d0fc7a4-...` |
+| `span_id` | `TraceIdFilter` (from LangSmith ContextVar) | `a1b2c3d4-...` |
+| `message` | Log message | `request handled` |
+| `method` | Request middleware `extra` | `GET`, `POST` |
+| `path` | Request middleware `extra` | `/api/query` |
+| `status_code` | Request middleware `extra` | `200` |
+| `elapsed_ms` | Request middleware `extra` | `42.5` |
+| `exception` | Present on ERROR with exc_info | `ConnectionError(...)` |
 
 ### Querying logs in Loki via Grafana
 
 1. Open any dashboard in Grafana
 2. Click **Explore** → select **Loki** datasource
-3. Query examples:
+3. Query examples (leverage Promtail-extracted `level` and `service` labels):
 
 ```logql
-# All logs from a specific service
-{service_name="backend-v2"}
+# All logs from a specific service (label-based, fast)
+{service="backend-v2"}
+
+# Error logs with a specific level label
+{level="ERROR"}
 
 # Logs correlated with a specific trace (copy trace_id from LangSmith UI)
-{service_name="backend-v2"} |= "4d0fc7a4-"
+{service="backend-v2"} |= "4d0fc7a4-"
 
-# Error-level logs
-{namespace="llm-wiki"} |= "level\": \"ERROR"
+# Slow HTTP requests (>1s)
+{service="backend-v2"} | json | elapsed_ms > 1000
+
+# Error count by service (last 1h)
+sum(count_over_time({namespace="llm-wiki", level="ERROR"} [1h])) by (service)
 
 # Logs from a specific pod
 {pod="backend-v2-85f4b686c5-5dtv4"}
@@ -455,8 +515,9 @@ k8s/
     ├── grafana-deployment.yaml      ← Deployment + emptyDir
     ├── alertmanager-config.yaml     ← null receiver (placeholder)
     ├── alertmanager-deployment.yaml ← Deployment + emptyDir
-    ├── loki-statefulset.yaml        ← StatefulSet + ConfigMap (7d retention)
-    └── promtail-daemonset.yaml      ← DaemonSet + ConfigMap (cri stage)
+    ├── loki-statefulset.yaml        ← StatefulSet + PVC + ConfigMap (7d retention, ruler)
+    ├── loki-alert-rules.yaml        ← 3 LogQL alert rules evaluated by Loki ruler
+    └── promtail-daemonset.yaml      ← DaemonSet + ConfigMap (cri + json pipeline stages)
 ```
 
 ---
@@ -602,8 +663,9 @@ For Telegram integration, follow the instructions in Section 5.
 | `src/llm_wiki/infrastructure/telemetry/business_metrics.py` | `inc_counter()`, `track_duration()`, `set_gauge()` helpers |
 | `src/llm_wiki/presentation/middleware/metrics_middleware.py` | FastAPI RED middleware with path normalization |
 | `src/llm_wiki/presentation/routes/metrics.py` | `GET /api/metrics` → Prometheus text format |
-| `src/llm_wiki/infrastructure/telemetry/logging_config.py` | `JsonFormatter`, `TraceIdFilter`, `setup_logging()` |
-| `src/llm_wiki/infrastructure/telemetry/langsmith_telemetry_adapter.py` | `_current_trace_id` ContextVar for log correlation |
+| `src/llm_wiki/infrastructure/telemetry/logging_config.py` | `JsonFormatter`, `ServiceNameFilter`, `TraceIdFilter`, `WorkerIdFilter`, `setup_logging()` |
+| `src/llm_wiki/infrastructure/telemetry/langsmith_telemetry_adapter.py` | `_current_trace_id` + `_current_span_id` ContextVars for log correlation |
+| `src/llm_wiki/presentation/middleware/request_logging.py` | Structured HTTP request logging with `extra` dict fields |
 | `src/llm_wiki/infrastructure/entrypoints/health_server.py` | Worker `/metrics` endpoint (when `ENABLE_METRICS=true`) |
 | `src/llm_wiki/main.py` | Wires `MetricsMiddleware` + `/api/metrics` route when enabled |
 | `src/llm_wiki/config.py` | `enable_metrics: bool`, `log_format: str` |

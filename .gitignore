@@ -54,3 +54,6 @@ frontend/tsconfig.tsbuildinfo
 plans/
 02_run_claude_bypass_permission.sh
 release-manifest.json
+
+# Database migrations (local only, applied manually per environment)
+migrations/

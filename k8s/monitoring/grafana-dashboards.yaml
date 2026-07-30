@@ -24,24 +24,64 @@ data:
       "uid": "llm-wiki-red",
       "panels": [
         {
-          "id": 1, "title": "Request Rate", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-          "targets": [{"expr": "sum(rate(http_requests_total[5m]))", "legendFormat": "rps"}]
+          "id": 1, "title": "Request Rate", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {"expr": "sum(rate(http_requests_total[$__rate_interval])) by (path, method)", "legendFormat": "{{method}} {{path}}"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"fillOpacity": 15, "lineWidth": 1}}},
+          "description": "Requests per second, grouped by endpoint and HTTP method"
         },
         {
-          "id": 2, "title": "Error Rate (5xx)", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
-          "targets": [{"expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m]))", "legendFormat": "error rate"}]
+          "id": 2, "title": "Error Rate (5xx)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {"expr": "sum(rate(http_requests_total{status=~\"5..\"}[$__rate_interval])) / sum(rate(http_requests_total[$__rate_interval])) or vector(0)", "legendFormat": "error rate"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "custom": {"fillOpacity": 15, "lineWidth": 1}},
+            "thresholds": {"mode": "absolute", "steps": [{"value": 0, "color": "green"}, {"value": 0.01, "color": "yellow"}, {"value": 0.05, "color": "red"}]}
+          },
+          "description": "Fraction of requests returning 5xx. 0 if no errors (or vector(0) fallback)"
         },
         {
-          "id": 3, "title": "P95 Latency", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
-          "targets": [{"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, path))", "legendFormat": "p95 {{path}}"}]
+          "id": 3, "title": "P95 Latency", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[$__rate_interval])) by (le, path)) != +Inf", "legendFormat": "p95 {{path}}"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "s", "min": 0, "custom": {"fillOpacity": 15, "lineWidth": 1}}},
+          "description": "95th percentile request latency per endpoint. NaN/+Inf filtered out for sparse endpoints."
         },
         {
-          "id": 4, "title": "Request Rate by Endpoint", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-          "targets": [{"expr": "sum(rate(http_requests_total[5m])) by (path, method)", "legendFormat": "{{method}} {{path}}"}]
+          "id": 4, "title": "Request Rate by Path", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {"expr": "sum(rate(http_requests_total[$__rate_interval])) by (path)", "legendFormat": "{{path}}"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"fillOpacity": 15, "lineWidth": 1, "stacking": {"mode": "normal"}}}},
+          "description": "Stacked request rate by endpoint"
         },
         {
           "id": 5, "title": "Status Code Distribution", "type": "piechart", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
-          "targets": [{"expr": "sum(rate(http_requests_total[5m])) by (status)", "legendFormat": "{{status}}"}]
+          "targets": [
+            {"expr": "sum(increase(http_requests_total[$__range])) by (status)", "legendFormat": "{{status}}"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "none"}},
+          "description": "Request count by HTTP status code over the selected time range"
+        },
+        {
+          "id": 6, "title": "Log Volume by Level (5m)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [
+            {"expr": "sum by (level) (count_over_time({namespace=\"llm-wiki\", level=~\"ERROR|WARNING\"} [$__auto]))", "legendFormat": "{{level}}", "datasource": {"type": "loki", "uid": "loki"}}
+          ],
+          "fieldConfig": {"defaults": {"custom": {"fillOpacity": 20, "lineWidth": 1}}},
+          "description": "Log lines per auto interval by severity level (Loki)"
+        },
+        {
+          "id": 7, "title": "Recent Errors", "type": "logs", "gridPos": {"h": 10, "w": 24, "x": 0, "y": 24},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [
+            {"expr": "{namespace=\"llm-wiki\"} |~ \"(?i)error|exception|traceback\"", "datasource": {"type": "loki", "uid": "loki"}}
+          ],
+          "options": {"showTime": true, "showLabels": true, "wrapLogMessage": true},
+          "description": "Live error log stream from all services"
         }
       ]
     }
@@ -52,29 +92,59 @@ data:
       "uid": "llm-wiki-business",
       "panels": [
         {
-          "id": 1, "title": "Cache Hit Rate", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-          "targets": [{"expr": "sum(rate(cache_hit_total[5m])) / (sum(rate(cache_hit_total[5m])) + sum(rate(cache_miss_total[5m])))", "legendFormat": "hit rate"}]
-        },
-        {
-          "id": 2, "title": "LLM Tokens / Hour", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
-          "targets": [{"expr": "sum(increase(llm_tokens_used_total[1h])) by (model)", "legendFormat": "{{model}}"}]
-        },
-        {
-          "id": 3, "title": "Query Count / min", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
-          "targets": [{"expr": "sum(rate(query_total{status=\"success\"}[1m]))", "legendFormat": "queries/min"}]
-        },
-        {
-          "id": 4, "title": "Avg Synthesis Latency", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-          "targets": [{"expr": "rate(llm_synthesis_duration_seconds_sum[5m]) / rate(llm_synthesis_duration_seconds_count[5m])", "legendFormat": "avg synthesis (s)"}]
-        },
-        {
-          "id": 5, "title": "Pipeline Stage Durations (p95)", "type": "graph", "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+          "id": 1, "title": "Cache Hit Rate", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
           "targets": [
-            {"expr": "histogram_quantile(0.95, sum(rate(embedding_duration_seconds_bucket[5m])) by (le))", "legendFormat": "embedding"},
-            {"expr": "histogram_quantile(0.95, sum(rate(vector_search_duration_seconds_bucket[5m])) by (le))", "legendFormat": "vector search"},
-            {"expr": "histogram_quantile(0.95, sum(rate(keyword_search_duration_seconds_bucket[5m])) by (le))", "legendFormat": "keyword search"},
-            {"expr": "histogram_quantile(0.95, sum(rate(llm_synthesis_duration_seconds_bucket[5m])) by (le))", "legendFormat": "LLM synthesis"}
-          ]
+            {"expr": "sum(rate(cache_hit_total[$__rate_interval])) / (sum(rate(cache_hit_total[$__rate_interval])) + sum(rate(cache_miss_total[$__rate_interval])))", "legendFormat": "hit rate"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "custom": {"fillOpacity": 20, "lineWidth": 1}},
+            "thresholds": {"mode": "absolute", "steps": [{"value": 0, "color": "red"}, {"value": 0.3, "color": "yellow"}, {"value": 0.7, "color": "green"}]}
+          },
+          "description": "Cache hit ratio (exact + semantic). Low hit rate = more LLM calls = higher cost. Uses $__rate_interval for sparse counter handling."
+        },
+        {
+          "id": 2, "title": "Cache Hits & Misses / min", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {"expr": "sum(rate(cache_hit_total[$__rate_interval])) by (cache_level)", "legendFormat": "hit {{cache_level}}"},
+            {"expr": "sum(rate(cache_miss_total[$__rate_interval])) by (cache_level)", "legendFormat": "miss {{cache_level}}"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"fillOpacity": 15, "lineWidth": 1}}},
+          "description": "Cache activity — hits vs misses per second, by cache level (exact/semantic)"
+        },
+        {
+          "id": 3, "title": "LLM Tokens / Hour", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {"expr": "sum(increase(llm_tokens_used_total[1h])) by (model)", "legendFormat": "{{model}}"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "none", "custom": {"fillOpacity": 15, "lineWidth": 1, "stacking": {"mode": "normal"}}}},
+          "description": "LLM tokens consumed per hour, stacked by model. Cost driver dashboard."
+        },
+        {
+          "id": 4, "title": "Query Count / min", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {"expr": "sum(rate(query_total[$__rate_interval]))", "legendFormat": "all queries"},
+            {"expr": "sum(rate(query_total{status=\"error\"}[$__rate_interval])) or vector(0)", "legendFormat": "errors"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"fillOpacity": 15, "lineWidth": 1}}},
+          "description": "Query throughput — total and errors per second"
+        },
+        {
+          "id": 5, "title": "Pipeline Stage Durations (p95)", "type": "timeseries", "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+          "targets": [
+            {"expr": "histogram_quantile(0.95, sum(rate(embedding_duration_seconds_bucket[$__rate_interval])) by (le)) != +Inf or vector(0)", "legendFormat": "embedding"},
+            {"expr": "histogram_quantile(0.95, sum(rate(vector_search_duration_seconds_bucket[$__rate_interval])) by (le)) != +Inf or vector(0)", "legendFormat": "vector search"},
+            {"expr": "histogram_quantile(0.95, sum(rate(keyword_search_duration_seconds_bucket[$__rate_interval])) by (le)) != +Inf or vector(0)", "legendFormat": "keyword search"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "s", "min": 0, "custom": {"fillOpacity": 15, "lineWidth": 1}}},
+          "description": "p95 duration per RAG pipeline stage. When stages are flat at 0, no recent queries — expected. LLM synthesis excluded: metric not yet emitted by application code."
+        },
+        {
+          "id": 6, "title": "Query Error Logs", "type": "logs", "gridPos": {"h": 10, "w": 24, "x": 0, "y": 24},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [
+            {"expr": "{namespace=\"llm-wiki\", service=\"backend-v2\"} |~ \"(?i)error|exception\"", "datasource": {"type": "loki", "uid": "loki"}}
+          ],
+          "options": {"showTime": true, "showLabels": true, "wrapLogMessage": true},
+          "description": "Backend error log stream. Filter: service=backend-v2 + error/exception keywords."
         }
       ]
     }
@@ -85,39 +155,73 @@ data:
       "uid": "llm-wiki-ingestion",
       "panels": [
         {
-          "id": 1, "title": "CPU Worker Outcomes", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "id": 1, "title": "CPU Worker Outcomes", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
           "targets": [
-            {"expr": "sum(rate(ingestion_jobs_total{stage=~\"extract|cpu_done\"}[1h])) by (status)", "legendFormat": "{{status}}"}
+            {"expr": "sum(rate(ingestion_jobs_total{stage=~\"extract|cpu_done\"}[$__rate_interval])) by (status)", "legendFormat": "{{status}}"}
           ],
-          "description": "CPU worker job outcomes: classified=ok queued to wiki, requires_membership=members-only video, unavailable=private/deleted, scheduled=upcoming premiere, no_captions*=transcript extraction failed"
+          "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"fillOpacity": 15, "lineWidth": 1}}},
+          "description": "CPU worker job outcomes: classified=ok queued to wiki, requires_membership=members-only video, unavailable=private/deleted, scheduled=upcoming premiere, no_captions=transcript extraction failed"
         },
         {
-          "id": 2, "title": "Wiki Consumer Outcomes", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "id": 2, "title": "Wiki Consumer Outcomes", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
           "targets": [
-            {"expr": "sum(rate(ingestion_jobs_total{stage=~\"wiki|embed\"}[1h])) by (status)", "legendFormat": "{{status}}"}
+            {"expr": "sum(rate(ingestion_jobs_total{stage=~\"wiki|embed\"}[$__rate_interval])) by (status)", "legendFormat": "{{status}}"}
           ],
+          "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"fillOpacity": 15, "lineWidth": 1}}},
           "description": "Wiki consumer job outcomes: completed=wiki page created/updated, failed=wiki or embedding error"
         },
         {
-          "id": 3, "title": "Queue Depth", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "id": 3, "title": "Queue Depth", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
           "targets": [
-            {"expr": "ingestion_queue_depth{queue=\"cpu\"}", "legendFormat": "cpu"},
-            {"expr": "ingestion_queue_depth{queue=\"wiki\"}", "legendFormat": "wiki"}
-          ]
+            {"expr": "ingestion_queue_depth{queue=\"cpu\"}", "legendFormat": "cpu queue"},
+            {"expr": "ingestion_queue_depth{queue=\"wiki\"}", "legendFormat": "wiki queue"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "none", "min": 0, "custom": {"fillOpacity": 15, "lineWidth": 1}}},
+          "description": "Number of jobs waiting in each queue. Should be near 0. Sustained growth = worker bottleneck."
         },
         {
-          "id": 4, "title": "Job Duration (p95)", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-          "targets": [{"expr": "histogram_quantile(0.95, sum(rate(ingestion_job_duration_seconds_bucket[5m])) by (le, stage))", "legendFormat": "{{stage}}"}]
+          "id": 4, "title": "Job Duration (p95)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {"expr": "histogram_quantile(0.95, sum(rate(ingestion_job_duration_seconds_bucket[$__rate_interval])) by (le, stage)) != +Inf or vector(0)", "legendFormat": "{{stage}}"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "s", "min": 0, "custom": {"fillOpacity": 15, "lineWidth": 1}}},
+          "description": "p95 job duration per stage (cpu=extract pipeline, wiki=wiki creation+embed). Flat at 0 when no recent jobs."
         },
         {
-          "id": 5, "title": "Worker Heartbeat Age", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
-          "targets": [{"expr": "time() - worker_heartbeat_age_seconds", "legendFormat": "{{worker_id}}"}],
-          "description": "Seconds since last successful heartbeat. Should stay < 30s. Spikes indicate worker is stuck or down.",
-          "thresholds": [{"value": 30, "color": "yellow"}, {"value": 60, "color": "red"}]
+          "id": 5, "title": "Worker Heartbeat Age", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "targets": [
+            {"expr": "time() - worker_heartbeat_age_seconds", "legendFormat": "{{worker_id}}"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "s", "min": 0, "custom": {"fillOpacity": 15, "lineWidth": 1}},
+            "thresholds": {"mode": "absolute", "steps": [{"value": 0, "color": "green"}, {"value": 30, "color": "yellow"}, {"value": 60, "color": "red"}]}
+          },
+          "description": "Seconds since last successful heartbeat. Should stay < 30s. Spikes indicate worker is stuck or down."
         },
         {
-          "id": 6, "title": "Worker CPU %", "type": "graph", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
-          "targets": [{"expr": "worker_cpu_percent", "legendFormat": "{{worker_id}}"}]
+          "id": 6, "title": "Worker CPU %", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "targets": [
+            {"expr": "worker_cpu_percent", "legendFormat": "{{worker_id}}"}
+          ],
+          "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"fillOpacity": 15, "lineWidth": 1}}},
+          "description": "Per-worker CPU usage percentage"
+        },
+        {
+          "id": 7, "title": "Worker Error Log Volume", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [
+            {"expr": "sum by (service) (count_over_time({service=~\"cpu-worker|wiki-consumer\", level=\"ERROR\"} [$__auto]))", "legendFormat": "{{service}}", "datasource": {"type": "loki", "uid": "loki"}}
+          ],
+          "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 20, "lineWidth": 1}}},
+          "description": "Error log count per auto interval by worker service (Loki). Spikes here usually mean worker crash or API quota exhaustion."
+        },
+        {
+          "id": 8, "title": "Recent Worker Errors", "type": "logs", "gridPos": {"h": 10, "w": 12, "x": 12, "y": 24},
+          "datasource": {"type": "loki", "uid": "loki"},
+          "targets": [
+            {"expr": "{service=~\"cpu-worker|wiki-consumer\"} |~ \"(?i)error|exception|traceback\"", "datasource": {"type": "loki", "uid": "loki"}}
+          ],
+          "options": {"showTime": true, "showLabels": true, "wrapLogMessage": true},
+          "description": "Live error log stream from cpu-worker and wiki-consumer"
         }
       ]
     }

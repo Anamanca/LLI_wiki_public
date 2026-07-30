@@ -20,8 +20,16 @@ data:
           __path__: /var/log/pods/llm-wiki_*/*/*.log
       pipeline_stages:
       - cri: {}
+      - json:
+          expressions:
+            level: level
+            service: service
+            worker_id: worker_id
+            trace_id: trace_id
       - labels:
           app:
+          level:
+          service:
       - static_labels:
           namespace: llm-wiki
       relabel_configs:

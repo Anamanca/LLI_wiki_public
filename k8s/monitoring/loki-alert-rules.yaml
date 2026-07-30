@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-alert-rules
+  namespace: llm-wiki
+  labels:
+    app: loki
+data:
+  loki-alerts.yaml: |
+    groups:
+    - name: loki-application-alerts
+      rules:
+
+      - alert: HighErrorLogRate
+        expr: |
+          sum(rate({namespace="llm-wiki"} |~ "(?i)error|exception|crashed|traceback" [5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          source: loki
+        annotations:
+          summary: "High error log rate — {{ $value }} error lines/s over 5m"
+          description: "Error log rate exceeded 0.05 lines/s. Check Loki Explore for details."
+          runbook: |
+            1. Grafana → Explore → Loki → {namespace="llm-wiki"} |= "ERROR"
+            2. Filter by service to isolate the failing component.
+            3. Check recent deployments: kubectl -n llm-wiki rollout history deploy/<service>
+
+      - alert: ServiceCrashLoop
+        expr: |
+          sum by (service) (count_over_time({namespace="llm-wiki"} |~ "(?i)shutting down|crash|fatal|panic|killed" [5m])) > 0
+        labels:
+          severity: critical
+          source: loki
+        annotations:
+          summary: "Service crash or shutdown detected in logs"
+          description: "Crash/shutdown events in service {{ $labels.service }}"
+          runbook: |
+            1. Identify affected pod: kubectl -n llm-wiki get pods | grep -v Running
+            2. Check pod logs: kubectl -n llm-wiki logs <pod> --tail=100
+            3. Check events: kubectl -n llm-wiki get events --sort-by=.lastTimestamp | tail -20
+
+      - alert: WorkerProcessingErrorSpike
+        expr: |
+          sum(rate({service=~"cpu-worker|wiki-consumer"} |~ "(?i)error|exception|traceback" [10m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          source: loki
+        annotations:
+          summary: "Elevated worker error rate — {{ $value }} errors/s over 10m"
+          description: "Worker error rate spike detected. Check Ingestion dashboard for details."
+          runbook: |
+            1. Grafana → Ingestion dashboard → "Recent Worker Errors" panel
+            2. Check queue depth and job failure rate
+            3. Check API quota/rate limits if errors mention "402" or "429"

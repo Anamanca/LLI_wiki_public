@@ -26,6 +26,9 @@ if [ -f "${MON_DIR}/loki-statefulset.yaml" ]; then
   echo "[3/5] Loki + Promtail (configs inline in manifests)..."
   kubectl apply -f "${MON_DIR}/loki-statefulset.yaml"
   kubectl apply -f "${MON_DIR}/promtail-daemonset.yaml"
+  if [ -f "${MON_DIR}/loki-alert-rules.yaml" ]; then
+    kubectl apply -f "${MON_DIR}/loki-alert-rules.yaml"
+  fi
 else
   echo "[3/5] Skipped (Loki manifests not yet created)"
 fi
