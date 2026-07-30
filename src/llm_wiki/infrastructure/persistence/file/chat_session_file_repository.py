@@ -12,16 +12,13 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-
-from llm_wiki.shared.datetime_utils import now
 
 from llm_wiki.application.ports.repositories.chat_session_repository import (
     ChatMessage,
     ChatSession,
     ChatSessionRepository,
 )
-
+from llm_wiki.shared.datetime_utils import now
 
 _SAFE_ID = re.compile(r"^[a-zA-Z0-9_-]+$")
 
@@ -52,9 +49,7 @@ class ChatSessionFileRepository(ChatSessionRepository):
         return {
             "id": session.id,
             "title": session.title,
-            "messages": [
-                {"role": m.role, "content": m.content} for m in session.messages
-            ],
+            "messages": [{"role": m.role, "content": m.content} for m in session.messages],
             "created_at": _to_iso(session.created_at),
             "updated_at": _to_iso(session.updated_at),
         }
@@ -64,8 +59,7 @@ class ChatSessionFileRepository(ChatSessionRepository):
             id=data["id"],
             title=data.get("title", "Chat"),
             messages=[
-                ChatMessage(role=m["role"], content=m["content"])
-                for m in data.get("messages", [])
+                ChatMessage(role=m["role"], content=m["content"]) for m in data.get("messages", [])
             ],
             created_at=_from_iso(data["created_at"]),
             updated_at=_from_iso(data["updated_at"]),
@@ -83,7 +77,7 @@ class ChatSessionFileRepository(ChatSessionRepository):
         sessions.sort(key=lambda s: s.updated_at, reverse=True)
         return sessions
 
-    async def get_by_id(self, session_id: str) -> Optional[ChatSession]:
+    async def get_by_id(self, session_id: str) -> ChatSession | None:
         path = self._path(session_id)
         if not path.exists():
             return None
@@ -93,7 +87,7 @@ class ChatSessionFileRepository(ChatSessionRepository):
         except Exception:
             return None
 
-    async def create(self, title: Optional[str] = None) -> ChatSession:
+    async def create(self, title: str | None = None) -> ChatSession:
         session_id = uuid.uuid4().hex[:12]
         now = _now()
         session = ChatSession(

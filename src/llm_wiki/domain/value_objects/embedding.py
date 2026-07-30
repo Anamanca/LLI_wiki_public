@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -19,4 +18,4 @@ class SearchResult:
     title: str
     content: str
     score: float
-    metadata: Optional[dict] = None
+    metadata: dict | None = None

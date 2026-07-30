@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def get_system_tz() -> timezone:
 
     tz_name = os.environ.get("TZ", "").strip()
     if not tz_name:
-        _TZ_CACHE = timezone.utc
+        _TZ_CACHE = UTC
         return _TZ_CACHE
 
     try:
@@ -37,10 +37,8 @@ def get_system_tz() -> timezone:
 
         _TZ_CACHE = ZoneInfo(tz_name)
     except Exception:
-        logger.warning(
-            "Invalid TZ=%r – falling back to UTC", tz_name, exc_info=True
-        )
-        _TZ_CACHE = timezone.utc
+        logger.warning("Invalid TZ=%r – falling back to UTC", tz_name, exc_info=True)
+        _TZ_CACHE = UTC
 
     return _TZ_CACHE
 

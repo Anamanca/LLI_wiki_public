@@ -18,14 +18,16 @@ def _parse_sse(raw: str):
 
 
 def test_sse_status_sequence_and_complete():
-    raw = "\n".join([
-        'data: {"type": "status", "status": "processing"}',
-        'data: {"type": "status", "status": "retrieving"}',
-        'data: {"type": "status", "status": "thinking"}',
-        'data: {"type": "status", "status": "summarizing"}',
-        'data: {"type": "complete", "answer": "answer text", "citations": [{"page_title": "T", "page_slug": "t"}], "sources_used": []}',
-        'data: [DONE]',
-    ])
+    raw = "\n".join(
+        [
+            'data: {"type": "status", "status": "processing"}',
+            'data: {"type": "status", "status": "retrieving"}',
+            'data: {"type": "status", "status": "thinking"}',
+            'data: {"type": "status", "status": "summarizing"}',
+            'data: {"type": "complete", "answer": "answer text", "citations": [{"page_title": "T", "page_slug": "t"}], "sources_used": []}',
+            "data: [DONE]",
+        ]
+    )
     events = _parse_sse(raw)
     statuses = [e["status"] for e in events if e["type"] == "status"]
     complete = [e for e in events if e["type"] == "complete"]
@@ -37,12 +39,14 @@ def test_sse_status_sequence_and_complete():
 
 
 def test_sse_ignores_malformed_lines():
-    raw = "\n".join([
-        'data: {"type": "status", "status": "processing"}',
-        'data: not-json',
-        'data: {"type": "complete", "answer": "ok", "citations": [], "sources_used": []}',
-        'data: [DONE]',
-    ])
+    raw = "\n".join(
+        [
+            'data: {"type": "status", "status": "processing"}',
+            "data: not-json",
+            'data: {"type": "complete", "answer": "ok", "citations": [], "sources_used": []}',
+            "data: [DONE]",
+        ]
+    )
     events = _parse_sse(raw)
     assert len(events) == 2
     assert events[1]["answer"] == "ok"

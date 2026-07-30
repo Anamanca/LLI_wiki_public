@@ -114,9 +114,21 @@ async def classify_transcript(
     Returns:
         dict with classification result
     """
-    video_id = transcript.get("video_id", "unknown") if isinstance(transcript, dict) else getattr(transcript, "video_id", "unknown")
-    raw_text = transcript.get("raw_text", "") if isinstance(transcript, dict) else getattr(transcript, "raw_text", "")
-    segments = transcript.get("segments", []) if isinstance(transcript, dict) else getattr(transcript, "segments", [])
+    video_id = (
+        transcript.get("video_id", "unknown")
+        if isinstance(transcript, dict)
+        else getattr(transcript, "video_id", "unknown")
+    )
+    raw_text = (
+        transcript.get("raw_text", "")
+        if isinstance(transcript, dict)
+        else getattr(transcript, "raw_text", "")
+    )
+    segments = (
+        transcript.get("segments", [])
+        if isinstance(transcript, dict)
+        else getattr(transcript, "segments", [])
+    )
 
     if not raw_text and not segments:
         logger.warning("Empty transcript for %s — cannot classify", video_id)
@@ -164,7 +176,9 @@ async def classify_transcript(
             # DeepSeek reasoning models may consume all tokens on reasoning_content,
             # leaving content empty. Fall back to reasoning_content if available.
             if not content.strip():
-                reasoning = resp.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
+                reasoning = (
+                    resp.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
+                )
                 if reasoning.strip():
                     logger.warning(
                         "Classifier content empty — falling back to reasoning_content (%d chars)",
@@ -175,13 +189,23 @@ async def classify_transcript(
                 raise ValueError("Empty response from LLM")
 
             data = _extract_json_from_llm_response(content)
-            logger.info("Classification OK for %s (model=%s, topic=%s)", video_id, model, data.get("main_topic", ""))
+            logger.info(
+                "Classification OK for %s (model=%s, topic=%s)",
+                video_id,
+                model,
+                data.get("main_topic", ""),
+            )
             return data
 
-        except asyncio.TimeoutError:
-            logger.warning("Classification timed out for %s on %s (attempt, backoff=%.0fs)", video_id, model, backoff)
+        except TimeoutError:
+            logger.warning(
+                "Classification timed out for %s on %s (attempt, backoff=%.0fs)",
+                video_id,
+                model,
+                backoff,
+            )
             last_error = TimeoutError(f"Classification timed out after {timeout}s")
-        except RateLimitError as e:
+        except RateLimitError:
             logger.warning("Rate limited on %s — propagating", model)
             raise
         except Exception as exc:
@@ -213,7 +237,9 @@ async def classify_transcript(
         if not content.strip():
             reasoning = resp.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
             if reasoning.strip():
-                logger.warning("Classifier fallback content empty — falling back to reasoning_content")
+                logger.warning(
+                    "Classifier fallback content empty — falling back to reasoning_content"
+                )
                 content = reasoning
         data = _extract_json_from_llm_response(content)
         logger.info("Classification OK with fallback model for %s", video_id)
@@ -224,6 +250,4 @@ async def classify_transcript(
             video_id,
             exc,
         )
-        raise RuntimeError(
-            f"Classification failed for {video_id}: all attempts exhausted"
-        ) from exc
+        raise RuntimeError(f"Classification failed for {video_id}: all attempts exhausted") from exc

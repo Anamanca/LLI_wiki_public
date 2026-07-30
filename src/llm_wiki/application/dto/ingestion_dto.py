@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -12,7 +11,7 @@ class IngestionInput:
 class IngestionResult:
     source_item_id: str
     status: str
-    page_slug: Optional[str] = None
+    page_slug: str | None = None
     events_extracted: int = 0
     entities_linked: int = 0
-    error_message: Optional[str] = None
+    error_message: str | None = None

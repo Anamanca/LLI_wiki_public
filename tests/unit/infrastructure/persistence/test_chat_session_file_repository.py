@@ -1,14 +1,11 @@
 import json
 import os
 import tempfile
-import uuid
-from datetime import UTC, datetime
 
 import pytest
 
 from llm_wiki.application.ports.repositories.chat_session_repository import (
     ChatMessage,
-    ChatSession,
 )
 from llm_wiki.infrastructure.persistence.file import ChatSessionFileRepository
 

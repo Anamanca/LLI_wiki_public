@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 
 @dataclass
@@ -24,10 +23,10 @@ class ChatSessionRepository(ABC):
     async def list_sessions(self) -> list[ChatSession]: ...
 
     @abstractmethod
-    async def get_by_id(self, session_id: str) -> Optional[ChatSession]: ...
+    async def get_by_id(self, session_id: str) -> ChatSession | None: ...
 
     @abstractmethod
-    async def create(self, title: Optional[str] = None) -> ChatSession: ...
+    async def create(self, title: str | None = None) -> ChatSession: ...
 
     @abstractmethod
     async def save(self, session: ChatSession) -> ChatSession: ...

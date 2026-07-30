@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from datetime import date
-from typing import Optional
 
 from llm_wiki.domain.entities.event import EventCanonical, EventObservation, EventTimelineChain
 from llm_wiki.domain.value_objects.identifiers import EventId, PageId
@@ -8,7 +7,7 @@ from llm_wiki.domain.value_objects.identifiers import EventId, PageId
 
 class EventRepository(ABC):
     @abstractmethod
-    async def get_by_id(self, event_id: EventId) -> Optional[EventCanonical]: ...
+    async def get_by_id(self, event_id: EventId) -> EventCanonical | None: ...
 
     @abstractmethod
     async def save(self, event: EventCanonical) -> EventCanonical: ...
@@ -27,7 +26,7 @@ class EventRepository(ABC):
 
     @abstractmethod
     async def list_by_date_range(
-        self, start_date: date, end_date: Optional[date] = None, limit: int = 50
+        self, start_date: date, end_date: date | None = None, limit: int = 50
     ) -> list[EventCanonical]: ...
 
     @abstractmethod

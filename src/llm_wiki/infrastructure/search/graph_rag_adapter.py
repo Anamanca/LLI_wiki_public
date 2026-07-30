@@ -77,23 +77,29 @@ class PostgresGraphRAGAdapter(GraphRAGPort):
                     entity_info += f", loại: {row['entity_type']}"
                 entity_info += ")"
 
-                graph_results.append(SearchResult(
-                    content_id=f"graph-{row['id']}",
-                    content_type="graph_event",
-                    title=row["title"] or "",
-                    content=f"{(row.get('content') or '').strip()}{entity_info}",
-                    score=score,
-                    metadata={
-                        "event_canonical_id": str(row["id"]),
-                        "event_date": str(row.get("event_date")) if row.get("event_date") else None,
-                        "observation_count": row.get("observation_count"),
-                        "importance_score": score,
-                        "source": "knowledge_graph",
-                    },
-                ))
+                graph_results.append(
+                    SearchResult(
+                        content_id=f"graph-{row['id']}",
+                        content_type="graph_event",
+                        title=row["title"] or "",
+                        content=f"{(row.get('content') or '').strip()}{entity_info}",
+                        score=score,
+                        metadata={
+                            "event_canonical_id": str(row["id"]),
+                            "event_date": str(row.get("event_date"))
+                            if row.get("event_date")
+                            else None,
+                            "observation_count": row.get("observation_count"),
+                            "importance_score": score,
+                            "source": "knowledge_graph",
+                        },
+                    )
+                )
 
             if graph_results:
-                logger.debug("GraphRAG: %d events found for entities=%s", len(graph_results), entity_names)
+                logger.debug(
+                    "GraphRAG: %d events found for entities=%s", len(graph_results), entity_names
+                )
             return graph_results
 
         except Exception:
@@ -124,30 +130,41 @@ class PostgresGraphRAGAdapter(GraphRAGPort):
                 ORDER BY ec.importance_score DESC
                 LIMIT :limit
             """)
-            result = await self._session.execute(sql, {
-                "event_ids": event_ids,
-                "limit": max_hop * 5,
-            })
+            result = await self._session.execute(
+                sql,
+                {
+                    "event_ids": event_ids,
+                    "limit": max_hop * 5,
+                },
+            )
             rows = result.mappings().all()
 
             timeline_results = []
             for row in rows:
                 relation = row.get("relation_type", "liên quan")
-                timeline_results.append(SearchResult(
-                    content_id=f"timeline-{row['id']}",
-                    content_type="timeline_event",
-                    title=row["title"] or "",
-                    content=f"{(row.get('content') or '').strip()} (mối quan hệ: {relation})",
-                    score=float(row.get("importance_score") or 0.4),
-                    metadata={
-                        "event_canonical_id": str(row["id"]),
-                        "event_date": str(row.get("event_date")) if row.get("event_date") else None,
-                        "relation_type": relation,
-                        "source": "timeline_chain",
-                    },
-                ))
+                timeline_results.append(
+                    SearchResult(
+                        content_id=f"timeline-{row['id']}",
+                        content_type="timeline_event",
+                        title=row["title"] or "",
+                        content=f"{(row.get('content') or '').strip()} (mối quan hệ: {relation})",
+                        score=float(row.get("importance_score") or 0.4),
+                        metadata={
+                            "event_canonical_id": str(row["id"]),
+                            "event_date": str(row.get("event_date"))
+                            if row.get("event_date")
+                            else None,
+                            "relation_type": relation,
+                            "source": "timeline_chain",
+                        },
+                    )
+                )
 
-            logger.debug("Timeline traversal: %d neighbor events from %d seeds", len(timeline_results), len(event_ids))
+            logger.debug(
+                "Timeline traversal: %d neighbor events from %d seeds",
+                len(timeline_results),
+                len(event_ids),
+            )
             return timeline_results
 
         except Exception:

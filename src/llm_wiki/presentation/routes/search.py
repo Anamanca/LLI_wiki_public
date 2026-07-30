@@ -1,12 +1,10 @@
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.presentation.dependencies import get_db
-from llm_wiki.infrastructure.search.pgvector_adapter import PgVectorSearchAdapter
-from llm_wiki.infrastructure.search.tsvector_adapter import TsVectorSearchAdapter
 from llm_wiki.infrastructure.persistence.postgres import models as orm
-from llm_wiki.domain.value_objects.embedding import Embedding
+from llm_wiki.infrastructure.search.tsvector_adapter import TsVectorSearchAdapter
+from llm_wiki.presentation.dependencies import get_db
 
 router = APIRouter()
 
@@ -23,6 +21,7 @@ async def search(
     enriched = {}
     if result_ids:
         from uuid import UUID
+
         uuids = []
         for rid in result_ids:
             try:

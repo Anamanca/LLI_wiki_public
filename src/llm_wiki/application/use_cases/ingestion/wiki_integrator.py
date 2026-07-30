@@ -21,14 +21,19 @@ import json
 import logging
 import re
 from datetime import datetime
-from llm_wiki.shared.datetime_utils import now
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from sqlalchemy import select, text, func, delete, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from llm_wiki.application.ports.repositories.entity_repository import EntityRepository
+from llm_wiki.application.ports.repositories.event_repository import EventRepository
+from llm_wiki.application.ports.repositories.page_repository import (
+    PageRepository,
+    PageSectionRepository,
+)
 from llm_wiki.application.ports.search.vector_search import (
     EmbeddingServicePort,
     LLMClientPort,
@@ -40,27 +45,13 @@ from llm_wiki.application.use_cases.ingestion.event_linker import (
     detect_contradictions,
     link_cause_effect_chains,
 )
-from llm_wiki.application.ports.repositories.page_repository import (
-    PageRepository,
-    PageSectionRepository,
-)
-from llm_wiki.application.ports.repositories.event_repository import EventRepository
-from llm_wiki.application.ports.repositories.entity_repository import EntityRepository
 from llm_wiki.application.use_cases.ingestion.wiki_prompts import (
     ANALYZE_SYSTEM_PROMPT,
     EXTRACT_SYSTEM_PROMPT,
     WRITE_SYSTEM_PROMPT,
 )
-from llm_wiki.domain.entities.page import Page, PageLink, PageSection, PageSnapshot
-from llm_wiki.domain.entities.event import EventCanonical, EventObservation
-from llm_wiki.domain.entities.entity import Entity, EntityRelation, EventEntityLink
-from llm_wiki.domain.value_objects.identifiers import (
-    EventId,
-    PageId,
-    SourceId,
-    SourceItemId,
-)
 from llm_wiki.infrastructure.persistence.postgres import models as orm
+from llm_wiki.shared.datetime_utils import now
 
 logger = logging.getLogger(__name__)
 
@@ -229,10 +220,10 @@ def _canonicalize(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 VI_FILLERS = r"\b(à|ừm|nhỉ|nhé|nha|ờ|hả|nè|nhá|đúng không|phải không)\b"
-EN_FILLERS = r"\b(um|uh|like|you know|I mean|sort of|kind of|basically|actually|literally|right|okay|so)\b"
-COMBINED_FILLERS = (
-    r"\b(à|ừm|nhỉ|nhé|nha|um|uh|like|you know|I mean|sort of|kind of|basically|actually|literally)\b"
+EN_FILLERS = (
+    r"\b(um|uh|like|you know|I mean|sort of|kind of|basically|actually|literally|right|okay|so)\b"
 )
+COMBINED_FILLERS = r"\b(à|ừm|nhỉ|nhé|nha|um|uh|like|you know|I mean|sort of|kind of|basically|actually|literally)\b"
 
 
 def _preprocess_transcript(transcript_text: str, lang: str | None = None) -> str:
@@ -279,9 +270,7 @@ def _char_overlap(a: str, b: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _chunk_transcript(
-    text: str, chunk_size: int = CHUNK_SIZE, overlap: int = OVERLAP
-) -> list[str]:
+def _chunk_transcript(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = OVERLAP) -> list[str]:
     """Split transcript into overlapping chunks for parallel processing."""
     if len(text) <= chunk_size:
         return [text]
@@ -386,7 +375,9 @@ def _merge_extracted_facts(facts_list: list[dict[str, Any]]) -> dict[str, Any]:
                 seen_tickers.add(key)
                 if ticker and not c.get("sector"):
                     for existing in merged_entities["companies"]:
-                        if (existing.get("ticker") or "").upper() == ticker and existing.get("sector"):
+                        if (existing.get("ticker") or "").upper() == ticker and existing.get(
+                            "sector"
+                        ):
                             c["sector"] = existing["sector"]
                             break
                 merged_entities["companies"].append(c)
@@ -419,7 +410,7 @@ def _merge_extracted_facts(facts_list: list[dict[str, Any]]) -> dict[str, Any]:
                 merged_events.append(ev)
 
         for rel in facts.get("relationships", []):
-            key = f"{rel.get('source','')}|{rel.get('target','')}|{rel.get('relation_type','')}".lower()
+            key = f"{rel.get('source', '')}|{rel.get('target', '')}|{rel.get('relation_type', '')}".lower()
             if key not in seen_relationships:
                 seen_relationships.add(key)
                 merged_relationships.append(rel)
@@ -429,7 +420,7 @@ def _merge_extracted_facts(facts_list: list[dict[str, Any]]) -> dict[str, Any]:
         for rel in facts.get("entity_relations", []) or []:
             if not isinstance(rel, dict):
                 continue
-            key = f"{rel.get('from','')}|{rel.get('to','')}|{rel.get('predicate','')}".lower()
+            key = f"{rel.get('from', '')}|{rel.get('to', '')}|{rel.get('predicate', '')}".lower()
             if key not in seen_entity_relation_keys:
                 seen_entity_relation_keys.add(key)
                 merged_entity_relations.append(rel)
@@ -491,10 +482,12 @@ async def _call_llm_json(
     ]
     try:
         raw_resp = await asyncio.wait_for(
-            llm.chat_completion_raw(messages=messages, temperature=temperature, max_tokens=max_tokens),
+            llm.chat_completion_raw(
+                messages=messages, temperature=temperature, max_tokens=max_tokens
+            ),
             timeout=timeout,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("%s: LLM call timed out after %.1fs", pass_label, timeout)
         raise
 
@@ -516,10 +509,12 @@ async def _call_llm_json(
         ]
         try:
             raw_resp2 = await asyncio.wait_for(
-                llm.chat_completion_raw(messages=retry_messages, temperature=0.1, max_tokens=max_tokens),
+                llm.chat_completion_raw(
+                    messages=retry_messages, temperature=0.1, max_tokens=max_tokens
+                ),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("%s: retry timed out", pass_label)
             raise
         content2 = _content_from_raw(raw_resp2)
@@ -654,9 +649,7 @@ async def _pass_extract_chunked(
             )
 
         user_content = (
-            t0_instruction
-            + context_prefix
-            + f"[DOAN {idx + 1}/{len(chunks)}]\n"
+            t0_instruction + context_prefix + f"[DOAN {idx + 1}/{len(chunks)}]\n"
             f"Phan loai:\n- Chu de: {classification.get('main_topic', '')}\n{domain_info}{entities_info}"
             f"- Chu de phu: {', '.join(classification.get('subtopics', []))}\n"
             f"- Ngon ngu: {classification.get('language', 'vi')}\n\n"
@@ -731,9 +724,13 @@ async def _pass_analyze(
 
     chunk_context = _build_chunk_context(facts)
     if chunk_context:
-        transcript_section = f"TOM TAT TOAN BO TRANSCRIPT (tu phan tich tung doan):\n{chunk_context}"
+        transcript_section = (
+            f"TOM TAT TOAN BO TRANSCRIPT (tu phan tich tung doan):\n{chunk_context}"
+        )
     else:
-        transcript_section = f"TRANSCRIPT GOC (de tham khao them ngu canh):\n{transcript_text[:30_000]}"
+        transcript_section = (
+            f"TRANSCRIPT GOC (de tham khao them ngu canh):\n{transcript_text[:30_000]}"
+        )
 
     t0_prefix = ""
     if published_at:
@@ -746,7 +743,9 @@ async def _pass_analyze(
         f"DU KIEN DA TRICH XUAT TU TRANSCRIPT:\n{facts_json}\n\n"
         f"{transcript_section}"
     )
-    logger.info("Pass 2/3: Analyzing cause-effect & implications (context: %d chars)", len(user_content))
+    logger.info(
+        "Pass 2/3: Analyzing cause-effect & implications (context: %d chars)", len(user_content)
+    )
     return await _call_llm_json(
         llm,
         ANALYZE_SYSTEM_PROMPT,
@@ -849,7 +848,9 @@ async def _pass_write(
     if frame_urls:
         frame_info = "KHUNG HINH CO SAN (co the chen vao noi dung neu lien quan):\n"
         for f in frame_urls:
-            frame_info += f"- [{f.get('second')}s] {f.get('description', '')}\n  URL: {f.get('url', '')}\n"
+            frame_info += (
+                f"- [{f.get('second')}s] {f.get('description', '')}\n  URL: {f.get('url', '')}\n"
+            )
         user_parts.insert(1, frame_info)
 
     if existing_page_content:
@@ -1271,13 +1272,16 @@ async def _run_extraction_pass(
                 "main_topic": cls_data.get("main_topic", classification_hint.get("main_topic", "")),
                 "domain": cls_data.get("domain", classification_hint.get("domain", "")),
                 "subtopics": cls_data.get("subtopics", classification_hint.get("subtopics", [])),
-                "key_entities": cls_data.get("key_entities", classification_hint.get("key_entities", [])),
+                "key_entities": cls_data.get(
+                    "key_entities", classification_hint.get("key_entities", [])
+                ),
                 "language": cls_data.get("language", classification_hint.get("language", "vi")),
                 "summary_3sentences": cls_data.get(
                     "summary_3sentences", classification_hint.get("summary_3sentences", "")
                 ),
                 "existing_pages_to_update": cls_data.get(
-                    "existing_pages_to_update", classification_hint.get("existing_pages_to_update", [])
+                    "existing_pages_to_update",
+                    classification_hint.get("existing_pages_to_update", []),
                 ),
             }
             logger.info("Using classification from Pass 1 (merged)")
@@ -1445,8 +1449,14 @@ class WikiIntegrator:
         )
 
         # If Pass 1 failed to classify and caller provided a fallback, use it
-        if not effective_classification.get("main_topic") and classification and classification.get("main_topic"):
-            logger.warning("Pass 1 classification empty - using provided classification as fallback")
+        if (
+            not effective_classification.get("main_topic")
+            and classification
+            and classification.get("main_topic")
+        ):
+            logger.warning(
+                "Pass 1 classification empty - using provided classification as fallback"
+            )
             effective_classification = classification
 
         if not effective_classification.get("main_topic"):
@@ -1454,10 +1464,9 @@ class WikiIntegrator:
 
         # Step 2: Build summary_vector from merged classification if not provided
         if summary_vector is None or not summary_vector:
-            classification_text = (
-                effective_classification.get("summary_3sentences")
-                or effective_classification.get("main_topic", "")
-            )
+            classification_text = effective_classification.get(
+                "summary_3sentences"
+            ) or effective_classification.get("main_topic", "")
             if classification_text:
                 emb = await self._embedder.embed(classification_text)
                 summary_vector = emb.vector
@@ -1477,11 +1486,13 @@ class WikiIntegrator:
             if asset.minio_path and asset.file_size_bytes and asset.file_size_bytes > 0:
                 # NOTE: Presigned URL generation requires minio_client which is not
                 # yet ported to clean architecture. Build a path-based URL as fallback.
-                frame_urls.append({
-                    "second": asset.filename.replace("s.jpg", "").replace("s_error.jpg", ""),
-                    "url": f"/api/media/{asset.minio_path}",
-                    "description": asset.description or "",
-                })
+                frame_urls.append(
+                    {
+                        "second": asset.filename.replace("s.jpg", "").replace("s_error.jpg", ""),
+                        "url": f"/api/media/{asset.minio_path}",
+                        "description": asset.description or "",
+                    }
+                )
 
         # Step 5: Pass 2 + Pass 3 (with existing page context if match passes multi-criteria gates)
         # Extract entity names from classification for gate 3 (entity Jaccard)
@@ -1489,17 +1500,17 @@ class WikiIntegrator:
         if effective_classification.get("key_entities"):
             ke_list = effective_classification["key_entities"]
             if isinstance(ke_list, list):
-                new_entity_names = [
-                    k["name"] if isinstance(k, dict) else str(k)
-                    for k in ke_list
-                ]
+                new_entity_names = [k["name"] if isinstance(k, dict) else str(k) for k in ke_list]
 
         best_match: orm.Page | None = None
         matched_similarity: float = 0.0
         if matches:
             for candidate, sim in matches:
                 should_merge, reason = _should_merge(
-                    published_at_val, candidate, new_entity_names, sim,
+                    published_at_val,
+                    candidate,
+                    new_entity_names,
+                    sim,
                 )
                 if should_merge:
                     best_match = candidate
@@ -1530,9 +1541,13 @@ class WikiIntegrator:
 
             # Build existing_page_content from ALL sections (not page.content_markdown,
             # which can be stale/corrupted when prior updates failed).
-            existing_page_content = "\n\n".join(
-                f"## {s['title']}\n\n{s['content_markdown']}" for s in existing_sections
-            ) if existing_sections else best_match.content_markdown
+            existing_page_content = (
+                "\n\n".join(
+                    f"## {s['title']}\n\n{s['content_markdown']}" for s in existing_sections
+                )
+                if existing_sections
+                else best_match.content_markdown
+            )
 
             llm_result = await _run_synthesis_passes(
                 self._llm,
@@ -1679,7 +1694,9 @@ class WikiIntegrator:
         )
 
         # Link Pass 2 cause-effect chains
-        cause_effect_chains = analysis.get("cause_effect_chains", []) if isinstance(analysis, dict) else []
+        cause_effect_chains = (
+            analysis.get("cause_effect_chains", []) if isinstance(analysis, dict) else []
+        )
         await link_cause_effect_chains(
             llm=self._llm,
             embedder=self._embedder,
@@ -1709,4 +1726,6 @@ class WikiIntegrator:
                     )
                     .values(stance=stance, sentiment_score=sentiment_map.get(stance, 0.0))
                 )
-                logger.debug("Captured stance '%s' for observations on page %s", stance, page_id_val)
+                logger.debug(
+                    "Captured stance '%s' for observations on page %s", stance, page_id_val
+                )

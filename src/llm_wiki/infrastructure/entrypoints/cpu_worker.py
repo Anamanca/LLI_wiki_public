@@ -13,41 +13,39 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import random
 import signal
-import sys
 import time
-from datetime import datetime, timedelta
-from llm_wiki.shared.datetime_utils import now
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update, delete, text
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.config import settings
+from llm_wiki.infrastructure.cpu_guard import cpu_safe_to_proceed, get_current_cpu
+from llm_wiki.infrastructure.entrypoints.health_server import set_health_state, start_health_server
+from llm_wiki.infrastructure.notifier import push_error_web, send_telegram_alert
 from llm_wiki.infrastructure.persistence.postgres.database import async_session_factory
 from llm_wiki.infrastructure.persistence.postgres.models import (
-    SourceItem,
-    Source,
+    IngestionLog,
+    MediaAsset,
     Page,
+    PageLink,
     PageSection,
     PageSnapshot,
-    PageLink,
-    MediaAsset,
-    IngestionLog,
+    Source,
+    SourceItem,
 )
-from llm_wiki.infrastructure.persistence.redis.wiki_queue import push_wiki_job
 from llm_wiki.infrastructure.persistence.postgres.worker_heartbeat import set_worker_state
-from llm_wiki.infrastructure.cpu_guard import cpu_safe_to_proceed, get_current_cpu
-from llm_wiki.infrastructure.notifier import push_error_web, send_telegram_alert
-from llm_wiki.infrastructure.entrypoints.health_server import start_health_server, set_health_state
+from llm_wiki.infrastructure.persistence.redis.wiki_queue import push_wiki_job
 from llm_wiki.infrastructure.telemetry import create_telemetry_adapter
 from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter, set_gauge
 from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
+from llm_wiki.shared.datetime_utils import now
 
 logger = logging.getLogger(__name__)
 
@@ -214,19 +212,17 @@ async def _rollback_snapshots(source_item_id: UUID, db: AsyncSession) -> None:
                 db.add(section)
 
     # Delete all snapshots for this job
-    await db.execute(
-        delete(PageSnapshot).where(PageSnapshot.source_item_id == source_item_id)
-    )
+    await db.execute(delete(PageSnapshot).where(PageSnapshot.source_item_id == source_item_id))
     await db.flush()
     logger.info("Rollback complete for source_item_id=%s", source_item_id)
 
 
 STAGE_TIMEOUTS: dict[str, float] = {
-    "extracting": 14400.0,   # 4h — long videos (2-3h) need generous timeout for faster-whisper
-    "classifying": 1800.0,   # 30 min
-    "embedding": 1800.0,     # 30 min
-    "wiki": 1800.0,          # 30 min
-    "default": 3600.0,       # 1h fallback
+    "extracting": 14400.0,  # 4h — long videos (2-3h) need generous timeout for faster-whisper
+    "classifying": 1800.0,  # 30 min
+    "embedding": 1800.0,  # 30 min
+    "wiki": 1800.0,  # 30 min
+    "default": 3600.0,  # 1h fallback
 }
 
 
@@ -241,9 +237,7 @@ async def _embed_texts_ollama(texts: list[str]) -> list[list[float]]:
     if not clean_texts:
         return [[0.0] * 1024 for _ in texts]
 
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(300.0, connect=10.0)
-    ) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
         url = f"{settings.ollama_host}/api/embed"
         resp = await client.post(
             url,
@@ -274,6 +268,7 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
     Each stage has a timeout — exceeding it raises TimeoutError and triggers retry.
     """
     import time as _time
+
     _job_start = _time.monotonic()
     ctx = await _build_job_context(item, db)
     logger.info(
@@ -306,7 +301,9 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
 
     cached = item.transcript_text
     if cached:
-        logger.info("Worker %d: Job %s: using cached transcript from GPU worker", WORKER_ID, ctx["video_id"])
+        logger.info(
+            "Worker %d: Job %s: using cached transcript from GPU worker", WORKER_ID, ctx["video_id"]
+        )
         cached_json = item.transcript_json or {}
         segs = cached_json.get("segments", [])
         transcript_dict = {
@@ -317,7 +314,10 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
             "raw_text": cached[:100_000],
         }
     else:
-        from llm_wiki.application.use_cases.ingestion.extractor import extract_transcript, classify_extract_error
+        from llm_wiki.application.use_cases.ingestion.extractor import (
+            classify_extract_error,
+            extract_transcript,
+        )
 
         try:
             transcript = await asyncio.wait_for(
@@ -329,8 +329,7 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
                 "language": transcript.language,
                 "duration_seconds": transcript.duration_seconds,
                 "segments": [
-                    {"start": s.start, "end": s.end, "text": s.text}
-                    for s in transcript.segments
+                    {"start": s.start, "end": s.end, "text": s.text} for s in transcript.segments
                 ],
                 "raw_text": transcript.raw_text,
             }
@@ -346,44 +345,78 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
                     item.error_message = f"Video not yet available: {new_status}"
                     await _log_event(db, item.id, "video_scheduled", item.error_message)
                     await db.commit()
-                    logger.info("Worker %d: Job %s: scheduled (premieres later) — retry after 12h", WORKER_ID, ctx["video_id"])
+                    logger.info(
+                        "Worker %d: Job %s: scheduled (premieres later) — retry after 12h",
+                        WORKER_ID,
+                        ctx["video_id"],
+                    )
                 else:
                     item.status = new_status
                     item.started_at = None
                     item.error_message = f"Video not accessible: {new_status}"
                     await _log_event(db, item.id, "video_inaccessible", item.error_message)
                     await db.commit()
-                    inc_counter("ingestion_jobs_total", {"status": new_status, "stage": "extract", "worker_id": str(WORKER_ID)})
-                    logger.info("Worker %d: Job %s: permanently %s — skipping", WORKER_ID, ctx["video_id"], new_status)
+                    inc_counter(
+                        "ingestion_jobs_total",
+                        {"status": new_status, "stage": "extract", "worker_id": str(WORKER_ID)},
+                    )
+                    logger.info(
+                        "Worker %d: Job %s: permanently %s — skipping",
+                        WORKER_ID,
+                        ctx["video_id"],
+                        new_status,
+                    )
                 return
             else:
                 # Transient error — queue for retry with backoff
-                await _telemetry.end_span(span=root_span, error=f"extract transient: {err_msg[:400]}")
-                logger.warning("Worker %d: Job %s: extract transient error: %s", WORKER_ID, ctx["video_id"], exc)
+                await _telemetry.end_span(
+                    span=root_span, error=f"extract transient: {err_msg[:400]}"
+                )
+                logger.warning(
+                    "Worker %d: Job %s: extract transient error: %s",
+                    WORKER_ID,
+                    ctx["video_id"],
+                    exc,
+                )
                 await handle_job_failure(item, exc, db)
                 return
 
     if transcript_dict is None or not transcript_dict.get("segments"):
         reason = "no_captions_t3_fail" if transcript_dict is None else "no_captions"
-        log_msg = "All 4 tiers exhausted — no captions available" if transcript_dict is None else "No caption segments found"
+        log_msg = (
+            "All 4 tiers exhausted — no captions available"
+            if transcript_dict is None
+            else "No caption segments found"
+        )
         await _telemetry.end_span(span=root_span, error=log_msg)
         item.status = reason
         item.started_at = None
         item.error_message = log_msg
         await _log_event(db, item.id, reason, log_msg)
         await db.commit()
-        inc_counter("ingestion_jobs_total", {"status": reason, "stage": "extract", "worker_id": str(WORKER_ID)})
+        inc_counter(
+            "ingestion_jobs_total",
+            {"status": reason, "stage": "extract", "worker_id": str(WORKER_ID)},
+        )
         logger.info("Worker %d: Job %s: %s — skipping", WORKER_ID, ctx["video_id"], log_msg)
         return
 
-    await _log_event(db, item.id, "extract_done", f"Extracted {len(transcript_dict.get('segments', []))} segments")
+    await _log_event(
+        db,
+        item.id,
+        "extract_done",
+        f"Extracted {len(transcript_dict.get('segments', []))} segments",
+    )
 
     # --- Stage 2: Classify ---
     merge_classify_enabled = os.getenv("MERGE_CLASSIFY_ENABLED", "false").lower() == "true"
 
     if merge_classify_enabled:
         # Path A: Skip classifier — wiki_consumer will use Pass 1 classification
-        logger.info("Worker %d: MERGE_CLASSIFY_ENABLED=true — skipping classifier, wiki_consumer will self-classify", WORKER_ID)
+        logger.info(
+            "Worker %d: MERGE_CLASSIFY_ENABLED=true — skipping classifier, wiki_consumer will self-classify",
+            WORKER_ID,
+        )
         classification_data = {
             "main_topic": "",
             "domain": "",
@@ -430,9 +463,13 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
         )
 
         # Build summary_vector from classifier output
-        classification_text = classification_data.get("summary_3sentences", "") or classification_data.get("main_topic", "")
+        classification_text = classification_data.get(
+            "summary_3sentences", ""
+        ) or classification_data.get("main_topic", "")
         if not classification_text.strip():
-            await _log_event(db, item.id, "embed_skip", "Classification returned no text — skipping embedding")
+            await _log_event(
+                db, item.id, "embed_skip", "Classification returned no text — skipping embedding"
+            )
             summary_vector_from_embed = []
         else:
             try:
@@ -469,10 +506,17 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
 
     queue_len = await push_wiki_job(item.id)
     set_gauge("ingestion_queue_depth", float(queue_len), {"queue": "wiki"})
-    inc_counter("ingestion_jobs_total", {"status": "classified", "stage": "cpu_done", "worker_id": str(WORKER_ID)})
-    get_metrics().histogram("ingestion_job_duration_seconds", _time.monotonic() - _job_start, {"stage": "cpu"})
+    inc_counter(
+        "ingestion_jobs_total",
+        {"status": "classified", "stage": "cpu_done", "worker_id": str(WORKER_ID)},
+    )
+    get_metrics().histogram(
+        "ingestion_job_duration_seconds", _time.monotonic() - _job_start, {"stage": "cpu"}
+    )
     sections_count = len(classification_data.get("subtopics", []) or [])
-    await _log_event(db, item.id, "wiki_queued", f"Queued for wiki integration (topics: {sections_count})")
+    await _log_event(
+        db, item.id, "wiki_queued", f"Queued for wiki integration (topics: {sections_count})"
+    )
     await db.commit()
 
     # End the root telemetry span — job is done from cpu_worker's perspective.
@@ -508,9 +552,17 @@ async def handle_job_failure(
     is_temporary_pause = is_rate_limit or is_payment_required
 
     if is_temporary_pause:
-        logger.warning("Worker %d: Job %s paused (402/429/quota): %s", WORKER_ID, item.id, error_msg[:120])
+        logger.warning(
+            "Worker %d: Job %s paused (402/429/quota): %s", WORKER_ID, item.id, error_msg[:120]
+        )
     else:
-        logger.error("Worker %d: Job %s failed (retry_count=%d): %s", WORKER_ID, item.id, item.retry_count, error_msg)
+        logger.error(
+            "Worker %d: Job %s failed (retry_count=%d): %s",
+            WORKER_ID,
+            item.id,
+            item.retry_count,
+            error_msg,
+        )
 
     set_worker_state(WORKER_ID, "error", item.id, None, int(get_current_cpu()), error_msg)
 
@@ -528,8 +580,18 @@ async def handle_job_failure(
         # DON'T increment retry_count
         item.status = "pending"
         item.retry_after = now() + timedelta(hours=24)
-        await _log_event(db, item.id, "retry", f"Quota/Payment/Rate-limited, queued for retry in 24h: {error_msg[:200]}")
-        logger.warning("Worker %d: Job %s rate-limited/402, retry after %s", WORKER_ID, item.id, item.retry_after)
+        await _log_event(
+            db,
+            item.id,
+            "retry",
+            f"Quota/Payment/Rate-limited, queued for retry in 24h: {error_msg[:200]}",
+        )
+        logger.warning(
+            "Worker %d: Job %s rate-limited/402, retry after %s",
+            WORKER_ID,
+            item.id,
+            item.retry_after,
+        )
         await push_error_web(item.id, error_msg, db, event_type="api_limit")
         # Ensure telegram alert for 402/Quota limits specifically to notify admin
         if is_payment_required:
@@ -543,8 +605,18 @@ async def handle_job_failure(
         if item.retry_count <= 2:
             item.status = "pending"
             item.retry_after = now() + timedelta(seconds=60)
-            await _log_event(db, item.id, "retry", f"Failed attempt {item.retry_count}, queued for retry: {error_msg[:200]}")
-            logger.warning("Worker %d: Job %s queued for retry (attempt %d)", WORKER_ID, item.id, item.retry_count)
+            await _log_event(
+                db,
+                item.id,
+                "retry",
+                f"Failed attempt {item.retry_count}, queued for retry: {error_msg[:200]}",
+            )
+            logger.warning(
+                "Worker %d: Job %s queued for retry (attempt %d)",
+                WORKER_ID,
+                item.id,
+                item.retry_count,
+            )
         else:
             item.status = "failed"
             await _log_event(
@@ -559,7 +631,12 @@ async def handle_job_failure(
             await send_telegram_alert(
                 f"⚠️ Ingest failed: [{source_name}] {item.title or item.external_id}\n{error_msg[:200]}"
             )
-            logger.error("Worker %d: Job %s permanently failed after %d attempts", WORKER_ID, item.id, item.retry_count)
+            logger.error(
+                "Worker %d: Job %s permanently failed after %d attempts",
+                WORKER_ID,
+                item.id,
+                item.retry_count,
+            )
 
     await db.commit()
 
@@ -590,11 +667,15 @@ async def worker_loop() -> None:
                 if job is None:
                     set_worker_state(WORKER_ID, "idle", cpu=int(get_current_cpu()))
                     # Report pending queue depth every idle cycle
-                    from sqlalchemy import select, func
+                    from sqlalchemy import func, select
+
                     from llm_wiki.infrastructure.persistence.postgres.models import SourceItem as SI
-                    pending_count = (await db.execute(
-                        select(func.count()).select_from(SI).where(SI.status == "pending")
-                    )).scalar() or 0
+
+                    pending_count = (
+                        await db.execute(
+                            select(func.count()).select_from(SI).where(SI.status == "pending")
+                        )
+                    ).scalar() or 0
                     set_gauge("ingestion_queue_depth", float(pending_count), {"queue": "cpu"})
                     await asyncio.sleep(10)
                     continue
@@ -618,10 +699,18 @@ async def worker_loop() -> None:
 
         except Exception as loop_exc:
             error_str = str(loop_exc).lower()
-            if "recovery mode" in error_str or "operationalerror" in error_str or "connection" in error_str:
-                logger.critical("Worker %d: DB offline or in recovery. Sleeping for 60s.", WORKER_ID)
+            if (
+                "recovery mode" in error_str
+                or "operationalerror" in error_str
+                or "connection" in error_str
+            ):
+                logger.critical(
+                    "Worker %d: DB offline or in recovery. Sleeping for 60s.", WORKER_ID
+                )
                 try:
-                    set_worker_state(WORKER_ID, "error", error="DB Offline / Recovery Mode. Paused 60s.")
+                    set_worker_state(
+                        WORKER_ID, "error", error="DB Offline / Recovery Mode. Paused 60s."
+                    )
                 except Exception:
                     pass
                 await asyncio.sleep(60)
@@ -639,7 +728,10 @@ async def worker_loop() -> None:
 
 async def _heartbeat_loop() -> None:
     """Periodic heartbeat to worker_heartbeats — reads from shared state."""
-    from llm_wiki.infrastructure.persistence.postgres.worker_heartbeat import get_worker_state, write_heartbeat as write_hb
+    from llm_wiki.infrastructure.persistence.postgres.worker_heartbeat import get_worker_state
+    from llm_wiki.infrastructure.persistence.postgres.worker_heartbeat import (
+        write_heartbeat as write_hb,
+    )
 
     while not _shutdown_requested:
         try:

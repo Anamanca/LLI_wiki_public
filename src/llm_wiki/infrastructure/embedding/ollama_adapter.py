@@ -1,9 +1,10 @@
 import logging
+
 import httpx
 
 from llm_wiki.application.ports.search.vector_search import EmbeddingServicePort
-from llm_wiki.domain.value_objects.embedding import Embedding
 from llm_wiki.config import settings
+from llm_wiki.domain.value_objects.embedding import Embedding
 
 logger = logging.getLogger(__name__)
 

@@ -12,9 +12,9 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +181,10 @@ async def _run_ytdlp(args: list[str], timeout: float = 300.0) -> str:
     # --remote-components ejs:github downloads the JS challenge solver script.
     full_args = [
         "yt-dlp",
-        "--impersonate", "chrome:windows-10",
-        "--remote-components", "ejs:github",
+        "--impersonate",
+        "chrome:windows-10",
+        "--remote-components",
+        "ejs:github",
         *args,
     ]
 
@@ -193,7 +195,7 @@ async def _run_ytdlp(args: list[str], timeout: float = 300.0) -> str:
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         await proc.wait()
         raise RuntimeError(f"yt-dlp timed out after {timeout}s")
@@ -301,7 +303,9 @@ async def _try_extract_subs_to_file(
         return None
 
 
-async def check_video_accessible(video_id: str, video_url: str, timeout: float = 60.0) -> str | None:
+async def check_video_accessible(
+    video_id: str, video_url: str, timeout: float = 60.0
+) -> str | None:
     """Check if video is accessible (not private/members-only/deleted).
 
     Returns None if public and accessible.
@@ -311,12 +315,27 @@ async def check_video_accessible(video_id: str, video_url: str, timeout: float =
     Uses yt-dlp --dump-json (lightweight, doesn't download) with retries.
     """
     transient_keywords = [
-        "429", "rate", "too many", "timeout", "connection", "network",
-        "dns", "resolve", "refused", "reset", "aborted",
+        "429",
+        "rate",
+        "too many",
+        "timeout",
+        "connection",
+        "network",
+        "dns",
+        "resolve",
+        "refused",
+        "reset",
+        "aborted",
     ]
     permanent_keywords = [
-        "private", "members", "unavailable", "removed", "deleted",
-        "not found", "premieres", "upcoming",
+        "private",
+        "members",
+        "unavailable",
+        "removed",
+        "deleted",
+        "not found",
+        "premieres",
+        "upcoming",
     ]
 
     last_err = ""
@@ -676,19 +695,21 @@ async def extract_transcript(
                     transcript_path = os.path.join(TRANSCRIPT_DIR, f"{video_id}.json")
                     try:
                         with open(transcript_path, "w", encoding="utf-8") as f:
-                            f.write(json.dumps(
-                                {
-                                    "video_id": whisper_transcript.video_id,
-                                    "language": whisper_transcript.language,
-                                    "duration_seconds": whisper_transcript.duration_seconds,
-                                    "segments": [
-                                        {"start": s.start, "end": s.end, "text": s.text}
-                                        for s in whisper_transcript.segments
-                                    ],
-                                    "raw_text": whisper_transcript.raw_text,
-                                },
-                                indent=2,
-                            ))
+                            f.write(
+                                json.dumps(
+                                    {
+                                        "video_id": whisper_transcript.video_id,
+                                        "language": whisper_transcript.language,
+                                        "duration_seconds": whisper_transcript.duration_seconds,
+                                        "segments": [
+                                            {"start": s.start, "end": s.end, "text": s.text}
+                                            for s in whisper_transcript.segments
+                                        ],
+                                        "raw_text": whisper_transcript.raw_text,
+                                    },
+                                    indent=2,
+                                )
+                            )
                     except OSError as exc:
                         logger.warning("Failed to save transcript for %s: %s", video_id, exc)
                     return whisper_transcript
@@ -700,7 +721,9 @@ async def extract_transcript(
                     logger.info("Permanent error for %s: %s", video_id, permanent)
                     raise RuntimeError(f"Video permanently unavailable: {permanent}") from e
                 # Re-raise transient errors (anti-bot, 429, network) too — worker will retry with backoff
-                logger.warning("Whisper failed for %s: %s — propagating to worker for retry", video_id, e)
+                logger.warning(
+                    "Whisper failed for %s: %s — propagating to worker for retry", video_id, e
+                )
                 raise
 
         # Tier 4: No captions
@@ -736,19 +759,21 @@ async def extract_transcript(
     )
     try:
         with open(transcript_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(
-                {
-                    "video_id": transcript.video_id,
-                    "language": transcript.language,
-                    "duration_seconds": transcript.duration_seconds,
-                    "segments": [
-                        {"start": s.start, "end": s.end, "text": s.text}
-                        for s in transcript.segments
-                    ],
-                    "raw_text": transcript.raw_text,
-                },
-                indent=2,
-            ))
+            f.write(
+                json.dumps(
+                    {
+                        "video_id": transcript.video_id,
+                        "language": transcript.language,
+                        "duration_seconds": transcript.duration_seconds,
+                        "segments": [
+                            {"start": s.start, "end": s.end, "text": s.text}
+                            for s in transcript.segments
+                        ],
+                        "raw_text": transcript.raw_text,
+                    },
+                    indent=2,
+                )
+            )
     except OSError as exc:
         logger.warning("Failed to save transcript for %s: %s", video_id, exc)
 

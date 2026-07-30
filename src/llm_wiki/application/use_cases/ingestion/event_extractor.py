@@ -12,7 +12,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text, func, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,7 +66,11 @@ async def _dedup_exact_key(
             if canonical and canonical.entities and key[2]:
                 entities = canonical.entities if isinstance(canonical.entities, dict) else {}
                 companies = entities.get("companies", []) if isinstance(entities, dict) else []
-                top_entity = companies[0].get("name") if companies and isinstance(companies[0], dict) else None
+                top_entity = (
+                    companies[0].get("name")
+                    if companies and isinstance(companies[0], dict)
+                    else None
+                )
                 if top_entity and top_entity.lower() == key[2].lower():
                     return row[0]
             else:
@@ -179,7 +183,7 @@ async def _inc_observation_count(
             is_deadlock = "deadlock" in err_str or "deadlock detected" in err_str
             if not is_deadlock or attempt >= max_retries - 1:
                 raise
-            backoff = 0.1 * (2 ** attempt)
+            backoff = 0.1 * (2**attempt)
             logger.warning(
                 "Deadlock retry %d/%d for event %s, waiting %.2fs",
                 attempt + 1,
@@ -242,10 +246,12 @@ async def _link_entities_to_event(
             await db.flush()
 
             result = await db.execute(
-                select(orm.Entity.id).where(
+                select(orm.Entity.id)
+                .where(
                     orm.Entity.type == etype,
                     orm.Entity.canonical_name == canonical,
-                ).limit(1)
+                )
+                .limit(1)
             )
             entity_row = result.first()
             if not entity_row:
@@ -287,10 +293,12 @@ async def _link_entities_to_event(
             await db.flush()
 
             result = await db.execute(
-                select(orm.Entity.id).where(
+                select(orm.Entity.id)
+                .where(
                     orm.Entity.type == etype,
                     orm.Entity.canonical_name == canonical,
-                ).limit(1)
+                )
+                .limit(1)
             )
             entity_row = result.first()
             if not entity_row:
@@ -356,7 +364,9 @@ async def _store_entity_relations(
         to_type = entity_types.get(to_id, rel.get("to_type", "other"))
         validation = validate_relation(from_name, from_type, to_name, to_type, predicate)
         if not validation.valid:
-            logger.debug("Rejected: %s —%s→ %s (%s)", from_name, predicate, to_name, validation.reason)
+            logger.debug(
+                "Rejected: %s —%s→ %s (%s)", from_name, predicate, to_name, validation.reason
+            )
             rejected += 1
             continue
 

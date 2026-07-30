@@ -1,9 +1,10 @@
-from typing import Optional
-
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.application.ports.repositories.page_repository import PageRepository, PageSectionRepository
+from llm_wiki.application.ports.repositories.page_repository import (
+    PageRepository,
+    PageSectionRepository,
+)
 from llm_wiki.domain.entities.page import Page, PageSection
 from llm_wiki.domain.value_objects.identifiers import PageId, SourceId
 from llm_wiki.infrastructure.persistence.postgres import models as orm
@@ -14,12 +15,12 @@ class PostgresPageRepository(PageRepository):
     def __init__(self, session: AsyncSession):
         self._session = session
 
-    async def get_by_id(self, page_id: PageId) -> Optional[Page]:
+    async def get_by_id(self, page_id: PageId) -> Page | None:
         result = await self._session.execute(select(orm.Page).where(orm.Page.id == page_id.value))
         row = result.scalar_one_or_none()
         return PageMapper.to_domain(row) if row else None
 
-    async def get_by_slug(self, slug: str) -> Optional[Page]:
+    async def get_by_slug(self, slug: str) -> Page | None:
         result = await self._session.execute(select(orm.Page).where(orm.Page.slug == slug))
         row = result.scalar_one_or_none()
         return PageMapper.to_domain(row) if row else None
@@ -45,9 +46,7 @@ class PostgresPageRepository(PageRepository):
 
     async def search_by_title(self, query: str, limit: int = 10) -> list[Page]:
         result = await self._session.execute(
-            select(orm.Page)
-            .where(orm.Page.title.ilike(f"%{query}%"))
-            .limit(limit)
+            select(orm.Page).where(orm.Page.title.ilike(f"%{query}%")).limit(limit)
         )
         return [PageMapper.to_domain(r) for r in result.scalars()]
 
@@ -80,7 +79,7 @@ class PostgresPageSectionRepository(PageSectionRepository):
     def __init__(self, session: AsyncSession):
         self._session = session
 
-    async def get_by_id(self, section_id: PageId) -> Optional[PageSection]:
+    async def get_by_id(self, section_id: PageId) -> PageSection | None:
         result = await self._session.execute(
             select(orm.PageSection).where(orm.PageSection.id == section_id.value)
         )

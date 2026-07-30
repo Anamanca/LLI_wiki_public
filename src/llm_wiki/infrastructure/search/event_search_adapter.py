@@ -30,9 +30,7 @@ class PgVectorEventSearchAdapter(EventSearchPort):
     def _vector_to_str(vector: list[float]) -> str:
         return "[" + ",".join(str(v) for v in vector) + "]"
 
-    def _build_event_where(
-        self, params: dict, time_range: TimeRange | None
-    ) -> str:
+    def _build_event_where(self, params: dict, time_range: TimeRange | None) -> str:
         """Build WHERE clause for event observation SQL queries.
 
         Filters on ``ec.normalized_date`` (the actual event occurrence date)
@@ -49,9 +47,7 @@ class PgVectorEventSearchAdapter(EventSearchPort):
                 params["end_date"] = time_range.end.date()
         return " AND ".join(parts)
 
-    def _build_kw_where(
-        self, params: dict, time_range: TimeRange | None
-    ) -> str:
+    def _build_kw_where(self, params: dict, time_range: TimeRange | None) -> str:
         """Build WHERE clause for event keyword SQL queries.
 
         Same date semantics as ``_build_event_where``: filters on the actual
@@ -107,11 +103,15 @@ class PgVectorEventSearchAdapter(EventSearchPort):
                 # normalized_date is the canonical event occurrence date —
                 # used by post-RRF hard-filtering in the pipeline
                 "normalized_date": event_date_str,
-                "event_canonical_id": str(row.get("event_canonical_id")) if row.get("event_canonical_id") else None,
+                "event_canonical_id": str(row.get("event_canonical_id"))
+                if row.get("event_canonical_id")
+                else None,
                 "consensus_summary": row.get("consensus_summary"),
                 "observation_count": row.get("observation_count"),
                 "stance": row.get("stance"),
-                "sentiment_score": float(row["sentiment_score"]) if row.get("sentiment_score") is not None else None,
+                "sentiment_score": float(row["sentiment_score"])
+                if row.get("sentiment_score") is not None
+                else None,
             },
         )
 
@@ -162,24 +162,33 @@ class PgVectorEventSearchAdapter(EventSearchPort):
             return []
 
         from llm_wiki.infrastructure.search.tsvector_adapter import _clean_query
+
         cleaned = _clean_query(query)
 
         # Primary: plainto_tsquery (AND logic, high precision)
         results = await self._search_events_kw_with_query(
-            cleaned, top_k, time_range, use_plainto=True,
+            cleaned,
+            top_k,
+            time_range,
+            use_plainto=True,
         )
 
         # Fallback: if primary returns 0 and query has multiple terms,
         # try OR'd terms for better recall
         if not results and len(cleaned.split()) > 1:
             from llm_wiki.infrastructure.search.tsvector_adapter import _build_or_query
+
             or_query = _build_or_query(cleaned)
             logger.debug(
                 "Event keyword search returned 0 for %r, falling back to OR: %r",
-                cleaned[:80], or_query[:80],
+                cleaned[:80],
+                or_query[:80],
             )
             results = await self._search_events_kw_with_query(
-                or_query, top_k, time_range, use_plainto=False,
+                or_query,
+                top_k,
+                time_range,
+                use_plainto=False,
             )
 
         return results

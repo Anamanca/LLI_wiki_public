@@ -1,6 +1,6 @@
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime
+
+from pydantic import BaseModel
 
 
 class ChatMessageItem(BaseModel):
@@ -10,12 +10,12 @@ class ChatMessageItem(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
-    source_id: Optional[str] = None
-    top_k: Optional[int] = 10
+    source_id: str | None = None
+    top_k: int | None = 10
     stream: bool = False
-    history: Optional[list[ChatMessageItem]] = None
-    from_date: Optional[datetime] = None
-    to_date: Optional[datetime] = None
+    history: list[ChatMessageItem] | None = None
+    from_date: datetime | None = None
+    to_date: datetime | None = None
 
 
 class QueryResponseModel(BaseModel):
@@ -43,7 +43,7 @@ class SourceCreateRequest(BaseModel):
     platform: str = "youtube"
     external_id: str
     url: str
-    config: Optional[dict] = None
+    config: dict | None = None
 
 
 class SourceResponse(BaseModel):
@@ -54,6 +54,6 @@ class SourceResponse(BaseModel):
     url: str
     status: str
     config: dict
-    added_at: Optional[str] = None
-    last_checked_at: Optional[str] = None
-    last_video_published_at: Optional[str] = None
+    added_at: str | None = None
+    last_checked_at: str | None = None
+    last_video_published_at: str | None = None

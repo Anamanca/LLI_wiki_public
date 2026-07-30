@@ -1,54 +1,55 @@
 import logging
-from typing import Optional
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from llm_wiki.shared.datetime_utils import now
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, HTTPException, Query as FastQuery
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends
+from fastapi import Query as FastQuery
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.presentation.dependencies import container, get_db
-from llm_wiki.presentation.schemas.common import QueryRequest, QueryResponseModel
-from llm_wiki.infrastructure.search.pgvector_adapter import PgVectorSearchAdapter
-from llm_wiki.infrastructure.search.tsvector_adapter import TsVectorSearchAdapter
-from llm_wiki.infrastructure.search.event_search_adapter import PgVectorEventSearchAdapter
-from llm_wiki.infrastructure.search.graph_rag_adapter import PostgresGraphRAGAdapter
-from llm_wiki.infrastructure.search.traced_search_wrapper import (
-    TracedKeywordSearchWrapper,
-    TracedVectorSearchWrapper,
-)
-from llm_wiki.infrastructure.search.traced_event_search_wrapper import TracedEventSearchWrapper
-from llm_wiki.infrastructure.llm.traced_llm_wrapper import TracedLLMWrapper
-from llm_wiki.infrastructure.llm.traced_query_rewriter_wrapper import TracedQueryRewriterWrapper
-from llm_wiki.infrastructure.llm.traced_query_analyzer_wrapper import TracedQueryAnalyzerWrapper
-from llm_wiki.infrastructure.llm.query_rewriter_adapter import LLMQueryRewriterAdapter
-from llm_wiki.infrastructure.llm.query_analyzer_adapter import LLMQueryAnalyzerAdapter
-from llm_wiki.infrastructure.llm.query_expander_adapter import LLMQueryExpanderAdapter
-from llm_wiki.infrastructure.llm.reranker_adapter import LLMRerankerAdapter
-from llm_wiki.infrastructure.search.cross_encoder_reranker_adapter import (
-    CrossEncoderRerankerAdapter,
-)
-from llm_wiki.infrastructure.llm.answer_evaluator_adapter import LLMAnswerEvaluatorAdapter
-from llm_wiki.infrastructure.embedding.traced_embedding_wrapper import TracedEmbeddingWrapper
-from llm_wiki.infrastructure.persistence.redis.traced_cache_wrapper import TracedCacheWrapper
-from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
+from llm_wiki.application.dto.query_dto import QueryInput
 from llm_wiki.application.use_cases.query.ask_question import AskQuestionUseCase
-from llm_wiki.application.use_cases.query.stream_answer import StreamAnswerUseCase
+from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
 from llm_wiki.application.use_cases.query.reflective_pipeline import (
     SelfReflectiveRAGPipeline,
-    SelfReflectiveAskQuestionUseCase,
     SelfReflectiveStreamAnswerUseCase,
 )
+from llm_wiki.application.use_cases.query.stream_answer import StreamAnswerUseCase
 from llm_wiki.application.use_cases.query.summarize_time_range import (
     SummarizeTimeRangeUseCase,
     TimeRangeSummaryInput,
 )
-from llm_wiki.infrastructure.persistence.postgres.repositories.event_repository import PostgresEventRepository
-from llm_wiki.application.dto.query_dto import QueryInput
+from llm_wiki.infrastructure.embedding.traced_embedding_wrapper import TracedEmbeddingWrapper
+from llm_wiki.infrastructure.llm.answer_evaluator_adapter import LLMAnswerEvaluatorAdapter
+from llm_wiki.infrastructure.llm.query_analyzer_adapter import LLMQueryAnalyzerAdapter
+from llm_wiki.infrastructure.llm.query_expander_adapter import LLMQueryExpanderAdapter
+from llm_wiki.infrastructure.llm.query_rewriter_adapter import LLMQueryRewriterAdapter
+from llm_wiki.infrastructure.llm.reranker_adapter import LLMRerankerAdapter
+from llm_wiki.infrastructure.llm.traced_llm_wrapper import TracedLLMWrapper
+from llm_wiki.infrastructure.llm.traced_query_analyzer_wrapper import TracedQueryAnalyzerWrapper
+from llm_wiki.infrastructure.llm.traced_query_rewriter_wrapper import TracedQueryRewriterWrapper
+from llm_wiki.infrastructure.persistence.postgres.repositories.event_repository import (
+    PostgresEventRepository,
+)
+from llm_wiki.infrastructure.persistence.redis.traced_cache_wrapper import TracedCacheWrapper
+from llm_wiki.infrastructure.search.cross_encoder_reranker_adapter import (
+    CrossEncoderRerankerAdapter,
+)
+from llm_wiki.infrastructure.search.event_search_adapter import PgVectorEventSearchAdapter
+from llm_wiki.infrastructure.search.graph_rag_adapter import PostgresGraphRAGAdapter
+from llm_wiki.infrastructure.search.pgvector_adapter import PgVectorSearchAdapter
+from llm_wiki.infrastructure.search.traced_event_search_wrapper import TracedEventSearchWrapper
+from llm_wiki.infrastructure.search.traced_search_wrapper import (
+    TracedKeywordSearchWrapper,
+    TracedVectorSearchWrapper,
+)
+from llm_wiki.infrastructure.search.tsvector_adapter import TsVectorSearchAdapter
+from llm_wiki.presentation.dependencies import container, get_db
+from llm_wiki.presentation.schemas.common import QueryRequest, QueryResponseModel
 
 router = APIRouter()
 
@@ -64,11 +65,13 @@ def _build_adapters(db: AsyncSession):
     llm_raw = container.llm_client()
 
     embedder = TracedEmbeddingWrapper(
-        container.embedder(), telemetry,
+        container.embedder(),
+        telemetry,
         model=container.config.langsmith_evaluator_model() or "unknown",
     )
     llm = TracedLLMWrapper(
-        llm_raw, telemetry,
+        llm_raw,
+        telemetry,
         model=container.config.opencode_primary_model() or "unknown",
     )
     cache = TracedCacheWrapper(container.cache(), telemetry)
@@ -81,10 +84,12 @@ def _build_adapters(db: AsyncSession):
     event_search = TracedEventSearchWrapper(PgVectorEventSearchAdapter(db), telemetry)
 
     rewriter = TracedQueryRewriterWrapper(
-        LLMQueryRewriterAdapter(llm_raw), telemetry,
+        LLMQueryRewriterAdapter(llm_raw),
+        telemetry,
     )
     analyzer = TracedQueryAnalyzerWrapper(
-        LLMQueryAnalyzerAdapter(llm_raw), telemetry,
+        LLMQueryAnalyzerAdapter(llm_raw),
+        telemetry,
     )
 
     # Phase 2 new ports
@@ -93,6 +98,7 @@ def _build_adapters(db: AsyncSession):
 
     # Reranker: prefer local cross-encoder when enabled, fall back to LLM-based
     from llm_wiki.config import settings
+
     if settings.cross_encoder_enabled:
         re_ranker = CrossEncoderRerankerAdapter(
             model_name=settings.cross_encoder_model,
@@ -150,6 +156,7 @@ async def ask_question(
 
     # Select pipeline based on config
     from llm_wiki.config import settings
+
     if settings.reasoning_enabled:
         pipeline = adapters["reflective"]
     else:
@@ -170,9 +177,13 @@ async def ask_question(
     else:
         use_case = AskQuestionUseCase(pipeline)
         result = await use_case.execute(query_input)
-        result = {"answer": result.answer, "sources": result.sources,
-                  "tokens_used": result.tokens_used, "cache_hit": result.cache_hit,
-                  "pipeline_steps": result.pipeline_steps}
+        result = {
+            "answer": result.answer,
+            "sources": result.sources,
+            "tokens_used": result.tokens_used,
+            "cache_hit": result.cache_hit,
+            "pipeline_steps": result.pipeline_steps,
+        }
 
     latency = (time.time() - t0) * 1000
 
@@ -213,6 +224,7 @@ async def ask_question_stream(
     adapters = _build_adapters(db)
 
     from llm_wiki.config import settings
+
     if settings.reasoning_enabled:
         pipeline = adapters["reflective"]
     else:
@@ -252,7 +264,9 @@ async def ask_question_stream(
                         "source_url": "",
                         "timestamp": s.get("published_at") or "",
                     }
-                    for s in (chunk_data.get("citations", []) if isinstance(chunk_data, dict) else [])
+                    for s in (
+                        chunk_data.get("citations", []) if isinstance(chunk_data, dict) else []
+                    )
                 ]
                 yield f"data: {json.dumps({'type': 'complete', 'answer': chunk_data.get('answer') if isinstance(chunk_data, dict) else '', 'citations': citations, 'sources_used': chunk_data.get('sources_used', []) if isinstance(chunk_data, dict) else []})}\n\n"
             else:
@@ -269,6 +283,7 @@ async def summarize_time_range(
     db: AsyncSession = Depends(get_db),
 ):
     from llm_wiki.presentation.dependencies import traced_llm
+
     now_ts = now()
     start = now_ts - timedelta(days=days)
     use_case = SummarizeTimeRangeUseCase(
@@ -276,10 +291,12 @@ async def summarize_time_range(
         event_repo=PostgresEventRepository(db),
         llm=traced_llm("summarize_time_range"),
     )
-    result = await use_case.execute(TimeRangeSummaryInput(
-        start=start,
-        end=now_ts,
-    ))
+    result = await use_case.execute(
+        TimeRangeSummaryInput(
+            start=start,
+            end=now_ts,
+        )
+    )
     return {
         "summary": result.summary_text,
         "time_range": {

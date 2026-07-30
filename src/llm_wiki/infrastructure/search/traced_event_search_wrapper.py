@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from typing import Any
 
 from llm_wiki.application.ports.search.event_search_port import EventSearchPort
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan

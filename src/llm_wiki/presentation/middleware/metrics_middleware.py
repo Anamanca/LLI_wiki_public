@@ -40,27 +40,43 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             elapsed = time.monotonic() - start
             metrics = get_metrics()
             path = _normalise_path(request.url.path)
-            metrics.counter("http_requests_total", 1, {
-                "method": request.method,
-                "path": path,
-                "status": "500",
-            })
-            metrics.histogram("http_request_duration_seconds", elapsed, {
-                "method": request.method,
-                "path": path,
-            })
+            metrics.counter(
+                "http_requests_total",
+                1,
+                {
+                    "method": request.method,
+                    "path": path,
+                    "status": "500",
+                },
+            )
+            metrics.histogram(
+                "http_request_duration_seconds",
+                elapsed,
+                {
+                    "method": request.method,
+                    "path": path,
+                },
+            )
             raise
 
         elapsed = time.monotonic() - start
         metrics = get_metrics()
         path = _normalise_path(request.url.path)
-        metrics.counter("http_requests_total", 1, {
-            "method": request.method,
-            "path": path,
-            "status": str(response.status_code),
-        })
-        metrics.histogram("http_request_duration_seconds", elapsed, {
-            "method": request.method,
-            "path": path,
-        })
+        metrics.counter(
+            "http_requests_total",
+            1,
+            {
+                "method": request.method,
+                "path": path,
+                "status": str(response.status_code),
+            },
+        )
+        metrics.histogram(
+            "http_request_duration_seconds",
+            elapsed,
+            {
+                "method": request.method,
+                "path": path,
+            },
+        )
         return response

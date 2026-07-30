@@ -9,16 +9,13 @@ Each worker writes a heartbeat row every 15 seconds with:
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from datetime import datetime
-from llm_wiki.shared.datetime_utils import now
 from uuid import UUID
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.infrastructure.persistence.postgres.database import async_session_factory
+from llm_wiki.shared.datetime_utils import now
 
 logger = logging.getLogger(__name__)
 

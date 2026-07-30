@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from llm_wiki.domain.entities.page import Page, PageSection
 from llm_wiki.domain.value_objects.identifiers import PageId, SourceId
@@ -7,10 +6,10 @@ from llm_wiki.domain.value_objects.identifiers import PageId, SourceId
 
 class PageRepository(ABC):
     @abstractmethod
-    async def get_by_id(self, page_id: PageId) -> Optional[Page]: ...
+    async def get_by_id(self, page_id: PageId) -> Page | None: ...
 
     @abstractmethod
-    async def get_by_slug(self, slug: str) -> Optional[Page]: ...
+    async def get_by_slug(self, slug: str) -> Page | None: ...
 
     @abstractmethod
     async def save(self, page: Page) -> Page: ...
@@ -37,7 +36,7 @@ class PageRepository(ABC):
 
 class PageSectionRepository(ABC):
     @abstractmethod
-    async def get_by_id(self, section_id: "PageSectionId") -> Optional[PageSection]: ...
+    async def get_by_id(self, section_id: "PageSectionId") -> PageSection | None: ...
 
     @abstractmethod
     async def list_by_page(self, page_id: PageId) -> list[PageSection]: ...

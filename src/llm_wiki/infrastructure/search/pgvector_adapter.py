@@ -77,7 +77,9 @@ class PgVectorSearchAdapter(VectorSearchPort):
                     "page_title": row.get("page_title"),
                     "page_slug": row.get("page_slug"),
                     "source_name": row.get("source_name"),
-                    "published_at": str(row.get("published_at")) if row.get("published_at") else None,
+                    "published_at": str(row.get("published_at"))
+                    if row.get("published_at")
+                    else None,
                 },
             )
             for row in rows

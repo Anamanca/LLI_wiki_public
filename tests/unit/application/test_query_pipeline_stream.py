@@ -1,6 +1,7 @@
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from llm_wiki.application.dto.query_dto import QueryInput
 from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
@@ -20,8 +21,11 @@ def mock_vector_search():
     mock = AsyncMock()
     mock.search_similar.return_value = [
         SearchResult(
-            content_id="1", content_type="section", title="Test",
-            content="test content", score=0.9,
+            content_id="1",
+            content_type="section",
+            title="Test",
+            content="test content",
+            score=0.9,
             metadata={"page_title": "Page", "page_slug": "page", "source_name": "src"},
         )
     ]
@@ -80,7 +84,10 @@ async def test_execute_stream_yields_status_sequence_and_complete(
     complete_events = [e for e in events if e["type"] == "complete"]
 
     assert [e["data"]["status"] for e in status_events] == [
-        "processing", "retrieving", "thinking", "summarizing"
+        "processing",
+        "retrieving",
+        "thinking",
+        "summarizing",
     ]
     assert len(complete_events) == 1
     complete = complete_events[0]["data"]
@@ -101,13 +108,15 @@ async def test_execute_stream_chat_history_passed_to_llm(
         cache=mock_cache,
     )
 
-    async for _ in pipeline.execute_stream(QueryInput(
-        question="Follow-up?",
-        chat_history=[
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi"},
-        ],
-    )):
+    async for _ in pipeline.execute_stream(
+        QueryInput(
+            question="Follow-up?",
+            chat_history=[
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ],
+        )
+    ):
         pass
 
     call = mock_llm.chat_completion_reasoning.await_args
@@ -141,13 +150,14 @@ async def test_execute_stream_exact_cache_hit_skips_pipeline(
     mock_embedder, mock_vector_search, mock_keyword_search, mock_llm, mock_cache
 ):
     """P0: stream endpoint returns cached answer immediately on exact hit."""
-    import json
 
-    mock_cache.get.return_value = json.dumps({
-        "answer": "Cached stream answer",
-        "sources": [],
-        "tokens_used": 0,
-    })
+    mock_cache.get.return_value = json.dumps(
+        {
+            "answer": "Cached stream answer",
+            "sources": [],
+            "tokens_used": 0,
+        }
+    )
 
     pipeline = QueryPipeline(
         embedder=mock_embedder,
@@ -176,15 +186,16 @@ async def test_execute_stream_semantic_cache_hit(
     mock_embedder, mock_vector_search, mock_keyword_search, mock_llm, mock_cache
 ):
     """P2: stream endpoint uses semantic cache after exact miss."""
-    import json
 
     # Exact miss, semantic hit
     mock_cache.get.return_value = None
-    mock_cache.semantic_get.return_value = json.dumps({
-        "answer": "Semantic stream answer",
-        "sources": [],
-        "tokens_used": 0,
-    })
+    mock_cache.semantic_get.return_value = json.dumps(
+        {
+            "answer": "Semantic stream answer",
+            "sources": [],
+            "tokens_used": 0,
+        }
+    )
 
     pipeline = QueryPipeline(
         embedder=mock_embedder,

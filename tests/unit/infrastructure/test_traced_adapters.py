@@ -1,9 +1,9 @@
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
 
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
 from llm_wiki.domain.value_objects.embedding import Embedding, SearchResult
-from llm_wiki.domain.value_objects.time_range import TimeRange
 from llm_wiki.infrastructure.embedding.traced_embedding_wrapper import TracedEmbeddingWrapper
 from llm_wiki.infrastructure.llm.traced_llm_wrapper import TracedLLMWrapper
 from llm_wiki.infrastructure.persistence.redis.traced_cache_wrapper import TracedCacheWrapper
@@ -18,7 +18,9 @@ class FakeTelemetry(TelemetryPort):
         self.events = []
 
     async def start_span(self, name, kind, inputs, metadata=None, parent=None):
-        span = TelemetrySpan(span_id=f"span-{len(self.events)}", name=name, kind=kind, metadata=metadata or {})
+        span = TelemetrySpan(
+            span_id=f"span-{len(self.events)}", name=name, kind=kind, metadata=metadata or {}
+        )
         self.events.append({"action": "start", "span": span, "inputs": inputs})
         return span
 

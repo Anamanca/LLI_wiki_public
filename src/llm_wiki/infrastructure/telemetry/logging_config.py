@@ -10,18 +10,39 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import datetime
+
 from llm_wiki.shared.datetime_utils import now
 
 # Internal LogRecord attributes — skip these when merging `extra` dict fields.
-_LOG_RECORD_INTERNALS = frozenset({
-    "args", "created", "exc_info", "exc_text", "filename", "funcName",
-    "levelname", "levelno", "lineno", "module", "msecs", "msg",
-    "name", "pathname", "process", "processName", "relativeCreated",
-    "stack_info", "thread", "threadName",
-    # Our own injected fields are handled separately.
-    "service", "worker_id", "trace_id", "span_id",
-})
+_LOG_RECORD_INTERNALS = frozenset(
+    {
+        "args",
+        "created",
+        "exc_info",
+        "exc_text",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "module",
+        "msecs",
+        "msg",
+        "name",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "thread",
+        "threadName",
+        # Our own injected fields are handled separately.
+        "service",
+        "worker_id",
+        "trace_id",
+        "span_id",
+    }
+)
 
 
 class JsonFormatter(logging.Formatter):
@@ -60,9 +81,10 @@ class TraceIdFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             from llm_wiki.infrastructure.telemetry.langsmith_telemetry_adapter import (
-                get_current_trace_id,
                 get_current_span_id,
+                get_current_trace_id,
             )
+
             trace_id = get_current_trace_id()
             if trace_id:
                 record.trace_id = trace_id
@@ -128,9 +150,7 @@ def setup_logging(
     if log_format == "json":
         handler.setFormatter(JsonFormatter())
     else:
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 
     root.addHandler(handler)
     root.addFilter(ServiceNameFilter(service_name))

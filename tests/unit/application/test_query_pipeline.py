@@ -1,9 +1,9 @@
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from unittest.mock import AsyncMock
 
-from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
+import pytest
+
 from llm_wiki.application.dto.query_dto import QueryInput
+from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
 from llm_wiki.domain.value_objects.embedding import Embedding, SearchResult
 
 
@@ -19,8 +19,7 @@ def mock_vector_search():
     mock = AsyncMock()
     mock.search_similar.return_value = [
         SearchResult(
-            content_id="1", content_type="section", title="Test",
-            content="test content", score=0.9
+            content_id="1", content_type="section", title="Test", content="test content", score=0.9
         )
     ]
     return mock
@@ -77,13 +76,16 @@ async def test_query_pipeline_uses_cache(
     mock_embedder, mock_vector_search, mock_keyword_search, mock_llm, mock_cache
 ):
     import json
-    mock_cache.get.return_value = json.dumps({
-        "answer": "Cached answer",
-        "sources": [],
-        "tokens_used": 0,
-        "cache_hit": False,
-        "pipeline_steps": {},
-    })
+
+    mock_cache.get.return_value = json.dumps(
+        {
+            "answer": "Cached answer",
+            "sources": [],
+            "tokens_used": 0,
+            "cache_hit": False,
+            "pipeline_steps": {},
+        }
+    )
 
     pipeline = QueryPipeline(
         embedder=mock_embedder,
@@ -111,13 +113,15 @@ async def test_semantic_cache_hit_skips_retrieval_and_llm(
     # Exact cache miss
     mock_cache.get.return_value = None
     # Semantic cache hit
-    mock_cache.semantic_get.return_value = json.dumps({
-        "answer": "Semantic cached answer",
-        "sources": [],
-        "tokens_used": 0,
-        "cache_hit": False,
-        "pipeline_steps": {},
-    })
+    mock_cache.semantic_get.return_value = json.dumps(
+        {
+            "answer": "Semantic cached answer",
+            "sources": [],
+            "tokens_used": 0,
+            "cache_hit": False,
+            "pipeline_steps": {},
+        }
+    )
 
     pipeline = QueryPipeline(
         embedder=mock_embedder,
@@ -135,5 +139,3 @@ async def test_semantic_cache_hit_skips_retrieval_and_llm(
     mock_embedder.embed.assert_called_once()
     mock_vector_search.search_similar.assert_not_called()
     mock_llm.chat_completion_reasoning.assert_not_called()
-
-

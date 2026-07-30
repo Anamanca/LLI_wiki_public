@@ -1,7 +1,7 @@
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-from llm_wiki.application.ports.telemetry.telemetry_port import TelemetrySpan
+import pytest
+
 from llm_wiki.infrastructure.telemetry.langsmith_telemetry_adapter import (
     LangSmithTelemetryAdapter,
 )
@@ -42,9 +42,12 @@ class TestLangSmithTelemetryAdapter:
 
     @pytest.fixture
     def adapter(self, mock_run_tree):
-        with patch("langsmith.Client") as MockClient, patch(
-            "langsmith.run_trees.RunTree",
-            return_value=mock_run_tree,
+        with (
+            patch("langsmith.Client") as MockClient,
+            patch(
+                "langsmith.run_trees.RunTree",
+                return_value=mock_run_tree,
+            ),
         ):
             adapter = LangSmithTelemetryAdapter(
                 api_key="test-key",

@@ -10,7 +10,6 @@ massive queue bloat that caused 267K duplicates from 1003 unique items.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from uuid import UUID
 
@@ -116,7 +115,9 @@ async def clear_duplicates() -> int:
         if unique:
             await r.rpush(WIKI_QUEUE_KEY, *unique)
             await r.sadd(WIKI_DEDUP_KEY, *unique)
-        logger.info("Cleared %d duplicates, %d unique items remaining in queue", removed, len(unique))
+        logger.info(
+            "Cleared %d duplicates, %d unique items remaining in queue", removed, len(unique)
+        )
     return removed
 
 

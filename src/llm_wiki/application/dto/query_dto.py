@@ -1,17 +1,16 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 
 @dataclass
 class QueryInput:
     question: str
-    source_id: Optional[str] = None
+    source_id: str | None = None
     top_k: int = 10
     stream: bool = False
-    chat_history: Optional[list[dict]] = None
-    from_date: Optional[datetime] = None
-    to_date: Optional[datetime] = None
+    chat_history: list[dict] | None = None
+    from_date: datetime | None = None
+    to_date: datetime | None = None
 
 
 @dataclass

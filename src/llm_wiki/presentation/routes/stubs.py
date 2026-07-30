@@ -3,20 +3,18 @@ Optional stub/read-only routes for the admin UI. Admin operational routes
 (cron, scan status, health, restarts, api-keys) are mounted unconditionally
 via src/llm_wiki/presentation/routes/admin.py.
 """
-import os
-from datetime import datetime
-from llm_wiki.shared.datetime_utils import now
+
+from collections import defaultdict
 from uuid import UUID
 
 import psutil
-from fastapi import APIRouter, Depends, HTTPException, Query
-from collections import defaultdict
-
-from sqlalchemy import select, func, case, text
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.infrastructure.persistence.postgres import models as orm
 from llm_wiki.presentation.dependencies import get_db
+from llm_wiki.shared.datetime_utils import now
 
 router = APIRouter()
 
@@ -35,6 +33,7 @@ async def _count_done_today(db: AsyncSession) -> int:
 # ──────────────────────────────────────────
 # Progress
 # ──────────────────────────────────────────
+
 
 @router.get("/progress")
 async def progress(db: AsyncSession = Depends(get_db)):
@@ -75,20 +74,31 @@ async def progress(db: AsyncSession = Depends(get_db)):
     for r in result.all():
         total = r.total or 0
         done = r.done or 0
-        per_source.append({
-            "name": r.name,
-            "done": done,
-            "total": total,
-            "percent": round(done / total * 100, 1) if total > 0 else 0,
-        })
+        per_source.append(
+            {
+                "name": r.name,
+                "done": done,
+                "total": total,
+                "percent": round(done / total * 100, 1) if total > 0 else 0,
+            }
+        )
 
     # latest ingestion alerts — error/warning types for items that are
     # still active. Once an item reaches a terminal state (completed, failed,
     # unavailable, etc.) its stale error/retry logs are no longer relevant.
     alert_types = ["error", "rate_limit", "retry", "api_limit"]
-    terminal_done = ["completed", "published", "skipped", "unavailable", "failed",
-                     "requires_membership", "no_captions", "no_captions_t3_fail",
-                     "scheduled", "rate_limited"]
+    terminal_done = [
+        "completed",
+        "published",
+        "skipped",
+        "unavailable",
+        "failed",
+        "requires_membership",
+        "no_captions",
+        "no_captions_t3_fail",
+        "scheduled",
+        "rate_limited",
+    ]
     alerts_q = (
         select(orm.IngestionLog)
         .where(orm.IngestionLog.event_type.in_(alert_types))
@@ -134,16 +144,18 @@ async def progress(db: AsyncSession = Depends(get_db)):
             "wiki": "Generate Wiki",
             "event_extract": "Event Extraction",
         }
-        processing_items.append({
-            "id": str(item.id),
-            "video_id": item.external_id,
-            "title": item.title or "Unknown",
-            "stage": item.status,
-            "stage_label": stage_label_map.get(item.status, item.status or "Unknown"),
-            "started_at": str(item.started_at) if item.started_at else None,
-            "elapsed_seconds": int(elapsed),
-            "source_name": src_name,
-        })
+        processing_items.append(
+            {
+                "id": str(item.id),
+                "video_id": item.external_id,
+                "title": item.title or "Unknown",
+                "stage": item.status,
+                "stage_label": stage_label_map.get(item.status, item.status or "Unknown"),
+                "started_at": str(item.started_at) if item.started_at else None,
+                "elapsed_seconds": int(elapsed),
+                "source_name": src_name,
+            }
+        )
 
     # requires_membership count
     req_mem_q = select(func.count(orm.SourceItem.id)).where(
@@ -164,6 +176,7 @@ async def progress(db: AsyncSession = Depends(get_db)):
 # System Stats
 # ──────────────────────────────────────────
 
+
 @router.get("/system-stats")
 async def system_stats():
     cpu = psutil.cpu_percent(interval=0.5)
@@ -182,6 +195,7 @@ async def system_stats():
 # Source Detail
 # ──────────────────────────────────────────
 
+
 @router.get("/sources/{source_id}")
 async def get_source(source_id: str, db: AsyncSession = Depends(get_db)):
     try:
@@ -195,7 +209,15 @@ async def get_source(source_id: str, db: AsyncSession = Depends(get_db)):
 
     # counts
     counts = {}
-    for status_val in ["pending", "processing", "completed", "failed", "no_captions", "skipped", "rate_limited"]:
+    for status_val in [
+        "pending",
+        "processing",
+        "completed",
+        "failed",
+        "no_captions",
+        "skipped",
+        "rate_limited",
+    ]:
         c = await db.execute(
             select(func.count(orm.SourceItem.id)).where(
                 orm.SourceItem.source_id == sid,
@@ -204,12 +226,14 @@ async def get_source(source_id: str, db: AsyncSession = Depends(get_db)):
         )
         counts[status_val] = c.scalar() or 0
 
-    page_count = (await db.execute(
-        select(func.count(orm.Page.id)).where(orm.Page.source_id == sid)
-    )).scalar() or 0
-    video_count = (await db.execute(
-        select(func.count(orm.SourceItem.id)).where(orm.SourceItem.source_id == sid)
-    )).scalar() or 0
+    page_count = (
+        await db.execute(select(func.count(orm.Page.id)).where(orm.Page.source_id == sid))
+    ).scalar() or 0
+    video_count = (
+        await db.execute(
+            select(func.count(orm.SourceItem.id)).where(orm.SourceItem.source_id == sid)
+        )
+    ).scalar() or 0
 
     return {
         "id": str(src.id),
@@ -289,6 +313,7 @@ async def scan_source(source_id: str, db: AsyncSession = Depends(get_db)):
 # ──────────────────────────────────────────
 # Source Items
 # ──────────────────────────────────────────
+
 
 @router.get("/sources/{source_id}/items")
 async def list_source_items(
@@ -378,6 +403,7 @@ async def submit_transcript(item_id: str, db: AsyncSession = Depends(get_db)):
 # Page Update (PATCH)
 # ──────────────────────────────────────────
 
+
 @router.patch("/pages/{page_id}")
 async def update_page(page_id: str, db: AsyncSession = Depends(get_db)):
     try:
@@ -412,6 +438,7 @@ async def update_page(page_id: str, db: AsyncSession = Depends(get_db)):
 # Graph (page-link graph)
 # ──────────────────────────────────────────
 
+
 @router.get("/graph")
 async def page_graph(
     source_id: str = None,
@@ -439,22 +466,27 @@ async def page_graph(
     for link, from_page, src in rows:
         if str(from_page.id) not in node_ids:
             node_ids.add(str(from_page.id))
-            nodes.append({
-                "id": str(from_page.id),
-                "title": from_page.title,
-                "source_name": src.name if src else None,
-            })
-        edges.append({
-            "from": str(link.from_page_id),
-            "to": str(link.to_page_id),
-            "relation_type": link.relation_type,
-        })
+            nodes.append(
+                {
+                    "id": str(from_page.id),
+                    "title": from_page.title,
+                    "source_name": src.name if src else None,
+                }
+            )
+        edges.append(
+            {
+                "from": str(link.from_page_id),
+                "to": str(link.to_page_id),
+                "relation_type": link.relation_type,
+            }
+        )
     return {"nodes": nodes, "edges": edges}
 
 
 # ──────────────────────────────────────────
 # Entity Graph
 # ──────────────────────────────────────────
+
 
 async def _entity_event_counts(db: AsyncSession, entity_ids: list[UUID]) -> dict[UUID, int]:
     """Return a mapping of entity_id -> number of linked events."""
@@ -543,9 +575,7 @@ async def entity_graph(
     if entity_type and not seed_ids:
         # No seed: pick the most connected entities of the requested type.
         type_entities_q = (
-            select(orm.Entity.id)
-            .where(orm.Entity.type == entity_type)
-            .limit(min(limit, 50))
+            select(orm.Entity.id).where(orm.Entity.type == entity_type).limit(min(limit, 50))
         )
         type_result = await db.execute(type_entities_q)
         seed_ids.update(row[0] for row in type_result.all())
@@ -623,20 +653,45 @@ async def entity_graph(
 # ──────────────────────────────────────────
 
 TYPE_COLORS: dict[str, str] = {
-    "stock_ticker": "#3b82f6", "company": "#eab308", "sector": "#22c55e",
-    "person": "#f97316", "bank": "#ef4444", "market_index": "#8b5cf6",
-    "commodity": "#ec4899", "bond": "#14b8a6", "policy": "#64748b",
-    "macro_indicator": "#06b6d4", "financial_metric": "#84cc16",
-    "country": "#f43f5e", "city": "#0ea5e9", "organization": "#a855f7",
-    "executive": "#d946ef", "fund": "#6366f1", "interest_rate": "#10b981",
-    "monetary_policy": "#78716c", "trade_policy": "#fbbf24",
-    "securities_firm": "#0891b2", "real_estate_project": "#f59e0b",
-    "cryptocurrency": "#f97316", "precious_metal": "#d4a574",
-    "energy": "#e11d48", "other": "#9ca3af",
+    "stock_ticker": "#3b82f6",
+    "company": "#eab308",
+    "sector": "#22c55e",
+    "person": "#f97316",
+    "bank": "#ef4444",
+    "market_index": "#8b5cf6",
+    "commodity": "#ec4899",
+    "bond": "#14b8a6",
+    "policy": "#64748b",
+    "macro_indicator": "#06b6d4",
+    "financial_metric": "#84cc16",
+    "country": "#f43f5e",
+    "city": "#0ea5e9",
+    "organization": "#a855f7",
+    "executive": "#d946ef",
+    "fund": "#6366f1",
+    "interest_rate": "#10b981",
+    "monetary_policy": "#78716c",
+    "trade_policy": "#fbbf24",
+    "securities_firm": "#0891b2",
+    "real_estate_project": "#f59e0b",
+    "cryptocurrency": "#f97316",
+    "precious_metal": "#d4a574",
+    "energy": "#e11d48",
+    "other": "#9ca3af",
 }
 
-_FALLBACK_COLORS = ["#64748b", "#94a3b8", "#a1a1aa", "#71717a", "#6b7280",
-                    "#78716c", "#a8a29e", "#78716c", "#9ca3af", "#b0b0b0"]
+_FALLBACK_COLORS = [
+    "#64748b",
+    "#94a3b8",
+    "#a1a1aa",
+    "#71717a",
+    "#6b7280",
+    "#78716c",
+    "#a8a29e",
+    "#78716c",
+    "#9ca3af",
+    "#b0b0b0",
+]
 
 
 @router.get("/cluster-graph")
@@ -646,14 +701,18 @@ async def cluster_graph(db: AsyncSession = Depends(get_db)):
     Mirrors the legacy 29_LLM_wiki graph API so the 3D cluster view renders
     colors, sizes, and edges consistently.
     """
-    entity_rows = (await db.execute(text("""
+    entity_rows = (
+        await db.execute(
+            text("""
         SELECT DISTINCT e.id, e.type
         FROM entities e
         WHERE EXISTS (
             SELECT 1 FROM entity_relations er
             WHERE er.from_entity_id = e.id OR er.to_entity_id = e.id
         )
-    """))).all()
+    """)
+        )
+    ).all()
 
     entity_type_map: dict[str, str] = {str(row.id): row.type for row in entity_rows}
 
@@ -661,10 +720,14 @@ async def cluster_graph(db: AsyncSession = Depends(get_db)):
     for etype in entity_type_map.values():
         type_counts[etype] += 1
 
-    rel_rows = (await db.execute(text("""
+    rel_rows = (
+        await db.execute(
+            text("""
         SELECT from_entity_id, to_entity_id, predicate
         FROM entity_relations
-    """))).all()
+    """)
+        )
+    ).all()
 
     cluster_edges: dict[tuple[str, str, str], int] = defaultdict(int)
     for row in rel_rows:
@@ -686,12 +749,14 @@ async def cluster_graph(db: AsyncSession = Depends(get_db)):
         if total < 2:
             continue
         top_pred, top_cnt = pred_list[0]
-        edges.append({
-            "source": from_t,
-            "target": to_t,
-            "predicate": f"{top_pred} ({top_cnt}/{total})",
-            "relation_count": total,
-        })
+        edges.append(
+            {
+                "source": from_t,
+                "target": to_t,
+                "predicate": f"{top_pred} ({top_cnt}/{total})",
+                "relation_count": total,
+            }
+        )
 
     clusters = []
     for etype, cnt in sorted(type_counts.items(), key=lambda x: -x[1]):
@@ -699,18 +764,22 @@ async def cluster_graph(db: AsyncSession = Depends(get_db)):
         if not color:
             color = _FALLBACK_COLORS[color_idx % len(_FALLBACK_COLORS)]
             color_idx += 1
-        clusters.append({
-            "id": etype,
-            "label": etype.replace("_", " ").title(),
-            "entity_count": cnt,
-            "color": color,
-        })
+        clusters.append(
+            {
+                "id": etype,
+                "label": etype.replace("_", " ").title(),
+                "entity_count": cnt,
+                "color": color,
+            }
+        )
 
     return {"clusters": clusters, "edges": edges}
 
 
 @router.get("/cluster-expand")
-async def cluster_expand(entity_type: str | None = None, limit: int = 500, db: AsyncSession = Depends(get_db)):
+async def cluster_expand(
+    entity_type: str | None = None, limit: int = 500, db: AsyncSession = Depends(get_db)
+):
     """Expand an entity-type cluster into its member entities and intra-cluster relations."""
     q = select(orm.Entity)
     if entity_type:
@@ -722,10 +791,14 @@ async def cluster_expand(entity_type: str | None = None, limit: int = 500, db: A
     entity_id_set = set(entity_ids)
 
     # Relations where both endpoints are within the returned entity set.
-    relations_q = select(orm.EntityRelation).where(
-        orm.EntityRelation.from_entity_id.in_(entity_id_set),
-        orm.EntityRelation.to_entity_id.in_(entity_id_set),
-    ).limit(limit * 2)
+    relations_q = (
+        select(orm.EntityRelation)
+        .where(
+            orm.EntityRelation.from_entity_id.in_(entity_id_set),
+            orm.EntityRelation.to_entity_id.in_(entity_id_set),
+        )
+        .limit(limit * 2)
+    )
     rel_result = await db.execute(relations_q)
     relations = rel_result.scalars().all()
 
@@ -739,9 +812,16 @@ async def cluster_expand(entity_type: str | None = None, limit: int = 500, db: A
 # Attention Items
 # ──────────────────────────────────────────
 
+
 @router.get("/attention-items")
 async def attention_items(page: int = 1, per_page: int = 100, db: AsyncSession = Depends(get_db)):
-    error_statuses = ["failed", "no_captions", "no_captions_t3_fail", "skipped", "requires_membership"]
+    error_statuses = [
+        "failed",
+        "no_captions",
+        "no_captions_t3_fail",
+        "skipped",
+        "requires_membership",
+    ]
     q = (
         select(orm.SourceItem, orm.Source.name)
         .join(orm.Source)
@@ -770,6 +850,7 @@ async def attention_items(page: int = 1, per_page: int = 100, db: AsyncSession =
 # Workers
 # ──────────────────────────────────────────
 
+
 @router.get("/workers")
 async def list_workers(db: AsyncSession = Depends(get_db)):
     q = select(orm.WorkerHeartbeat).order_by(orm.WorkerHeartbeat.worker_id)
@@ -779,17 +860,19 @@ async def list_workers(db: AsyncSession = Depends(get_db)):
         ago = 999
         if w.last_heartbeat:
             ago = (now() - w.last_heartbeat).total_seconds()
-        workers.append({
-            "worker_id": w.worker_id,
-            "status": w.status or "idle",
-            "alive": ago < 120,
-            "heartbeat_ago_secs": int(ago),
-            "current_job_id": str(w.current_job_id) if w.current_job_id else None,
-            "current_stage": w.current_stage,
-            "stage_duration_secs": 0,
-            "cpu_percent": w.cpu_percent or 0,
-            "error_message": w.error_message,
-        })
+        workers.append(
+            {
+                "worker_id": w.worker_id,
+                "status": w.status or "idle",
+                "alive": ago < 120,
+                "heartbeat_ago_secs": int(ago),
+                "current_job_id": str(w.current_job_id) if w.current_job_id else None,
+                "current_stage": w.current_stage,
+                "stage_duration_secs": 0,
+                "cpu_percent": w.cpu_percent or 0,
+                "error_message": w.error_message,
+            }
+        )
     return {"workers": workers}
 
 

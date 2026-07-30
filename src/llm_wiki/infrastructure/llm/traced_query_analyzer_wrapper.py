@@ -39,9 +39,7 @@ class TracedQueryAnalyzerWrapper(QueryAnalyzerPort):
             analysis = await self._inner.analyze(question)
             latency_ms = (time.time() - t0) * 1000
             time_range_info = (
-                f"{analysis.time_range.start.isoformat()}"
-                if analysis.time_range
-                else None
+                f"{analysis.time_range.start.isoformat()}" if analysis.time_range else None
             )
             await self._telemetry.end_span(
                 span=span,

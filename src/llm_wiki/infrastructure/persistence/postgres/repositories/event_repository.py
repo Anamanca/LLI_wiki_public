@@ -1,21 +1,24 @@
 from datetime import date
-from typing import Optional
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.application.ports.repositories.event_repository import EventRepository
 from llm_wiki.domain.entities.event import EventCanonical, EventObservation, EventTimelineChain
 from llm_wiki.domain.value_objects.identifiers import EventId, PageId
 from llm_wiki.infrastructure.persistence.postgres import models as orm
-from llm_wiki.infrastructure.persistence.postgres.mappers import EventCanonicalMapper, EventObservationMapper, EventTimelineChainMapper
+from llm_wiki.infrastructure.persistence.postgres.mappers import (
+    EventCanonicalMapper,
+    EventObservationMapper,
+    EventTimelineChainMapper,
+)
 
 
 class PostgresEventRepository(EventRepository):
     def __init__(self, session: AsyncSession):
         self._session = session
 
-    async def get_by_id(self, event_id: EventId) -> Optional[EventCanonical]:
+    async def get_by_id(self, event_id: EventId) -> EventCanonical | None:
         result = await self._session.execute(
             select(orm.EventCanonical).where(orm.EventCanonical.id == event_id.value)
         )
@@ -58,20 +61,16 @@ class PostgresEventRepository(EventRepository):
         return [EventObservationMapper.to_domain(r) for r in result.scalars()]
 
     async def list_by_date_range(
-        self, start_date: date, end_date: Optional[date] = None, limit: int = 50
+        self, start_date: date, end_date: date | None = None, limit: int = 50
     ) -> list[EventCanonical]:
-        q = select(orm.EventCanonical).where(
-            orm.EventCanonical.normalized_date >= start_date
-        )
+        q = select(orm.EventCanonical).where(orm.EventCanonical.normalized_date >= start_date)
         if end_date:
             q = q.where(orm.EventCanonical.normalized_date <= end_date)
         q = q.limit(limit)
         result = await self._session.execute(q)
         return [EventCanonicalMapper.to_domain(r) for r in result.scalars()]
 
-    async def search_vector(
-        self, embedding: list[float], top_k: int = 10
-    ) -> list[EventCanonical]:
+    async def search_vector(self, embedding: list[float], top_k: int = 10) -> list[EventCanonical]:
         result = await self._session.execute(
             select(orm.EventCanonical)
             .where(orm.EventCanonical.canonical_embedding.isnot(None))
@@ -100,5 +99,3 @@ class PostgresEventRepository(EventRepository):
             select(orm.EventObservation).where(orm.EventObservation.page_id == page_id.value)
         )
         return [EventObservationMapper.to_domain(r) for r in result.scalars()]
-
-

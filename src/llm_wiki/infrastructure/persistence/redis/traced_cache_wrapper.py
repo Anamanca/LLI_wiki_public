@@ -28,9 +28,7 @@ class TracedCacheWrapper(CacheServicePort):
 
     # ── semantic cache ──────────────────────────────────────────────────
 
-    async def semantic_get(
-        self, embedding: list[float], threshold: float = 0.95
-    ) -> str | None:
+    async def semantic_get(self, embedding: list[float], threshold: float = 0.95) -> str | None:
         span = await self._telemetry.start_span(
             name="cache_semantic_get",
             kind="tool",
@@ -204,4 +202,5 @@ class TracedCacheWrapper(CacheServicePort):
 def _hash_key(key: str) -> str:
     """Return a short, deterministic hash of the cache key for traces."""
     import hashlib
+
     return hashlib.sha256(key.encode()).hexdigest()[:16]

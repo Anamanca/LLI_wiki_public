@@ -1,5 +1,6 @@
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from llm_wiki.infrastructure.telemetry.langsmith_eval_adapter import (
     LangSmithEvalAdapter,
@@ -12,9 +13,10 @@ from llm_wiki.infrastructure.telemetry.langsmith_eval_adapter import (
 class TestLangSmithEvalAdapter:
     @pytest.fixture
     def adapter(self):
-        with patch("langsmith.Client") as MockClient, patch(
-            "langsmith.evaluation.evaluate"
-        ) as mock_evaluate:
+        with (
+            patch("langsmith.Client") as MockClient,
+            patch("langsmith.evaluation.evaluate") as mock_evaluate,
+        ):
             adapter = LangSmithEvalAdapter(api_key="test-key")
             adapter._client = MockClient()
             adapter._evaluate = mock_evaluate
@@ -27,9 +29,7 @@ class TestLangSmithEvalAdapter:
         result = adapter.create_dataset(
             name="test-dataset",
             description="test",
-            examples=[
-                {"inputs": {"question": "q1"}, "outputs": {"expected_answer": "a1"}}
-            ],
+            examples=[{"inputs": {"question": "q1"}, "outputs": {"expected_answer": "a1"}}],
         )
         assert result["dataset_id"] == "dataset-id"
         assert result["examples_created"] == 1

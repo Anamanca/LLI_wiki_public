@@ -9,15 +9,14 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from sqlalchemy import text, bindparam, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import bindparam, text, update
 
 from llm_wiki.infrastructure.persistence.postgres.database import async_session_factory
 from llm_wiki.infrastructure.persistence.postgres.models import SourceItem
 from llm_wiki.infrastructure.persistence.redis.wiki_queue import (
-    get_redis,
-    WIKI_QUEUE_KEY,
     WIKI_DEDUP_KEY,
+    WIKI_QUEUE_KEY,
+    get_redis,
 )
 
 logger = logging.getLogger(__name__)
@@ -294,7 +293,16 @@ async def _sweep_once() -> tuple[int, int, int, int, int, int]:
     except Exception as exc:
         logger.error("Stale recovery (classified) failed: %s", exc)
 
-    if any([cpu_count, wiki_count, transcribing_count, pending_transcribe_count, classified_count, classified_requeued]):
+    if any(
+        [
+            cpu_count,
+            wiki_count,
+            transcribing_count,
+            pending_transcribe_count,
+            classified_count,
+            classified_requeued,
+        ]
+    ):
         logger.warning(
             "Stale recovery: %d processing + %d wiki_processing + %d transcribing + %d pending_transcribe + %d classified reset, %d requeued",
             cpu_count,
@@ -304,7 +312,14 @@ async def _sweep_once() -> tuple[int, int, int, int, int, int]:
             classified_count,
             classified_requeued,
         )
-    return cpu_count, wiki_count, transcribing_count, pending_transcribe_count, classified_count, classified_requeued
+    return (
+        cpu_count,
+        wiki_count,
+        transcribing_count,
+        pending_transcribe_count,
+        classified_count,
+        classified_requeued,
+    )
 
 
 async def run_sweeper() -> None:
@@ -323,7 +338,11 @@ async def run_sweeper() -> None:
             await _sweep_once()
         except Exception as exc:
             error_str = str(exc).lower()
-            if "recovery mode" in error_str or "operationalerror" in error_str or "connection" in error_str:
+            if (
+                "recovery mode" in error_str
+                or "operationalerror" in error_str
+                or "connection" in error_str
+            ):
                 logger.critical("Stale recovery: DB offline or in recovery. Sleeping for 60s.")
                 await asyncio.sleep(60)
                 continue

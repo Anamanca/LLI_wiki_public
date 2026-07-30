@@ -7,6 +7,7 @@ to a Pushgateway instance. Run as a CI step after pytest.
 Usage:
     PUSHGATEWAY_URL=http://pushgateway:9091 python scripts/collect-quality-metrics.py
 """
+
 import os
 import sys
 from xml.etree import ElementTree

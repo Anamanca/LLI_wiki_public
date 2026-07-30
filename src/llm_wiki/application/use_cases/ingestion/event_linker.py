@@ -184,11 +184,13 @@ async def link_cause_effect_chains(
                     continue
 
             existing = await db.execute(
-                select(orm.EventTimelineChain).where(
+                select(orm.EventTimelineChain)
+                .where(
                     orm.EventTimelineChain.from_event_id == trigger_id,
                     orm.EventTimelineChain.to_event_id == effect_id,
                     orm.EventTimelineChain.relation_type == relation_type,
-                ).limit(1)
+                )
+                .limit(1)
             )
             if existing.first():
                 continue
@@ -207,7 +209,9 @@ async def link_cause_effect_chains(
             logger.warning("Failed to link chain: %s", exc)
 
     if linked:
-        logger.info("Created %d event timeline chains (with LLM verification for ambiguous)", linked)
+        logger.info(
+            "Created %d event timeline chains (with LLM verification for ambiguous)", linked
+        )
     return linked
 
 
@@ -244,34 +248,46 @@ async def detect_contradictions(
     for row in rows:
         event_id = row[0]
         obs_result = await db.execute(
-            select(orm.EventObservation).where(
+            select(orm.EventObservation)
+            .where(
                 orm.EventObservation.event_id == event_id,
                 orm.EventObservation.page_id == page_id,
-            ).limit(1)
+            )
+            .limit(1)
         )
         our_obs = obs_result.scalar()
         if not our_obs:
             continue
 
         opposite_result = await db.execute(
-            select(orm.EventObservation).where(
+            select(orm.EventObservation)
+            .where(
                 orm.EventObservation.event_id == event_id,
                 orm.EventObservation.page_id != page_id,
-                ((orm.EventObservation.stance == "bullish") | (orm.EventObservation.impact_direction == "positive"))
+                (
+                    (orm.EventObservation.stance == "bullish")
+                    | (orm.EventObservation.impact_direction == "positive")
+                )
                 if (our_obs.stance == "bearish" or our_obs.impact_direction == "negative")
-                else ((orm.EventObservation.stance == "bearish") | (orm.EventObservation.impact_direction == "negative")),
-            ).limit(1)
+                else (
+                    (orm.EventObservation.stance == "bearish")
+                    | (orm.EventObservation.impact_direction == "negative")
+                ),
+            )
+            .limit(1)
         )
         opposite = opposite_result.scalar()
         if not opposite:
             continue
 
         existing = await db.execute(
-            select(orm.EventTimelineChain).where(
+            select(orm.EventTimelineChain)
+            .where(
                 orm.EventTimelineChain.from_event_id == event_id,
                 orm.EventTimelineChain.to_event_id == event_id,
                 orm.EventTimelineChain.relation_type == "contradicts",
-            ).limit(1)
+            )
+            .limit(1)
         )
         if existing.first():
             continue

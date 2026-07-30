@@ -59,10 +59,14 @@ class TsVectorSearchAdapter(KeywordSearchPort):
             or_query = _build_or_query(cleaned)
             logger.debug(
                 "Keyword search returned 0 results for %r, falling back to OR query: %r",
-                cleaned[:80], or_query[:80],
+                cleaned[:80],
+                or_query[:80],
             )
             results = await self._search_with_query(
-                or_query, top_k, time_range, use_plainto=False,
+                or_query,
+                top_k,
+                time_range,
+                use_plainto=False,
             )
 
         return results
@@ -133,7 +137,9 @@ class TsVectorSearchAdapter(KeywordSearchPort):
                     "page_title": row.get("page_title"),
                     "page_slug": row.get("page_slug"),
                     "source_name": row.get("source_name"),
-                    "published_at": str(row.get("published_at")) if row.get("published_at") else None,
+                    "published_at": str(row.get("published_at"))
+                    if row.get("published_at")
+                    else None,
                 },
             )
             for row in rows

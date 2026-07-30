@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
 from uuid import UUID
 
 import httpx
@@ -112,9 +111,8 @@ async def notify_rate_limit(
 
     Logs to ingestion_logs if db provided, and sends Telegram alert.
     """
-    message = (
-        f"Rate limit: {provider}. {jobs_paused} jobs paused."
-        + (f" Resume: {resume_info}" if resume_info else "")
+    message = f"Rate limit: {provider}. {jobs_paused} jobs paused." + (
+        f" Resume: {resume_info}" if resume_info else ""
     )
     logger.warning(message)
 

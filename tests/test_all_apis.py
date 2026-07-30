@@ -37,15 +37,13 @@ Usage:
 
 import json
 import os
-import re
-import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
+import httpx
 import pytest
 import pytest_asyncio
-import httpx
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -74,6 +72,7 @@ def api(path: str) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 class ApiTester:
     """Wraps httpx.AsyncClient with response validation helpers."""
 
@@ -83,31 +82,47 @@ class ApiTester:
     async def get(self, path: str, expected_status: int = 200, **kwargs) -> httpx.Response:
         url = api(path)
         r = await self.client.get(url, **kwargs)
-        assert r.status_code == expected_status, f"GET {path} → {r.status_code}, body: {r.text[:500]}"
+        assert r.status_code == expected_status, (
+            f"GET {path} → {r.status_code}, body: {r.text[:500]}"
+        )
         return r
 
-    async def post(self, path: str, json_body: dict = None, expected_status: int = 200, **kwargs) -> httpx.Response:
+    async def post(
+        self, path: str, json_body: dict = None, expected_status: int = 200, **kwargs
+    ) -> httpx.Response:
         url = api(path)
         r = await self.client.post(url, json=json_body or {}, **kwargs)
-        assert r.status_code == expected_status, f"POST {path} → {r.status_code}, body: {r.text[:500]}"
+        assert r.status_code == expected_status, (
+            f"POST {path} → {r.status_code}, body: {r.text[:500]}"
+        )
         return r
 
-    async def patch(self, path: str, json_body: dict = None, expected_status: int = 200, **kwargs) -> httpx.Response:
+    async def patch(
+        self, path: str, json_body: dict = None, expected_status: int = 200, **kwargs
+    ) -> httpx.Response:
         url = api(path)
         r = await self.client.patch(url, json=json_body or {}, **kwargs)
-        assert r.status_code == expected_status, f"PATCH {path} → {r.status_code}, body: {r.text[:500]}"
+        assert r.status_code == expected_status, (
+            f"PATCH {path} → {r.status_code}, body: {r.text[:500]}"
+        )
         return r
 
     async def delete(self, path: str, expected_status: int = 200, **kwargs) -> httpx.Response:
         url = api(path)
         r = await self.client.delete(url, **kwargs)
-        assert r.status_code == expected_status, f"DELETE {path} → {r.status_code}, body: {r.text[:500]}"
+        assert r.status_code == expected_status, (
+            f"DELETE {path} → {r.status_code}, body: {r.text[:500]}"
+        )
         return r
 
-    async def put(self, path: str, json_body: dict = None, expected_status: int = 200, **kwargs) -> httpx.Response:
+    async def put(
+        self, path: str, json_body: dict = None, expected_status: int = 200, **kwargs
+    ) -> httpx.Response:
         url = api(path)
         r = await self.client.put(url, json=json_body or {}, **kwargs)
-        assert r.status_code == expected_status, f"PUT {path} → {r.status_code}, body: {r.text[:500]}"
+        assert r.status_code == expected_status, (
+            f"PUT {path} → {r.status_code}, body: {r.text[:500]}"
+        )
         return r
 
     def check_fields(self, data: Any, required: list[str], path: str, allow_empty: bool = True):
@@ -117,7 +132,9 @@ class ApiTester:
             if not isinstance(item, dict):
                 raise AssertionError(f"{path}: expected dict, got {type(item).__name__}: {item}")
             for field in required:
-                assert field in item, f"{path}: missing required field '{field}'. Got keys: {list(item.keys())}"
+                assert field in item, (
+                    f"{path}: missing required field '{field}'. Got keys: {list(item.keys())}"
+                )
 
     def check_field_types(self, data: dict, field_types: dict, path: str):
         """Assert fields have expected Python types."""
@@ -136,6 +153,7 @@ class ApiTester:
 # Fixtures — function-scoped to avoid event-loop issues across tests
 # ---------------------------------------------------------------------------
 
+
 @pytest_asyncio.fixture
 async def client():
     """Function-scoped async HTTP client."""
@@ -151,6 +169,7 @@ async def api_tester(client):
 # ===================================================================
 # 1. HEALTH CHECK
 # ===================================================================
+
 
 class TestHealth:
     """GET /api/health — Frontend calls fetchHealth() expecting {status, db}."""
@@ -178,15 +197,19 @@ class TestHealth:
 # 2. QUERY (RAG Pipeline)
 # ===================================================================
 
+
 class TestQuery:
     """POST /api/query and POST /api/query/stream."""
 
     async def test_query_non_streaming(self, api_tester: ApiTester):
         """Basic RAG query — tests cache, embed, vector search, keyword search, LLM."""
-        r = await api_tester.post("/query", {
-            "question": "What is this project?",
-            "top_k": 3,
-        })
+        r = await api_tester.post(
+            "/query",
+            {
+                "question": "What is this project?",
+                "top_k": 3,
+            },
+        )
         data = r.json()
         # Check required fields exist (backend returns frontend-compatible shape now)
         for field in ["answer", "citations", "sources_used", "tokens_used", "latency_ms"]:
@@ -194,33 +217,44 @@ class TestQuery:
 
     async def test_query_frontend_shape(self, api_tester: ApiTester):
         """Check POST /api/query returns frontend-compatible shape."""
-        r = await api_tester.post("/query", {
-            "question": "test question",
-            "top_k": 3,
-        })
+        r = await api_tester.post(
+            "/query",
+            {
+                "question": "test question",
+                "top_k": 3,
+            },
+        )
         data = r.json()
 
         frontend_required = ["answer", "citations", "sources_used", "tokens_used", "latency_ms"]
         missing = [f for f in frontend_required if f not in data]
         if missing:
-            pytest.fail(f"FRONTEND MISMATCH: POST /api/query missing fields: {missing}\n  Got: {list(data.keys())}")
+            pytest.fail(
+                f"FRONTEND MISMATCH: POST /api/query missing fields: {missing}\n  Got: {list(data.keys())}"
+            )
 
     async def test_query_with_source_filter(self, api_tester: ApiTester):
         """Query filtered by source_id."""
-        r = await api_tester.post("/query", {
-            "question": "test",
-            "source_id": "00000000-0000-0000-0000-000000000000",
-            "top_k": 5,
-        })
+        r = await api_tester.post(
+            "/query",
+            {
+                "question": "test",
+                "source_id": "00000000-0000-0000-0000-000000000000",
+                "top_k": 5,
+            },
+        )
         data = r.json()
         assert "answer" in data
 
     async def test_query_streaming(self, api_tester: ApiTester):
         """POST /api/query/stream — SSE streaming."""
-        r = await api_tester.post("/query/stream", {
-            "question": "test",
-            "top_k": 3,
-        })
+        r = await api_tester.post(
+            "/query/stream",
+            {
+                "question": "test",
+                "top_k": 3,
+            },
+        )
         assert "text/event-stream" in r.headers.get("content-type", "")
         body = r.text
         assert "data:" in body, f"No SSE data in stream: {body[:300]}"
@@ -228,10 +262,13 @@ class TestQuery:
     async def test_query_stream_frontend_shape(self, api_tester: ApiTester):
         """BUG: Backend sends {type:"chunk"}, {type:"sources"}, {type:"done"}
         but frontend expects {type:"token"}, {type:"complete"}."""
-        r = await api_tester.post("/query/stream", {
-            "question": "test",
-            "top_k": 3,
-        })
+        r = await api_tester.post(
+            "/query/stream",
+            {
+                "question": "test",
+                "top_k": 3,
+            },
+        )
         body = r.text
         lines = [l for l in body.split("\n") if l.startswith("data: ") and l != "data: [DONE]"]
 
@@ -261,18 +298,22 @@ class TestQuery:
 # 3. SOURCES
 # ===================================================================
 
+
 class TestSources:
     """Source CRUD endpoints."""
 
     @pytest.fixture
     async def created_source_id(self, api_tester: ApiTester):
         """Create a test source and return its ID, clean up after."""
-        r = await api_tester.post("/sources", {
-            "name": f"test-source-{uuid.uuid4().hex[:8]}",
-            "platform": "youtube",
-            "external_id": f"UC-test-{uuid.uuid4().hex[:8]}",
-            "url": f"https://youtube.com/@test{uuid.uuid4().hex[:6]}",
-        })
+        r = await api_tester.post(
+            "/sources",
+            {
+                "name": f"test-source-{uuid.uuid4().hex[:8]}",
+                "platform": "youtube",
+                "external_id": f"UC-test-{uuid.uuid4().hex[:8]}",
+                "url": f"https://youtube.com/@test{uuid.uuid4().hex[:6]}",
+            },
+        )
         data = r.json()
         src_id = data["id"]
         yield src_id
@@ -284,12 +325,15 @@ class TestSources:
             pass
 
     async def test_create_source(self, api_tester: ApiTester):
-        r = await api_tester.post("/sources", {
-            "name": "test create source",
-            "platform": "youtube",
-            "external_id": f"UC-{uuid.uuid4().hex[:8]}",
-            "url": "https://youtube.com/@test",
-        })
+        r = await api_tester.post(
+            "/sources",
+            {
+                "name": "test create source",
+                "platform": "youtube",
+                "external_id": f"UC-{uuid.uuid4().hex[:8]}",
+                "url": "https://youtube.com/@test",
+            },
+        )
         data = r.json()
         assert data["name"] == "test create source"
         assert data["platform"] == "youtube"
@@ -312,7 +356,7 @@ class TestSources:
                 "  SourceListResponse = {sources: Source[], total: number}\n"
                 "  This causes: Cannot read properties of undefined (reading 'sources') or "
                 "frontend renders empty because it tries data.sources but gets an array.\n"
-                "  Fix: In sources.py list_sources(), wrap result in {\"sources\": [...], \"total\": len}"
+                '  Fix: In sources.py list_sources(), wrap result in {"sources": [...], "total": len}'
             )
 
         if isinstance(data, dict):
@@ -329,12 +373,15 @@ class TestSources:
 
     async def test_create_source_frontend_shape(self, api_tester: ApiTester):
         """BUG: Backend SourceResponse lacks 'config' field that frontend Source type expects."""
-        r = await api_tester.post("/sources", {
-            "name": "shape test",
-            "platform": "youtube",
-            "external_id": f"UC-{uuid.uuid4().hex[:8]}",
-            "url": "https://youtube.com/@test",
-        })
+        r = await api_tester.post(
+            "/sources",
+            {
+                "name": "shape test",
+                "platform": "youtube",
+                "external_id": f"UC-{uuid.uuid4().hex[:8]}",
+                "url": "https://youtube.com/@test",
+            },
+        )
         data = r.json()
 
         # Frontend Source type requires: id, name, platform, external_id, url, added_at,
@@ -358,8 +405,15 @@ class TestSources:
         r = await api_tester.get(f"/sources/{created_source_id}")
         data = r.json()
         frontend_required = [
-            "id", "name", "platform", "external_id", "url", "status",
-            "video_count", "page_count", "status_breakdown",
+            "id",
+            "name",
+            "platform",
+            "external_id",
+            "url",
+            "status",
+            "video_count",
+            "page_count",
+            "status_breakdown",
         ]
         missing = [f for f in frontend_required if f not in data]
         if missing:
@@ -378,12 +432,15 @@ class TestSources:
     async def test_delete_source(self, api_tester: ApiTester):
         """DELETE /api/sources/{id} — soft delete."""
         # Create then delete
-        r_create = await api_tester.post("/sources", {
-            "name": "to be deleted",
-            "platform": "youtube",
-            "external_id": f"UC-del-{uuid.uuid4().hex[:8]}",
-            "url": "https://youtube.com/@todelete",
-        })
+        r_create = await api_tester.post(
+            "/sources",
+            {
+                "name": "to be deleted",
+                "platform": "youtube",
+                "external_id": f"UC-del-{uuid.uuid4().hex[:8]}",
+                "url": "https://youtube.com/@todelete",
+            },
+        )
         src_id = r_create.json()["id"]
 
         r = await api_tester.delete(f"/sources/{src_id}")
@@ -404,15 +461,19 @@ class TestSources:
 # 4. SOURCE ITEMS
 # ===================================================================
 
+
 class TestSourceItems:
     @pytest.fixture
     async def source_with_item(self, api_tester: ApiTester):
-        src_r = await api_tester.post("/sources", {
-            "name": f"src-items-{uuid.uuid4().hex[:6]}",
-            "platform": "youtube",
-            "external_id": f"UC-items-{uuid.uuid4().hex[:8]}",
-            "url": "https://youtube.com/@items",
-        })
+        src_r = await api_tester.post(
+            "/sources",
+            {
+                "name": f"src-items-{uuid.uuid4().hex[:6]}",
+                "platform": "youtube",
+                "external_id": f"UC-items-{uuid.uuid4().hex[:8]}",
+                "url": "https://youtube.com/@items",
+            },
+        )
         src_id = src_r.json()["id"]
         yield src_id
         async with httpx.AsyncClient(timeout=10) as c:
@@ -450,6 +511,7 @@ class TestSourceItems:
 # 5. PAGES
 # ===================================================================
 
+
 class TestPages:
     async def test_list_pages_response_shape(self, api_tester: ApiTester):
         """BUG: Backend returns {items, total} but frontend expects {items, total, page, per_page}."""
@@ -481,12 +543,15 @@ class TestPages:
         # Create a source first, then a page, then test
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
             # Create source
-            src_r = await c.post(api("/sources"), json={
-                "name": "page-shape-test",
-                "platform": "youtube",
-                "external_id": f"UC-pg-{uuid.uuid4().hex[:8]}",
-                "url": "https://youtube.com/@pagetest",
-            })
+            src_r = await c.post(
+                api("/sources"),
+                json={
+                    "name": "page-shape-test",
+                    "platform": "youtube",
+                    "external_id": f"UC-pg-{uuid.uuid4().hex[:8]}",
+                    "url": "https://youtube.com/@pagetest",
+                },
+            )
             src_id = src_r.json()["id"]
 
             # Check what the existing pages endpoint returns for any known page
@@ -501,7 +566,13 @@ class TestPages:
 
                 # Frontend PageDetail needs: sections, media_assets, linked_pages, source_name,
                 # source_url, source_video_url
-                frontend_fields = ["sections", "media_assets", "linked_pages", "source_name", "source_url"]
+                frontend_fields = [
+                    "sections",
+                    "media_assets",
+                    "linked_pages",
+                    "source_name",
+                    "source_url",
+                ]
                 missing = [f for f in frontend_fields if f not in detail_data]
                 if missing:
                     pytest.fail(
@@ -521,6 +592,7 @@ class TestPages:
 # ===================================================================
 # 6. SEARCH
 # ===================================================================
+
 
 class TestSearch:
     async def test_search(self, api_tester: ApiTester):
@@ -570,6 +642,7 @@ class TestSearch:
 # 7. PROGRESS & SYSTEM STATS
 # ===================================================================
 
+
 class TestProgress:
     async def test_progress(self, api_tester: ApiTester):
         """GET /api/progress — stub routes only if ENABLE_STUB_ROUTES=true."""
@@ -585,25 +658,36 @@ class TestProgress:
 
         if "global" in data:
             global_required = [
-                "pending", "pending_transcribe", "waiting_for_wiki", "processing",
-                "done_today", "failed", "rate_limited", "requires_membership",
+                "pending",
+                "pending_transcribe",
+                "waiting_for_wiki",
+                "processing",
+                "done_today",
+                "failed",
+                "rate_limited",
+                "requires_membership",
             ]
             missing = [f for f in global_required if f not in data["global"]]
             if missing:
-                pytest.fail(
-                    f"FRONTEND MISMATCH: /api/progress 'global' missing fields: {missing}"
-                )
+                pytest.fail(f"FRONTEND MISMATCH: /api/progress 'global' missing fields: {missing}")
 
     async def test_system_stats(self, api_tester: ApiTester):
         r = await api_tester.get("/system-stats")
         data = r.json()
-        for field in ["cpu_percent", "ram_used_gb", "ram_total_gb", "disk_used_gb", "disk_total_gb"]:
+        for field in [
+            "cpu_percent",
+            "ram_used_gb",
+            "ram_total_gb",
+            "disk_used_gb",
+            "disk_total_gb",
+        ]:
             assert field in data, f"Missing '{field}' in system-stats"
 
 
 # ===================================================================
 # 8. GRAPH ENDPOINTS
 # ===================================================================
+
 
 class TestGraph:
     async def test_page_graph(self, api_tester: ApiTester):
@@ -664,6 +748,7 @@ class TestGraph:
 # 9. ATTENTION ITEMS
 # ===================================================================
 
+
 class TestAttentionItems:
     async def test_attention_items(self, api_tester: ApiTester):
         r = await api_tester.get("/attention-items")
@@ -681,6 +766,7 @@ class TestAttentionItems:
 # 10. WORKERS
 # ===================================================================
 
+
 class TestWorkers:
     async def test_workers(self, api_tester: ApiTester):
         r = await api_tester.get("/workers")
@@ -693,8 +779,16 @@ class TestWorkers:
         workers = data.get("workers", [])
         if workers:
             w = workers[0]
-            required = ["worker_id", "status", "alive", "heartbeat_ago_secs",
-                        "current_job_id", "current_stage", "cpu_percent", "error_message"]
+            required = [
+                "worker_id",
+                "status",
+                "alive",
+                "heartbeat_ago_secs",
+                "current_job_id",
+                "current_stage",
+                "cpu_percent",
+                "error_message",
+            ]
             missing = [f for f in required if f not in w]
             if missing:
                 pytest.fail(f"FRONTEND MISMATCH: WorkerInfo missing fields: {missing}")
@@ -703,6 +797,7 @@ class TestWorkers:
 # ===================================================================
 # 11. RESTART
 # ===================================================================
+
 
 class TestRestart:
     async def test_restart_item_404(self, api_tester: ApiTester):
@@ -723,6 +818,7 @@ class TestRestart:
 # 12. ADMIN API KEYS
 # ===================================================================
 
+
 class TestApiKeys:
     async def test_list_api_keys(self, api_tester: ApiTester):
         r = await api_tester.get("/admin/api-keys")
@@ -734,25 +830,40 @@ class TestApiKeys:
         data = r.json()
         if data:
             key = data[0]
-            required = ["id", "provider", "api_key_masked", "model_name", "status",
-                        "priority", "rate_limited_until", "usage_count", "last_used_at",
-                        "created_at", "updated_at"]
+            required = [
+                "id",
+                "provider",
+                "api_key_masked",
+                "model_name",
+                "status",
+                "priority",
+                "rate_limited_until",
+                "usage_count",
+                "last_used_at",
+                "created_at",
+                "updated_at",
+            ]
             missing = [f for f in required if f not in key]
             if missing:
                 pytest.fail(f"FRONTEND MISMATCH: ApiKeyRow missing fields: {missing}")
 
     async def test_create_api_key_501(self, api_tester: ApiTester):
         """POST /api/admin/api-keys returns 501 Not Implemented."""
-        r = await api_tester.post("/admin/api-keys", {
-            "provider": "opencode",
-            "api_key": "sk-test-1234",
-            "model_name": "test-model",
-        }, expected_status=501)
+        r = await api_tester.post(
+            "/admin/api-keys",
+            {
+                "provider": "opencode",
+                "api_key": "sk-test-1234",
+                "model_name": "test-model",
+            },
+            expected_status=501,
+        )
 
     async def test_update_api_key_501(self, api_tester: ApiTester):
         fake_id = "00000000-0000-0000-0000-000000000000"
-        r = await api_tester.put(f"/admin/api-keys/{fake_id}",
-                                 {"status": "active"}, expected_status=501)
+        r = await api_tester.put(
+            f"/admin/api-keys/{fake_id}", {"status": "active"}, expected_status=501
+        )
 
     async def test_delete_api_key_404(self, api_tester: ApiTester):
         fake_id = "00000000-0000-0000-0000-000000000000"
@@ -767,6 +878,7 @@ class TestApiKeys:
 # 13. ADMIN CRON JOBS
 # ===================================================================
 
+
 class TestCronJobs:
     async def test_list_cron_jobs(self, api_tester: ApiTester):
         r = await api_tester.get("/admin/cron-jobs")
@@ -778,8 +890,16 @@ class TestCronJobs:
         data = r.json()
         if data:
             job = data[0]
-            required = ["job_id", "name", "description", "schedule", "job_type",
-                        "managed", "status", "last_run"]
+            required = [
+                "job_id",
+                "name",
+                "description",
+                "schedule",
+                "job_type",
+                "managed",
+                "status",
+                "last_run",
+            ]
             missing = [f for f in required if f not in job]
             if missing:
                 pytest.fail(f"FRONTEND MISMATCH: CronJobStatus missing fields: {missing}")
@@ -799,6 +919,7 @@ class TestCronJobs:
 # 14. ADMIN CLEAR ALERTS
 # ===================================================================
 
+
 class TestAdminClearAlerts:
     async def test_clear_alerts(self, api_tester: ApiTester):
         r = await api_tester.delete("/admin/clear-alerts")
@@ -810,6 +931,7 @@ class TestAdminClearAlerts:
 # ===================================================================
 # 15. CHAT SESSIONS
 # ===================================================================
+
 
 class TestChatSessions:
     async def test_list_sessions(self, api_tester: ApiTester):
@@ -842,11 +964,14 @@ class TestChatSessions:
 # 16. ERROR HANDLING
 # ===================================================================
 
+
 class TestErrorHandling:
     async def test_invalid_json_body(self, api_tester: ApiTester):
         """Invalid JSON → should return 422 not 500."""
         async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(api("/query"), content="not json", headers={"Content-Type": "application/json"})
+            r = await c.post(
+                api("/query"), content="not json", headers={"Content-Type": "application/json"}
+            )
             assert r.status_code in [400, 422], f"Expected 400/422, got {r.status_code}"
 
     async def test_invalid_uuid_format(self, api_tester: ApiTester):
@@ -860,10 +985,13 @@ class TestErrorHandling:
     async def test_cors_headers(self, api_tester: ApiTester):
         """CORS headers should allow cross-origin requests."""
         async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.options(api("/health"), headers={
-                "Origin": "http://localhost:3000",
-                "Access-Control-Request-Method": "GET",
-            })
+            r = await c.options(
+                api("/health"),
+                headers={
+                    "Origin": "http://localhost:3000",
+                    "Access-Control-Request-Method": "GET",
+                },
+            )
             # FastAPI CORS middleware should respond
             assert r.status_code in [200, 204], f"OPTIONS returned {r.status_code}"
 
@@ -875,6 +1003,7 @@ class TestErrorHandling:
 # ===================================================================
 # 17. STUB ROUTES AVAILABILITY CHECK
 # ===================================================================
+
 
 class TestStubRoutesAvailability:
     """Test that stub routes are available (controlled by ENABLE_STUB_ROUTES env var).
@@ -912,6 +1041,7 @@ class TestStubRoutesAvailability:
 # 18. FRONTEND-BACKEND CONTRACT TEST (Cross-cutting)
 # ===================================================================
 
+
 class TestFrontendBackendContract:
     """End-to-end contract tests that simulate exactly what the frontend does."""
 
@@ -939,7 +1069,9 @@ class TestFrontendBackendContract:
         r = await api_tester.get("/pages")
         data = r.json()
         if "page" not in data or "per_page" not in data:
-            pytest.fail("fetchPages() expects 'page' and 'per_page' in response — frontend pagination broken")
+            pytest.fail(
+                "fetchPages() expects 'page' and 'per_page' in response — frontend pagination broken"
+            )
 
     async def test_frontend_search_flow(self, api_tester: ApiTester):
         """Simulate useSearch() → searchPages() on search."""
@@ -1030,16 +1162,18 @@ class TestFrontendBackendContract:
             # This is the pages.py version (non-stub) — check if it provides enough for frontend
             missing = [f for f in ["source_name", "source_url"] if f not in detail]
             note = (
-                f"NOTE: GET /api/pages/{{slug}} serving from pages.py (non-enriched).\n"
-                f"  Frontend PageDetail expects: sections, media_assets, linked_pages,\n"
-                f"  source_name, source_url, source_video_url.\n"
-                f"  If page detail page shows blank sections/media: that's because\n"
-                f"  stubs.py richer version is shadowed by pages.py router order."
+                "NOTE: GET /api/pages/{slug} serving from pages.py (non-enriched).\n"
+                "  Frontend PageDetail expects: sections, media_assets, linked_pages,\n"
+                "  source_name, source_url, source_video_url.\n"
+                "  If page detail page shows blank sections/media: that's because\n"
+                "  stubs.py richer version is shadowed by pages.py router order."
             )
             if missing:
                 pytest.fail(f"{note}\n  Missing fields: {missing}")
             else:
-                pytest.skip(f"{note}\n  (But basic fields are present, so page may render partially)")
+                pytest.skip(
+                    f"{note}\n  (But basic fields are present, so page may render partially)"
+                )
         else:
             # Has enriched data — verify completeness
             for field in ["sections", "media_assets", "linked_pages", "source_name", "source_url"]:

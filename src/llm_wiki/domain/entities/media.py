@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Optional
 
 from llm_wiki.domain.value_objects.identifiers import PageId, SourceItemId
@@ -11,9 +11,9 @@ class MediaAsset:
     source_item_id: SourceItemId
     filename: str
     minio_path: str
-    page_id: Optional[PageId] = None
+    page_id: PageId | None = None
     section_id: Optional["PageSectionId"] = None
-    mime_type: Optional[str] = None
-    file_size_bytes: Optional[int] = None
-    description: Optional[str] = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    mime_type: str | None = None
+    file_size_bytes: int | None = None
+    description: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))

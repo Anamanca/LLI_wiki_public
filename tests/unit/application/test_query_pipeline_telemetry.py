@@ -1,6 +1,7 @@
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from llm_wiki.application.dto.query_dto import QueryInput
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
@@ -48,7 +49,9 @@ def mock_embedder():
 def mock_vector_search():
     mock = AsyncMock()
     mock.search_similar.return_value = [
-        SearchResult(content_id="1", content_type="section", title="Test", content="test", score=0.9)
+        SearchResult(
+            content_id="1", content_type="section", title="Test", content="test", score=0.9
+        )
     ]
     mock.set_parent_span = MagicMock()
     return mock
@@ -115,13 +118,15 @@ async def test_execute_emits_root_span_and_step_spans(
 async def test_execute_cache_hit_short_circuits(
     fake_telemetry, mock_embedder, mock_vector_search, mock_keyword_search, mock_llm, mock_cache
 ):
-    mock_cache.get.return_value = json.dumps({
-        "answer": "Cached answer",
-        "sources": [],
-        "tokens_used": 0,
-        "cache_hit": False,
-        "pipeline_steps": {},
-    })
+    mock_cache.get.return_value = json.dumps(
+        {
+            "answer": "Cached answer",
+            "sources": [],
+            "tokens_used": 0,
+            "cache_hit": False,
+            "pipeline_steps": {},
+        }
+    )
     pipeline = QueryPipeline(
         embedder=mock_embedder,
         vector_search=mock_vector_search,

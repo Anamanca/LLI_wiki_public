@@ -2,11 +2,10 @@
 Admin routes for ingestion, cron, scanning, and operational health.
 Mounted unconditionally because the K8s CronJob depends on them.
 """
-import json
+
 import logging
 import os
-from datetime import date, datetime, timedelta
-from llm_wiki.shared.datetime_utils import now
+from datetime import date, timedelta
 from uuid import UUID
 
 import httpx
@@ -14,14 +13,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.infrastructure.persistence.postgres import models as orm
 from llm_wiki.application.use_cases.ingestion.youtube_poller import (
-    poll_channel,
-    write_scan_log,
     PollResult,
     YouTubeQuotaExceeded,
+    poll_channel,
+    write_scan_log,
 )
+from llm_wiki.infrastructure.persistence.postgres import models as orm
 from llm_wiki.presentation.dependencies import get_db
+from llm_wiki.shared.datetime_utils import now
 
 router = APIRouter(prefix="/admin")
 
@@ -39,9 +39,7 @@ def _today_utc() -> date:
 async def _prune_scan_logs(db: AsyncSession, retention_days: int = 10) -> int:
     """Delete scan_logs older than retention_days. Returns number of rows deleted."""
     cutoff = now() - timedelta(days=retention_days)
-    result = await db.execute(
-        delete(orm.ScanLog).where(orm.ScanLog.started_at < cutoff)
-    )
+    result = await db.execute(delete(orm.ScanLog).where(orm.ScanLog.started_at < cutoff))
     await db.commit()
     deleted = result.rowcount
     if deleted:
@@ -197,7 +195,9 @@ async def _scan_status(db: AsyncSession) -> dict:
 
     return {
         "last_scan_date": str(last_scan_date) if last_scan_date else None,
-        "last_scan_completed_at": last_scan_completed_at.isoformat() if last_scan_completed_at else None,
+        "last_scan_completed_at": last_scan_completed_at.isoformat()
+        if last_scan_completed_at
+        else None,
         "missed_dates": [str(d) for d in missed],
         "pending_count": pending_count,
         "requires_membership_count": req_count,
@@ -212,7 +212,7 @@ def _k8s_api_client() -> httpx.AsyncClient:
     headers = {}
     verify = ca_path if os.path.exists(ca_path) else False
     if os.path.exists(token_path):
-        with open(token_path, "r", encoding="utf-8") as f:
+        with open(token_path, encoding="utf-8") as f:
             headers["Authorization"] = f"Bearer {f.read().strip()}"
     return httpx.AsyncClient(
         base_url=f"https://{_K8S_API_HOST}:{_K8S_API_PORT}",
@@ -226,9 +226,7 @@ async def _list_k8s_cronjobs() -> dict[str, dict]:
     """Return a mapping of CronJob name -> metadata for jobs in the current namespace."""
     try:
         async with _k8s_api_client() as client:
-            resp = await client.get(
-                f"/apis/batch/v1/namespaces/{_K8S_NAMESPACE}/cronjobs"
-            )
+            resp = await client.get(f"/apis/batch/v1/namespaces/{_K8S_NAMESPACE}/cronjobs")
             if resp.status_code != 200:
                 return {}
             data = resp.json()
@@ -247,9 +245,7 @@ async def _list_k8s_jobs() -> list[dict]:
     """Return recent Jobs in the current namespace sorted by creation time desc."""
     try:
         async with _k8s_api_client() as client:
-            resp = await client.get(
-                f"/apis/batch/v1/namespaces/{_K8S_NAMESPACE}/jobs"
-            )
+            resp = await client.get(f"/apis/batch/v1/namespaces/{_K8S_NAMESPACE}/jobs")
             if resp.status_code != 200:
                 return []
             data = resp.json()
@@ -285,8 +281,7 @@ async def _k8s_cronjob_status(cronjob_name: str) -> tuple[str, str | None]:
     own_jobs = [
         j
         for j in jobs
-        if j.get("metadata", {}).get("ownerReferences", [{}])[0].get("name")
-        == cronjob_name
+        if j.get("metadata", {}).get("ownerReferences", [{}])[0].get("name") == cronjob_name
     ]
 
     # Running takes precedence.
@@ -322,9 +317,7 @@ async def _background_task_status(db: AsyncSession) -> tuple[str, int]:
         running    - At least one worker has heartbeat within timeout
         no_workers - No workers have reported recently
     """
-    cutoff = now() - timedelta(
-        seconds=_WORKER_HEARTBEAT_TIMEOUT_SECONDS
-    )
+    cutoff = now() - timedelta(seconds=_WORKER_HEARTBEAT_TIMEOUT_SECONDS)
     result = await db.execute(
         select(func.count(orm.WorkerHeartbeat.worker_id)).where(
             orm.WorkerHeartbeat.last_heartbeat >= cutoff
@@ -378,19 +371,21 @@ async def list_cron_jobs(db: AsyncSession = Depends(get_db)):
             status = bg_status
             alive_workers = bg_alive
 
-        jobs.append({
-            "job_id": j.job_id,
-            "name": j.name,
-            "description": j.description,
-            "schedule": j.schedule,
-            "job_type": j.job_type,
-            "managed": j.managed,
-            "status": status,
-            "last_run": last_run,
-            "crontab_active": crontab_active,
-            "alive_workers": alive_workers,
-            "error": error,
-        })
+        jobs.append(
+            {
+                "job_id": j.job_id,
+                "name": j.name,
+                "description": j.description,
+                "schedule": j.schedule,
+                "job_type": j.job_type,
+                "managed": j.managed,
+                "status": status,
+                "last_run": last_run,
+                "crontab_active": crontab_active,
+                "alive_workers": alive_workers,
+                "error": error,
+            }
+        )
 
     return jobs
 
@@ -442,6 +437,7 @@ async def stop_cron_job(job_id: str, db: AsyncSession = Depends(get_db)):
 # Scan logs — audit trail for YouTube API usage per channel
 # ---------------------------------------------------------------------------
 
+
 @router.get("/scan-logs")
 async def get_scan_logs(
     source_id: str | None = None,
@@ -456,11 +452,7 @@ async def get_scan_logs(
       days       — lookback window, default 7
       limit      — max rows, default 100
     """
-    q = (
-        select(orm.ScanLog)
-        .order_by(orm.ScanLog.started_at.desc())
-        .limit(limit)
-    )
+    q = select(orm.ScanLog).order_by(orm.ScanLog.started_at.desc()).limit(limit)
     if source_id:
         try:
             sid = UUID(source_id)
@@ -505,6 +497,7 @@ async def admin_health(db: AsyncSession = Depends(get_db)):
 # ──────────────────────────────────────────
 # Simple operational helpers (read-only or safe mutations)
 # ──────────────────────────────────────────
+
 
 @router.post("/restart/{item_id}")
 async def restart_item(item_id: str, db: AsyncSession = Depends(get_db)):
@@ -557,6 +550,7 @@ async def restart_source_legacy(source_id: str, db: AsyncSession = Depends(get_d
 # API key management stubs (read-only list; mutations are not implemented)
 # ---------------------------------------------------------------------------
 
+
 @router.get("/api-keys")
 async def list_api_keys(db: AsyncSession = Depends(get_db)):
     q = select(orm.ApiKey).order_by(orm.ApiKey.priority, orm.ApiKey.created_at.desc())
@@ -570,7 +564,9 @@ async def list_api_keys(db: AsyncSession = Depends(get_db)):
             "model_name": r.model_name,
             "status": r.status,
             "priority": r.priority,
-            "rate_limited_until": r.rate_limited_until.isoformat() if r.rate_limited_until else None,
+            "rate_limited_until": r.rate_limited_until.isoformat()
+            if r.rate_limited_until
+            else None,
             "usage_count": r.usage_count,
             "last_used_at": r.last_used_at.isoformat() if r.last_used_at else None,
             "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -624,6 +620,7 @@ async def activate_api_key(key_id: str, db: AsyncSession = Depends(get_db)):
 # ---------------------------------------------------------------------------
 # Alerts
 # ---------------------------------------------------------------------------
+
 
 @router.delete("/clear-alerts")
 async def clear_alerts(db: AsyncSession = Depends(get_db)):

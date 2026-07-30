@@ -1,4 +1,4 @@
-""""Port for analysing user queries: intent, time range, entities, and keywords.
+""" "Port for analysing user queries: intent, time range, entities, and keywords.
 
 One lightweight LLM call produces JSON that drives:
 - retrieval weights (intent → events vs sections emphasis)

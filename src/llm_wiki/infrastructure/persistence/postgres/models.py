@@ -1,5 +1,3 @@
-from datetime import date, datetime
-
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
@@ -18,7 +16,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, deferred, relationship
-from sqlalchemy.sql.schema import Computed, FetchedValue
+from sqlalchemy.sql.schema import Computed
 
 
 def uuid7() -> str:
@@ -34,7 +32,12 @@ class Base(DeclarativeBase):
 class Source(Base):
     __tablename__ = "sources"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
     name = Column(String(255), nullable=False)
     platform = Column(String(50), nullable=False, default="youtube")
     external_id = Column(String(255), nullable=False)
@@ -45,7 +48,9 @@ class Source(Base):
     status = Column(String(20), nullable=False, default="active")
     config = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
 
-    __table_args__ = (UniqueConstraint("platform", "external_id", name="uq_sources_platform_external"),)
+    __table_args__ = (
+        UniqueConstraint("platform", "external_id", name="uq_sources_platform_external"),
+    )
 
     items = relationship("SourceItem", back_populates="source", cascade="all, delete-orphan")
     pages = relationship("Page", back_populates="source", cascade="all, delete-orphan")
@@ -54,8 +59,15 @@ class Source(Base):
 class SourceItem(Base):
     __tablename__ = "source_items"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
-    source_id = Column(UUID(as_uuid=True), ForeignKey("sources.id", ondelete="CASCADE"), nullable=False)
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
+    source_id = Column(
+        UUID(as_uuid=True), ForeignKey("sources.id", ondelete="CASCADE"), nullable=False
+    )
     external_id = Column(String(255), nullable=False)
     title = Column(String(1024), nullable=True)
     url = Column(String(512), nullable=True)
@@ -76,16 +88,29 @@ class SourceItem(Base):
     )
 
     source = relationship("Source", back_populates="items")
-    media_assets = relationship("MediaAsset", back_populates="source_item", cascade="all, delete-orphan")
-    ingestion_logs = relationship("IngestionLog", back_populates="source_item", cascade="all, delete-orphan")
+    media_assets = relationship(
+        "MediaAsset", back_populates="source_item", cascade="all, delete-orphan"
+    )
+    ingestion_logs = relationship(
+        "IngestionLog", back_populates="source_item", cascade="all, delete-orphan"
+    )
 
 
 class Page(Base):
     __tablename__ = "pages"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
-    source_id = Column(UUID(as_uuid=True), ForeignKey("sources.id", ondelete="SET NULL"), nullable=True)
-    source_item_id = Column(UUID(as_uuid=True), ForeignKey("source_items.id", ondelete="SET NULL"), nullable=True)
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
+    source_id = Column(
+        UUID(as_uuid=True), ForeignKey("sources.id", ondelete="SET NULL"), nullable=True
+    )
+    source_item_id = Column(
+        UUID(as_uuid=True), ForeignKey("source_items.id", ondelete="SET NULL"), nullable=True
+    )
     title = Column(String(1024), nullable=False)
     slug = Column(String(512), nullable=False, unique=True)
     content_markdown = Column(Text, nullable=True)
@@ -94,7 +119,12 @@ class Page(Base):
     key_entities = Column(ARRAY(String), nullable=True)
     summary_vector = Column(Vector(1024), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()"), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        onupdate=text("now()"),
+        nullable=False,
+    )
     published_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(20), nullable=False, default="published")
 
@@ -112,24 +142,49 @@ class Page(Base):
 
     source = relationship("Source", back_populates="pages")
     sections = relationship("PageSection", back_populates="page", cascade="all, delete-orphan")
-    links_from = relationship("PageLink", back_populates="from_page", foreign_keys="PageLink.from_page_id", cascade="all, delete-orphan")
-    links_to = relationship("PageLink", back_populates="to_page", foreign_keys="PageLink.to_page_id", cascade="all, delete-orphan")
+    links_from = relationship(
+        "PageLink",
+        back_populates="from_page",
+        foreign_keys="PageLink.from_page_id",
+        cascade="all, delete-orphan",
+    )
+    links_to = relationship(
+        "PageLink",
+        back_populates="to_page",
+        foreign_keys="PageLink.to_page_id",
+        cascade="all, delete-orphan",
+    )
     snapshots = relationship("PageSnapshot", back_populates="page", cascade="all, delete-orphan")
     media_assets = relationship("MediaAsset", back_populates="page")
-    observations = relationship("EventObservation", back_populates="page", cascade="all, delete-orphan")
+    observations = relationship(
+        "EventObservation", back_populates="page", cascade="all, delete-orphan"
+    )
 
 
 class PageSection(Base):
     __tablename__ = "page_sections"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
     page_id = Column(UUID(as_uuid=True), ForeignKey("pages.id", ondelete="CASCADE"), nullable=False)
-    source_id = Column(UUID(as_uuid=True), ForeignKey("sources.id", ondelete="SET NULL"), nullable=True)
+    source_id = Column(
+        UUID(as_uuid=True), ForeignKey("sources.id", ondelete="SET NULL"), nullable=True
+    )
     section_order = Column(Integer, nullable=False, default=0)
     title = Column(String(1024), nullable=True)
     content_markdown = Column(Text, nullable=True)
     section_vector = Column(Vector(1024), nullable=True)
-    fts_vector = deferred(Column(TSVECTOR, Computed("to_tsvector('simple', coalesce(content_markdown, ''))", persisted=True), nullable=True))
+    fts_vector = deferred(
+        Column(
+            TSVECTOR,
+            Computed("to_tsvector('simple', coalesce(content_markdown, ''))", persisted=True),
+            nullable=True,
+        )
+    )
     source_ref = Column(String(512), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
 
@@ -151,14 +206,25 @@ class PageSection(Base):
 class PageLink(Base):
     __tablename__ = "page_links"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
-    from_page_id = Column(UUID(as_uuid=True), ForeignKey("pages.id", ondelete="CASCADE"), nullable=False)
-    to_page_id = Column(UUID(as_uuid=True), ForeignKey("pages.id", ondelete="CASCADE"), nullable=False)
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
+    from_page_id = Column(
+        UUID(as_uuid=True), ForeignKey("pages.id", ondelete="CASCADE"), nullable=False
+    )
+    to_page_id = Column(
+        UUID(as_uuid=True), ForeignKey("pages.id", ondelete="CASCADE"), nullable=False
+    )
     relation_type = Column(String(50), nullable=False, default="related")
     created_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("from_page_id", "to_page_id", "relation_type", name="uq_page_links_from_to_relation"),
+        UniqueConstraint(
+            "from_page_id", "to_page_id", "relation_type", name="uq_page_links_from_to_relation"
+        ),
     )
 
     from_page = relationship("Page", back_populates="links_from", foreign_keys=[from_page_id])
@@ -168,10 +234,19 @@ class PageLink(Base):
 class MediaAsset(Base):
     __tablename__ = "media_assets"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
-    source_item_id = Column(UUID(as_uuid=True), ForeignKey("source_items.id", ondelete="CASCADE"), nullable=False)
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
+    source_item_id = Column(
+        UUID(as_uuid=True), ForeignKey("source_items.id", ondelete="CASCADE"), nullable=False
+    )
     page_id = Column(UUID(as_uuid=True), ForeignKey("pages.id", ondelete="SET NULL"), nullable=True)
-    section_id = Column(UUID(as_uuid=True), ForeignKey("page_sections.id", ondelete="SET NULL"), nullable=True)
+    section_id = Column(
+        UUID(as_uuid=True), ForeignKey("page_sections.id", ondelete="SET NULL"), nullable=True
+    )
     filename = Column(String(512), nullable=False)
     minio_path = Column(String(1024), nullable=False)
     mime_type = Column(String(100), nullable=True)
@@ -191,8 +266,15 @@ class MediaAsset(Base):
 class IngestionLog(Base):
     __tablename__ = "ingestion_logs"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
-    source_item_id = Column(UUID(as_uuid=True), ForeignKey("source_items.id", ondelete="CASCADE"), nullable=False)
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
+    source_item_id = Column(
+        UUID(as_uuid=True), ForeignKey("source_items.id", ondelete="CASCADE"), nullable=False
+    )
     event_type = Column(String(50), nullable=False)
     message = Column(Text, nullable=True)
     metadata_json = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
@@ -215,14 +297,23 @@ class TelegramSubscriber(Base):
 class PageSnapshot(Base):
     __tablename__ = "page_snapshots"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
     page_id = Column(UUID(as_uuid=True), ForeignKey("pages.id", ondelete="CASCADE"), nullable=False)
-    source_item_id = Column(UUID(as_uuid=True), ForeignKey("source_items.id", ondelete="SET NULL"), nullable=True)
+    source_item_id = Column(
+        UUID(as_uuid=True), ForeignKey("source_items.id", ondelete="SET NULL"), nullable=True
+    )
     content_markdown = Column(Text, nullable=True)
     sections_jsonb = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     created_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
 
-    __table_args__ = (UniqueConstraint("page_id", "source_item_id", name="uq_page_snapshots_page_item"),)
+    __table_args__ = (
+        UniqueConstraint("page_id", "source_item_id", name="uq_page_snapshots_page_item"),
+    )
 
     page = relationship("Page", back_populates="snapshots")
 
@@ -241,7 +332,9 @@ class ScanLog(Base):
     __tablename__ = "scan_logs"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    source_id = Column(UUID(as_uuid=True), ForeignKey("sources.id", ondelete="CASCADE"), nullable=False)
+    source_id = Column(
+        UUID(as_uuid=True), ForeignKey("sources.id", ondelete="CASCADE"), nullable=False
+    )
     source_name = Column(String(255), nullable=False)
     scan_type = Column(String(20), nullable=False, default="daily")
     started_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
@@ -273,7 +366,12 @@ class WorkerHeartbeat(Base):
 class EventCanonical(Base):
     __tablename__ = "event_canonicals"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
     title = Column(Text, nullable=False)
     normalized_date = Column(Date, nullable=True)
     normalized_date_end = Column(Date, nullable=True)
@@ -282,29 +380,68 @@ class EventCanonical(Base):
     importance_score = Column(Float, nullable=False, server_default=text("0.0"))
     canonical_embedding = Column(Vector(1024), nullable=True)
     first_seen_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()"), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        onupdate=text("now()"),
+        nullable=False,
+    )
     observation_count = Column(Integer, nullable=False, server_default=text("0"))
     consensus_summary = Column(Text, nullable=True)
     consensus_generated_at = Column(DateTime(timezone=True), nullable=True)
 
-    observations = relationship("EventObservation", back_populates="event", cascade="all, delete-orphan")
-    chains_from = relationship("EventTimelineChain", back_populates="from_event", foreign_keys="EventTimelineChain.from_event_id", cascade="all, delete-orphan")
-    chains_to = relationship("EventTimelineChain", back_populates="to_event", foreign_keys="EventTimelineChain.to_event_id", cascade="all, delete-orphan")
-    entity_links = relationship("EventEntityLink", back_populates="event", cascade="all, delete-orphan")
+    observations = relationship(
+        "EventObservation", back_populates="event", cascade="all, delete-orphan"
+    )
+    chains_from = relationship(
+        "EventTimelineChain",
+        back_populates="from_event",
+        foreign_keys="EventTimelineChain.from_event_id",
+        cascade="all, delete-orphan",
+    )
+    chains_to = relationship(
+        "EventTimelineChain",
+        back_populates="to_event",
+        foreign_keys="EventTimelineChain.to_event_id",
+        cascade="all, delete-orphan",
+    )
+    entity_links = relationship(
+        "EventEntityLink", back_populates="event", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
-        Index("ix_event_canonicals_vector_hnsw", "canonical_embedding", postgresql_using="hnsw", postgresql_with={"m": 16, "ef_construction": 200}, postgresql_ops={"canonical_embedding": "vector_cosine_ops"}),
+        Index(
+            "ix_event_canonicals_vector_hnsw",
+            "canonical_embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 200},
+            postgresql_ops={"canonical_embedding": "vector_cosine_ops"},
+        ),
         Index("ix_event_canonicals_category_date", "category", "normalized_date"),
-        Index("ix_event_canonicals_entities_gin", "entities", postgresql_using="gin", postgresql_ops={"entities": "jsonb_path_ops"}),
+        Index(
+            "ix_event_canonicals_entities_gin",
+            "entities",
+            postgresql_using="gin",
+            postgresql_ops={"entities": "jsonb_path_ops"},
+        ),
     )
 
 
 class EventObservation(Base):
     __tablename__ = "event_observations"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
-    event_id = Column(UUID(as_uuid=True), ForeignKey("event_canonicals.id", ondelete="CASCADE"), nullable=False)
-    source_id = Column(UUID(as_uuid=True), ForeignKey("sources.id", ondelete="SET NULL"), nullable=True)
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
+    event_id = Column(
+        UUID(as_uuid=True), ForeignKey("event_canonicals.id", ondelete="CASCADE"), nullable=False
+    )
+    source_id = Column(
+        UUID(as_uuid=True), ForeignKey("sources.id", ondelete="SET NULL"), nullable=True
+    )
     page_id = Column(UUID(as_uuid=True), ForeignKey("pages.id", ondelete="SET NULL"), nullable=True)
     source_published_at = Column(DateTime(timezone=True), nullable=True)
     extracted_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
@@ -314,7 +451,13 @@ class EventObservation(Base):
     metrics = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     confidence = Column(Float, nullable=False, server_default=text("0.5"))
     embedding = Column(Vector(1024), nullable=True)
-    fts_vector = deferred(Column(TSVECTOR, Computed("to_tsvector('simple', coalesce(description, ''))", persisted=True), nullable=True))
+    fts_vector = deferred(
+        Column(
+            TSVECTOR,
+            Computed("to_tsvector('simple', coalesce(description, ''))", persisted=True),
+            nullable=True,
+        )
+    )
     sentiment_score = Column(Float, nullable=True)
     stance = Column(String(20), nullable=True)
 
@@ -323,7 +466,13 @@ class EventObservation(Base):
     page = relationship("Page", back_populates="observations")
 
     __table_args__ = (
-        Index("ix_event_observations_vector_hnsw", "embedding", postgresql_using="hnsw", postgresql_with={"m": 16, "ef_construction": 200}, postgresql_ops={"embedding": "vector_cosine_ops"}),
+        Index(
+            "ix_event_observations_vector_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 200},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
         Index("ix_event_observations_published_at", "source_published_at"),
         Index("ix_event_observations_event_id", "event_id"),
         Index("ix_event_observations_page_id", "page_id"),
@@ -333,28 +482,48 @@ class EventObservation(Base):
 class EventTimelineChain(Base):
     __tablename__ = "event_timeline_chains"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
-    from_event_id = Column(UUID(as_uuid=True), ForeignKey("event_canonicals.id", ondelete="CASCADE"), nullable=False)
-    to_event_id = Column(UUID(as_uuid=True), ForeignKey("event_canonicals.id", ondelete="CASCADE"), nullable=False)
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
+    from_event_id = Column(
+        UUID(as_uuid=True), ForeignKey("event_canonicals.id", ondelete="CASCADE"), nullable=False
+    )
+    to_event_id = Column(
+        UUID(as_uuid=True), ForeignKey("event_canonicals.id", ondelete="CASCADE"), nullable=False
+    )
     relation_type = Column(String(30), nullable=False, default="causes")
     description = Column(Text, nullable=True)
     confidence = Column(Float, nullable=False, server_default=text("0.5"))
     created_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
 
-    from_event = relationship("EventCanonical", back_populates="chains_from", foreign_keys=[from_event_id])
-    to_event = relationship("EventCanonical", back_populates="chains_to", foreign_keys=[to_event_id])
+    from_event = relationship(
+        "EventCanonical", back_populates="chains_from", foreign_keys=[from_event_id]
+    )
+    to_event = relationship(
+        "EventCanonical", back_populates="chains_to", foreign_keys=[to_event_id]
+    )
 
     __table_args__ = (
         Index("ix_event_timeline_chains_from", "from_event_id", "relation_type"),
         Index("ix_event_timeline_chains_to", "to_event_id"),
-        UniqueConstraint("from_event_id", "to_event_id", "relation_type", name="uq_event_chains_from_to_relation"),
+        UniqueConstraint(
+            "from_event_id", "to_event_id", "relation_type", name="uq_event_chains_from_to_relation"
+        ),
     )
 
 
 class Entity(Base):
     __tablename__ = "entities"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
     name = Column(String(255), nullable=False)
     type = Column(String(30), nullable=False)
     canonical_name = Column(String(255), nullable=True)
@@ -362,7 +531,9 @@ class Entity(Base):
     extra = Column("metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     first_seen_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
 
-    event_links = relationship("EventEntityLink", back_populates="entity", cascade="all, delete-orphan")
+    event_links = relationship(
+        "EventEntityLink", back_populates="entity", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         UniqueConstraint("type", "canonical_name", name="uq_entities_type_canonical"),
@@ -374,9 +545,18 @@ class Entity(Base):
 class EventEntityLink(Base):
     __tablename__ = "event_entity_links"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
-    event_id = Column(UUID(as_uuid=True), ForeignKey("event_canonicals.id", ondelete="CASCADE"), nullable=False)
-    entity_id = Column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False)
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
+    event_id = Column(
+        UUID(as_uuid=True), ForeignKey("event_canonicals.id", ondelete="CASCADE"), nullable=False
+    )
+    entity_id = Column(
+        UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False
+    )
     relationship_type = Column(String(30), nullable=False, default="mentions")
     confidence = Column(Float, nullable=False, server_default=text("0.5"))
     extracted_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
@@ -394,13 +574,24 @@ class EventEntityLink(Base):
 class EntityRelation(Base):
     __tablename__ = "entity_relations"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
-    from_entity_id = Column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False)
-    to_entity_id = Column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False)
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
+    from_entity_id = Column(
+        UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False
+    )
+    to_entity_id = Column(
+        UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False
+    )
     predicate = Column(String(50), nullable=False)
     properties = Column("properties", JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     confidence = Column(Float, nullable=False, server_default=text("0.5"))
-    source_event_id = Column(UUID(as_uuid=True), ForeignKey("event_canonicals.id", ondelete="SET NULL"), nullable=True)
+    source_event_id = Column(
+        UUID(as_uuid=True), ForeignKey("event_canonicals.id", ondelete="SET NULL"), nullable=True
+    )
     extracted_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
 
     from_entity = relationship("Entity", foreign_keys=[from_entity_id])
@@ -408,7 +599,12 @@ class EntityRelation(Base):
     source_event = relationship("EventCanonical", foreign_keys=[source_event_id])
 
     __table_args__ = (
-        UniqueConstraint("from_entity_id", "to_entity_id", "predicate", name="uq_entity_relations_from_to_predicate"),
+        UniqueConstraint(
+            "from_entity_id",
+            "to_entity_id",
+            "predicate",
+            name="uq_entity_relations_from_to_predicate",
+        ),
         Index("ix_entity_relations_from_entity", "from_entity_id"),
         Index("ix_entity_relations_to_entity", "to_entity_id"),
         Index("ix_entity_relations_predicate", "predicate"),
@@ -418,7 +614,12 @@ class EntityRelation(Base):
 class ApiKey(Base):
     __tablename__ = "api_keys"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7, server_default=text("gen_random_uuid()"))
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid7,
+        server_default=text("gen_random_uuid()"),
+    )
     provider = Column(String(50), nullable=False, default="opencode")
     api_key = Column(Text, nullable=False)
     model_name = Column(String(255), nullable=False, default="deepseek-v4-flash")
@@ -428,7 +629,12 @@ class ApiKey(Base):
     usage_count = Column(Integer, nullable=False, default=0)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()"), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        onupdate=text("now()"),
+        nullable=False,
+    )
 
     __table_args__ = (
         Index("ix_api_keys_status_priority", "status", "priority", "usage_count"),
@@ -449,4 +655,9 @@ class CronJob(Base):
     enabled = Column(Boolean, nullable=False, default=True)
     command = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=text("now()"), onupdate=text("now()"), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        onupdate=text("now()"),
+        nullable=False,
+    )

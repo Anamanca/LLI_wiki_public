@@ -101,6 +101,7 @@ class LangSmithEvalAdapter:
         def _wrap_evaluator(evaluator: Evaluator):
             def _run(run, example):
                 return evaluator(run, example)
+
             return _run
 
         try:

@@ -7,10 +7,10 @@ semantic meaning in Vietnamese finance contexts. Only strips pure interjections.
 import re
 
 VI_FILLERS = r"\b(à|ừm|nhỉ|nhé|nha|ờ|hả|nè|nhá|đúng không|phải không)\b"
-EN_FILLERS = r"\b(um|uh|like|you know|I mean|sort of|kind of|basically|actually|literally|right|okay|so)\b"
-COMBINED_FILLERS = (
-    r"\b(à|ừm|nhỉ|nhé|nha|um|uh|like|you know|I mean|sort of|kind of|basically|actually|literally)\b"
+EN_FILLERS = (
+    r"\b(um|uh|like|you know|I mean|sort of|kind of|basically|actually|literally|right|okay|so)\b"
 )
+COMBINED_FILLERS = r"\b(à|ừm|nhỉ|nhé|nha|um|uh|like|you know|I mean|sort of|kind of|basically|actually|literally)\b"
 
 
 def preprocess(transcript_text: str, lang: str | None = None) -> str:

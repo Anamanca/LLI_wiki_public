@@ -92,10 +92,14 @@ async def build_pipeline() -> QueryPipeline:
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate the RAG pipeline")
     parser.add_argument("--dataset", required=True, type=Path, help="Path to JSONL dataset")
-    parser.add_argument("--run", action="store_true", help="Push dataset and run evaluation to LangSmith")
+    parser.add_argument(
+        "--run", action="store_true", help="Push dataset and run evaluation to LangSmith"
+    )
     parser.add_argument("--dry-run", action="store_true", help="Run local stub evaluators only")
     parser.add_argument("--output", type=Path, help="Write metrics JSON to this file")
-    parser.add_argument("--dataset-name", default="llm-wiki-rag-eval", help="LangSmith dataset name")
+    parser.add_argument(
+        "--dataset-name", default="llm-wiki-rag-eval", help="LangSmith dataset name"
+    )
     parser.add_argument("--experiment", default="rag-eval", help="LangSmith experiment prefix")
     args = parser.parse_args()
 
@@ -113,9 +117,7 @@ async def main() -> int:
         for example in examples:
             inputs = example.get("inputs", example)
             question = inputs.get("question", "")
-            result = await pipeline.execute(
-                QueryInput(question=question, top_k=10)
-            )
+            result = await pipeline.execute(QueryInput(question=question, top_k=10))
             run = {"outputs": result}
             reference = {
                 "outputs": {

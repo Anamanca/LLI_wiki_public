@@ -19,35 +19,38 @@ import asyncio
 import logging
 import os
 import signal
-import sys
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
-from llm_wiki.shared.datetime_utils import now
-from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from llm_wiki.application.use_cases.ingestion.wiki_integrator import WikiIntegrator
 from llm_wiki.config import settings
+from llm_wiki.infrastructure.entrypoints.health_server import set_health_state, start_health_server
 from llm_wiki.infrastructure.persistence.postgres.database import async_session_factory
 from llm_wiki.infrastructure.persistence.postgres.models import (
-    SourceItem,
-    Source,
+    IngestionLog,
     PageSection,
     PageSnapshot,
-    IngestionLog,
+    Source,
+    SourceItem,
 )
-from llm_wiki.infrastructure.persistence.redis.wiki_queue import pop_wiki_job, push_wiki_job, close_redis
-from llm_wiki.infrastructure.persistence.postgres.worker_heartbeat import set_worker_state, get_worker_state, write_heartbeat
-from llm_wiki.infrastructure.entrypoints.health_server import start_health_server, set_health_state
-from llm_wiki.presentation.dependencies import traced_llm, traced_embedder
-from llm_wiki.application.use_cases.ingestion.wiki_integrator import WikiIntegrator
-from llm_wiki.infrastructure.embedding.ollama_adapter import OllamaEmbeddingAdapter
+from llm_wiki.infrastructure.persistence.postgres.worker_heartbeat import (
+    get_worker_state,
+    set_worker_state,
+    write_heartbeat,
+)
+from llm_wiki.infrastructure.persistence.redis.wiki_queue import (
+    close_redis,
+    pop_wiki_job,
+    push_wiki_job,
+)
 from llm_wiki.infrastructure.telemetry import create_telemetry_adapter
 from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter, set_gauge
 from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
+from llm_wiki.presentation.dependencies import traced_embedder, traced_llm
+from llm_wiki.shared.datetime_utils import now
 
 CONSUMER_ID = int(os.getenv("CONSUMER_ID", str(settings.consumer_id)))
 logger = logging.getLogger(f"wiki-consumer-{CONSUMER_ID}")
@@ -118,16 +121,13 @@ async def _embed_single_text(text: str, sem: asyncio.Semaphore) -> list[float]:
 
     from llm_wiki.config import settings as _settings
 
-    async with sem:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=10.0)
-        ) as client:
-            url = f"{_settings.ollama_host}/api/embed"
-            resp = await client.post(url, json={"model": "bge-m3", "input": [text], "keep_alive": "0s"})
-            resp.raise_for_status()
-            data = resp.json()
-            vectors = data.get("embeddings", [])
-            return vectors[0] if vectors else [0.0] * 1024
+    async with sem, httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+        url = f"{_settings.ollama_host}/api/embed"
+        resp = await client.post(url, json={"model": "bge-m3", "input": [text], "keep_alive": "0s"})
+        resp.raise_for_status()
+        data = resp.json()
+        vectors = data.get("embeddings", [])
+        return vectors[0] if vectors else [0.0] * 1024
 
 
 async def _save_section_vectors(page_id_str: str | None, db: AsyncSession) -> int:
@@ -175,6 +175,7 @@ async def _save_section_vectors(page_id_str: str | None, db: AsyncSession) -> in
 async def process_wiki_job(item_id: UUID) -> None:
     """Read item from DB, run wiki integration, embed sections, mark completed."""
     import time as _time
+
     _job_start = _time.monotonic()
     async with async_session_factory() as db:
         item = await db.get(SourceItem, item_id)
@@ -201,7 +202,9 @@ async def process_wiki_job(item_id: UUID) -> None:
         # Pass 1 in integrate_wiki will self-classify with 100% coverage.
         use_merged_path = not classification.get("main_topic")
         if use_merged_path:
-            logger.info("Wiki consumer %d: MERGE_CLASSIFY path — Pass 1 will self-classify", CONSUMER_ID)
+            logger.info(
+                "Wiki consumer %d: MERGE_CLASSIFY path — Pass 1 will self-classify", CONSUMER_ID
+            )
 
         source = await db.get(Source, item.source_id)
         source_name = source.name if source else "unknown"
@@ -242,9 +245,20 @@ async def process_wiki_job(item_id: UUID) -> None:
                 item.external_id,
                 cached_page_id,
             )
-            await _log_event(db, item.id, "wiki_start", "Skipping wiki integration (page already created) — retrying embedding")
-            await _telemetry.add_metadata(root_span, {"fast_path": True, "cached_page_id": cached_page_id})
-            wiki_result = {"action": "updated", "page_id": cached_page_id, "page_title": item.title or cached_page_id}
+            await _log_event(
+                db,
+                item.id,
+                "wiki_start",
+                "Skipping wiki integration (page already created) — retrying embedding",
+            )
+            await _telemetry.add_metadata(
+                root_span, {"fast_path": True, "cached_page_id": cached_page_id}
+            )
+            wiki_result = {
+                "action": "updated",
+                "page_id": cached_page_id,
+                "page_title": item.title or cached_page_id,
+            }
         else:
             await _log_event(db, item.id, "wiki_start", "Integrating into wiki (async consumer)")
 
@@ -277,9 +291,13 @@ async def process_wiki_job(item_id: UUID) -> None:
                     ),
                     timeout=1800.0,
                 )
-            except asyncio.TimeoutError:
-                await _telemetry.end_span(span=root_span, error="Wiki integration timed out after 30 min")
-                logger.error("Wiki consumer %d: wiki integrate timed out for %s", CONSUMER_ID, item.id)
+            except TimeoutError:
+                await _telemetry.end_span(
+                    span=root_span, error="Wiki integration timed out after 30 min"
+                )
+                logger.error(
+                    "Wiki consumer %d: wiki integrate timed out for %s", CONSUMER_ID, item.id
+                )
                 await db.rollback()
                 item.retry_count = (item.retry_count or 0) + 1
                 item.error_message = "Wiki integration timed out after 30 min"
@@ -287,7 +305,10 @@ async def process_wiki_job(item_id: UUID) -> None:
                 if item.retry_count > WIKI_MAX_RETRIES:
                     item.status = "failed"
                     item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: timeout"
-                    inc_counter("ingestion_jobs_total", {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)})
+                    inc_counter(
+                        "ingestion_jobs_total",
+                        {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
+                    )
                     logger.warning(
                         "Wiki consumer %d: %s permanently failed after %d wiki attempts",
                         CONSUMER_ID,
@@ -297,14 +318,21 @@ async def process_wiki_job(item_id: UUID) -> None:
                 else:
                     item.status = "classified"
                 await db.commit()
-                await _log_event(db, item.id, "wiki_timeout", f"Wiki integration timed out (attempt {item.retry_count})")
+                await _log_event(
+                    db,
+                    item.id,
+                    "wiki_timeout",
+                    f"Wiki integration timed out (attempt {item.retry_count})",
+                )
                 if item.status == "classified":
                     await push_wiki_job(item.id)
                 return
             except Exception as exc:
                 await _telemetry.end_span(span=root_span, error=str(exc)[:500])
                 error_str = str(exc)
-                logger.error("Wiki consumer %d: wiki integrate failed for %s: %s", CONSUMER_ID, item.id, exc)
+                logger.error(
+                    "Wiki consumer %d: wiki integrate failed for %s: %s", CONSUMER_ID, item.id, exc
+                )
                 await db.rollback()
                 item.retry_count = (item.retry_count or 0) + 1
                 item.error_message = f"Wiki integration failed: {error_str[:500]}"
@@ -312,7 +340,10 @@ async def process_wiki_job(item_id: UUID) -> None:
                 if item.retry_count > WIKI_MAX_RETRIES:
                     item.status = "failed"
                     item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: {error_str[:400]}"
-                    inc_counter("ingestion_jobs_total", {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)})
+                    inc_counter(
+                        "ingestion_jobs_total",
+                        {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
+                    )
                     logger.warning(
                         "Wiki consumer %d: %s permanently failed after %d wiki attempts",
                         CONSUMER_ID,
@@ -322,7 +353,12 @@ async def process_wiki_job(item_id: UUID) -> None:
                 else:
                     item.status = "classified"
                 await db.commit()
-                await _log_event(db, item.id, "wiki_failed", f"Wiki integration failed (attempt {item.retry_count}): {exc}")
+                await _log_event(
+                    db,
+                    item.id,
+                    "wiki_failed",
+                    f"Wiki integration failed (attempt {item.retry_count}): {exc}",
+                )
                 if item.status == "classified":
                     await push_wiki_job(item.id)
                 return
@@ -359,9 +395,11 @@ async def process_wiki_job(item_id: UUID) -> None:
                 span=embed_span,
                 outputs={"section_count": section_count},
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await _telemetry.end_span(span=embed_span, error="section embedding timeout")
-            logger.error("Wiki consumer %d: section embedding timed out for %s", CONSUMER_ID, item.id)
+            logger.error(
+                "Wiki consumer %d: section embedding timed out for %s", CONSUMER_ID, item.id
+            )
             await db.rollback()
             item.retry_count = (item.retry_count or 0) + 1
             item.error_message = "Section embedding timed out after 300s"
@@ -369,7 +407,10 @@ async def process_wiki_job(item_id: UUID) -> None:
             if item.retry_count > WIKI_MAX_RETRIES:
                 item.status = "failed"
                 item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: section embedding timeout"
-                inc_counter("ingestion_jobs_total", {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)})
+                inc_counter(
+                    "ingestion_jobs_total",
+                    {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)},
+                )
                 logger.warning(
                     "Wiki consumer %d: %s permanently failed after %d embed attempts",
                     CONSUMER_ID,
@@ -379,13 +420,20 @@ async def process_wiki_job(item_id: UUID) -> None:
             else:
                 item.status = "classified"
             await db.commit()
-            await _log_event(db, item.id, "embed_timeout", f"Section embedding timed out (attempt {item.retry_count})")
+            await _log_event(
+                db,
+                item.id,
+                "embed_timeout",
+                f"Section embedding timed out (attempt {item.retry_count})",
+            )
             if item.status == "classified":
                 await push_wiki_job(item.id)
             return
         except Exception as exc:
             await _telemetry.end_span(span=embed_span, error=str(exc)[:500])
-            logger.error("Wiki consumer %d: section embedding failed for %s: %s", CONSUMER_ID, item.id, exc)
+            logger.error(
+                "Wiki consumer %d: section embedding failed for %s: %s", CONSUMER_ID, item.id, exc
+            )
             await db.rollback()
             item.retry_count = (item.retry_count or 0) + 1
             item.error_message = f"Section embedding failed: {str(exc)[:500]}"
@@ -393,7 +441,10 @@ async def process_wiki_job(item_id: UUID) -> None:
             if item.retry_count > WIKI_MAX_RETRIES:
                 item.status = "failed"
                 item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: section embedding error"
-                inc_counter("ingestion_jobs_total", {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)})
+                inc_counter(
+                    "ingestion_jobs_total",
+                    {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)},
+                )
                 logger.warning(
                     "Wiki consumer %d: %s permanently failed after %d embed attempts",
                     CONSUMER_ID,
@@ -403,7 +454,12 @@ async def process_wiki_job(item_id: UUID) -> None:
             else:
                 item.status = "classified"
             await db.commit()
-            await _log_event(db, item.id, "embed_failed", f"Section embedding failed (attempt {item.retry_count}): {exc}")
+            await _log_event(
+                db,
+                item.id,
+                "embed_failed",
+                f"Section embedding failed (attempt {item.retry_count}): {exc}",
+            )
             if item.status == "classified":
                 await push_wiki_job(item.id)
             return
@@ -413,13 +469,16 @@ async def process_wiki_job(item_id: UUID) -> None:
         item.status = "completed"
         item.error_message = None
         await db.commit()
-        inc_counter("ingestion_jobs_total", {"status": "completed", "stage": "wiki", "worker_id": str(CONSUMER_ID)})
-        get_metrics().histogram("ingestion_job_duration_seconds", _time.monotonic() - _job_start, {"stage": "wiki"})
+        inc_counter(
+            "ingestion_jobs_total",
+            {"status": "completed", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
+        )
+        get_metrics().histogram(
+            "ingestion_job_duration_seconds", _time.monotonic() - _job_start, {"stage": "wiki"}
+        )
 
         # Clean up snapshots
-        await db.execute(
-            delete(PageSnapshot).where(PageSnapshot.source_item_id == item.id)
-        )
+        await db.execute(delete(PageSnapshot).where(PageSnapshot.source_item_id == item.id))
         await db.commit()
 
         await _log_event(
@@ -513,8 +572,15 @@ async def main() -> None:
             except Exception as exc:
                 set_worker_state(CONSUMER_ID, "idle")
                 error_str = str(exc).lower()
-                if "recovery mode" in error_str or "operationalerror" in error_str or "connection" in error_str:
-                    logger.critical("Wiki consumer %d: DB offline or in recovery. Sleeping for 60s.", CONSUMER_ID)
+                if (
+                    "recovery mode" in error_str
+                    or "operationalerror" in error_str
+                    or "connection" in error_str
+                ):
+                    logger.critical(
+                        "Wiki consumer %d: DB offline or in recovery. Sleeping for 60s.",
+                        CONSUMER_ID,
+                    )
                     await asyncio.sleep(60)
                 else:
                     logger.error("Wiki consumer %d error: %s", CONSUMER_ID, exc)

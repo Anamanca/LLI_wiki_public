@@ -1,14 +1,13 @@
-import pytest
 from uuid import uuid4
 
-from llm_wiki.domain.entities.source import Source, SourceItem
-from llm_wiki.domain.entities.page import Page, PageSection
-from llm_wiki.domain.entities.event import EventCanonical, EventObservation
-from llm_wiki.domain.entities.entity import Entity
-from llm_wiki.domain.value_objects.identifiers import SourceId, SourceItemId, PageId, EventId
+import pytest
+
+from llm_wiki.domain.entities.page import Page
+from llm_wiki.domain.entities.source import SourceItem
+from llm_wiki.domain.exceptions import EntityNotFoundError
 from llm_wiki.domain.value_objects.embedding import Embedding, SearchResult
-from llm_wiki.domain.value_objects.status import SourceItemStatus, PageStatus
-from llm_wiki.domain.exceptions import EntityNotFoundError, InvalidStatusTransitionError
+from llm_wiki.domain.value_objects.identifiers import PageId, SourceId, SourceItemId
+from llm_wiki.domain.value_objects.status import PageStatus, SourceItemStatus
 
 
 class TestSourceItem:
@@ -79,6 +78,7 @@ class TestDomainExceptions:
 
     def test_ingestion_failed(self):
         from llm_wiki.domain.exceptions import IngestionFailedError
+
         exc = IngestionFailedError("item-1", "timeout", retryable=True)
         assert exc.retryable is True
         assert "item-1" in str(exc)

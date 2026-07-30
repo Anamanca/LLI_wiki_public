@@ -8,15 +8,12 @@ from typing import Any
 
 from llm_wiki.application.ports.search.vector_search import LLMClientPort
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
-from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter, track_duration
+from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter
 
 
 def _redacted_messages(messages: list[dict]) -> list[dict]:
     """Store message roles and rough lengths; avoid logging full content."""
-    return [
-        {"role": m.get("role"), "content_length": len(m.get("content", ""))}
-        for m in messages
-    ]
+    return [{"role": m.get("role"), "content_length": len(m.get("content", ""))} for m in messages]
 
 
 class TracedLLMWrapper(LLMClientPort):
@@ -69,9 +66,17 @@ class TracedLLMWrapper(LLMClientPort):
             self.last_usage = usage
             if usage:
                 if usage.get("prompt_tokens"):
-                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "input"}, usage["prompt_tokens"])
+                    inc_counter(
+                        "llm_tokens_used_total",
+                        {"model": self._model, "direction": "input"},
+                        usage["prompt_tokens"],
+                    )
                 if usage.get("completion_tokens"):
-                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "output"}, usage["completion_tokens"])
+                    inc_counter(
+                        "llm_tokens_used_total",
+                        {"model": self._model, "direction": "output"},
+                        usage["completion_tokens"],
+                    )
             await self._telemetry.end_span(
                 span=span,
                 outputs={
@@ -129,9 +134,17 @@ class TracedLLMWrapper(LLMClientPort):
             self.last_usage = usage
             if usage:
                 if usage.get("prompt_tokens"):
-                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "input"}, usage["prompt_tokens"])
+                    inc_counter(
+                        "llm_tokens_used_total",
+                        {"model": self._model, "direction": "input"},
+                        usage["prompt_tokens"],
+                    )
                 if usage.get("completion_tokens"):
-                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "output"}, usage["completion_tokens"])
+                    inc_counter(
+                        "llm_tokens_used_total",
+                        {"model": self._model, "direction": "output"},
+                        usage["completion_tokens"],
+                    )
             content = ""
             if isinstance(data, dict):
                 choices = data.get("choices", [{}])
@@ -197,9 +210,17 @@ class TracedLLMWrapper(LLMClientPort):
             reasoning_content = (result or {}).get("reasoning_content", "")
             if usage:
                 if usage.get("prompt_tokens"):
-                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "input"}, usage["prompt_tokens"])
+                    inc_counter(
+                        "llm_tokens_used_total",
+                        {"model": self._model, "direction": "input"},
+                        usage["prompt_tokens"],
+                    )
                 if usage.get("completion_tokens"):
-                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "output"}, usage["completion_tokens"])
+                    inc_counter(
+                        "llm_tokens_used_total",
+                        {"model": self._model, "direction": "output"},
+                        usage["completion_tokens"],
+                    )
             await self._telemetry.end_span(
                 span=span,
                 outputs={
@@ -261,9 +282,17 @@ class TracedLLMWrapper(LLMClientPort):
             self.last_usage = usage
             if usage:
                 if usage.get("prompt_tokens"):
-                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "input"}, usage["prompt_tokens"])
+                    inc_counter(
+                        "llm_tokens_used_total",
+                        {"model": self._model, "direction": "input"},
+                        usage["prompt_tokens"],
+                    )
                 if usage.get("completion_tokens"):
-                    inc_counter("llm_tokens_used_total", {"model": self._model, "direction": "output"}, usage["completion_tokens"])
+                    inc_counter(
+                        "llm_tokens_used_total",
+                        {"model": self._model, "direction": "output"},
+                        usage["completion_tokens"],
+                    )
             await self._telemetry.end_span(
                 span=span,
                 outputs={

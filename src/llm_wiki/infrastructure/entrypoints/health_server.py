@@ -31,11 +31,13 @@ def set_health_state(status: str, stage: str | None = None) -> None:
 
 
 async def _handle_health(writer) -> None:
-    body = json.dumps({
-        "service": SERVICE_NAME,
-        **_state,
-        "uptime_seconds": int(time.time() - _start_time),
-    })
+    body = json.dumps(
+        {
+            "service": SERVICE_NAME,
+            **_state,
+            "uptime_seconds": int(time.time() - _start_time),
+        }
+    )
     response = (
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
@@ -50,6 +52,7 @@ async def _handle_health(writer) -> None:
 async def _handle_metrics(writer) -> None:
     try:
         from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
+
         data = get_metrics().get_metrics_response()
     except Exception:
         data = b""

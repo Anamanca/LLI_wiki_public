@@ -11,15 +11,14 @@ import hashlib
 import logging
 import time
 from datetime import datetime
-from llm_wiki.shared.datetime_utils import now, get_system_tz
 from typing import Any
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.config import settings
 from llm_wiki.infrastructure.persistence.postgres.database import async_session_factory
 from llm_wiki.infrastructure.persistence.postgres.models import ApiKey
+from llm_wiki.shared.datetime_utils import get_system_tz, now
 
 logger = logging.getLogger(__name__)
 
@@ -101,17 +100,21 @@ class ApiKeyManager:
         seed_keys: list[dict[str, str]] = []
 
         if settings.opencode_api_key:
-            seed_keys.append({
-                "provider": "opencode",
-                "api_key": settings.opencode_api_key,
-                "model_name": settings.opencode_primary_model,
-            })
+            seed_keys.append(
+                {
+                    "provider": "opencode",
+                    "api_key": settings.opencode_api_key,
+                    "model_name": settings.opencode_primary_model,
+                }
+            )
         if settings.gemini_api_key:
-            seed_keys.append({
-                "provider": "gemini",
-                "api_key": settings.gemini_api_key,
-                "model_name": settings.gemini_primary_model,
-            })
+            seed_keys.append(
+                {
+                    "provider": "gemini",
+                    "api_key": settings.gemini_api_key,
+                    "model_name": settings.gemini_primary_model,
+                }
+            )
 
         if not seed_keys:
             return
@@ -123,15 +126,19 @@ class ApiKeyManager:
                     select(ApiKey).where(ApiKey.provider == sk["provider"]).limit(1)
                 )
                 if existing.scalar_one_or_none() is None:
-                    session.add(ApiKey(
-                        provider=sk["provider"],
-                        api_key=sk["api_key"],
-                        model_name=sk["model_name"],
-                        status="active",
-                        priority=0,
-                    ))
+                    session.add(
+                        ApiKey(
+                            provider=sk["provider"],
+                            api_key=sk["api_key"],
+                            model_name=sk["model_name"],
+                            status="active",
+                            priority=0,
+                        )
+                    )
                     self._env_fallback_configured = True
-                    logger.info("Seeded API key from env: provider=%s hash=%s", sk["provider"], key_hash)
+                    logger.info(
+                        "Seeded API key from env: provider=%s hash=%s", sk["provider"], key_hash
+                    )
 
             await session.commit()
 
@@ -164,10 +171,7 @@ class ApiKeyManager:
                 self._recovery_task = asyncio.create_task(self._auto_recover_loop())
                 logger.info("API key auto-recovery background task started")
 
-        active_keys = [
-            k for k in self._keys
-            if k["status"] == "active" and k["api_key"]
-        ]
+        active_keys = [k for k in self._keys if k["status"] == "active" and k["api_key"]]
 
         if not active_keys:
             return self._env_fallback_config()
@@ -225,10 +229,7 @@ class ApiKeyManager:
         """Return the currently active provider config without advancing round-robin."""
         await self._ensure_cache()
 
-        active_keys = [
-            k for k in self._keys
-            if k["status"] == "active" and k["api_key"]
-        ]
+        active_keys = [k for k in self._keys if k["status"] == "active" and k["api_key"]]
 
         if not active_keys:
             return self._env_fallback_config()

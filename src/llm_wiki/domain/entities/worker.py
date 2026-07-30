@@ -1,33 +1,32 @@
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 
 @dataclass
 class WorkerHeartbeat:
     worker_id: int
     status: str = "idle"
-    current_job_id: Optional[str] = None
-    current_stage: Optional[str] = None
-    stage_started_at: Optional[datetime] = None
-    last_heartbeat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    cpu_percent: Optional[int] = None
-    error_message: Optional[str] = None
+    current_job_id: str | None = None
+    current_stage: str | None = None
+    stage_started_at: datetime | None = None
+    last_heartbeat: datetime = field(default_factory=lambda: datetime.now(UTC))
+    cpu_percent: int | None = None
+    error_message: str | None = None
 
 
 @dataclass
 class TelegramSubscriber:
     chat_id: int
-    username: Optional[str] = None
-    subscribed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    username: str | None = None
+    subscribed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     is_active: bool = True
 
 
 @dataclass
 class ScanLock:
     scan_date: "date"
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    completed_at: Optional[datetime] = None
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    completed_at: datetime | None = None
 
 
 @dataclass
@@ -38,11 +37,11 @@ class ApiKey:
     model_name: str = "deepseek-v4-flash"
     status: str = "active"
     priority: int = 0
-    rate_limited_until: Optional[datetime] = None
+    rate_limited_until: datetime | None = None
     usage_count: int = 0
-    last_used_at: Optional[datetime] = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_used_at: datetime | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass
@@ -51,10 +50,10 @@ class CronJob:
     job_id: str
     name: str
     schedule: str
-    description: Optional[str] = None
+    description: str | None = None
     job_type: str = "background_task"
     managed: bool = True
     enabled: bool = True
-    command: Optional[str] = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    command: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))

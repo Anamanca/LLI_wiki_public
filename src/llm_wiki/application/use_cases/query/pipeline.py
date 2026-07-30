@@ -5,8 +5,6 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta
-
-from llm_wiki.shared.datetime_utils import now
 from typing import Any
 
 from llm_wiki.application.dto.query_dto import QueryInput
@@ -29,6 +27,7 @@ from llm_wiki.domain.value_objects.embedding import Embedding, SearchResult
 from llm_wiki.domain.value_objects.time_range import TimeRange
 from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter
 from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
+from llm_wiki.shared.datetime_utils import now
 
 root_logger = logging.getLogger()
 logger = logging.getLogger(__name__)
@@ -39,11 +38,11 @@ logger = logging.getLogger(__name__)
 # comparative: mild ~138 days        |  general: default ~69 days
 
 _RECENCY_LAMBDA_MAP: dict[str, float] = {
-    "current_state": 0.05,   # ~14 ngày half-life
-    "general":       0.01,   # ~69 ngày
-    "historical":    0.0,    # không decay — cần thông tin cũ
-    "timeline":      0.0,    # không decay — diễn biến cần mọi thời điểm
-    "comparative":   0.005,  # ~138 ngày
+    "current_state": 0.05,  # ~14 ngày half-life
+    "general": 0.01,  # ~69 ngày
+    "historical": 0.0,  # không decay — cần thông tin cũ
+    "timeline": 0.0,  # không decay — diễn biến cần mọi thời điểm
+    "comparative": 0.005,  # ~138 ngày
 }
 
 
@@ -76,8 +75,8 @@ def recency_decay_for_intent(intent: str) -> float:
 
 # ── Cache tuning constants (P3: variable TTL) ──────────────────────────
 
-_SHORT_TTL = 3600       # 1 hour — answers that depend on "today" / "this week"
-_LONG_TTL = 86400       # 24 hours — factual answers that rarely change
+_SHORT_TTL = 3600  # 1 hour — answers that depend on "today" / "this week"
+_LONG_TTL = 86400  # 24 hours — factual answers that rarely change
 _SEMANTIC_THRESHOLD = 0.80  # cosine similarity floor for semantic cache hit
 # Tuned to 0.80 after empirical testing: paraphrased Vietnamese questions with
 # same intent typically range 0.80–0.88 against the stored embedding.
@@ -85,15 +84,26 @@ _SEMANTIC_THRESHOLD = 0.80  # cosine similarity floor for semantic cache hit
 # the purpose of semantic cache.
 
 _TIME_SENSITIVE_PATTERNS: list[str] = [
-    r"hôm\s*nay", r"today",
-    r"hôm\s*qua", r"yesterday",
-    r"ngày\s*mai", r"tomorrow",
-    r"tuần\s*này", r"this\s+week",
-    r"tháng\s*này", r"this\s+month",
-    r"năm\s*nay", r"this\s+year",
-    r"mới\s*nhất", r"latest",
-    r"gần\s*đây", r"recent(?:ly)?",
-    r"hiện\s*tại", r"currently", r"now", r"bây\s*giờ",
+    r"hôm\s*nay",
+    r"today",
+    r"hôm\s*qua",
+    r"yesterday",
+    r"ngày\s*mai",
+    r"tomorrow",
+    r"tuần\s*này",
+    r"this\s+week",
+    r"tháng\s*này",
+    r"this\s+month",
+    r"năm\s*nay",
+    r"this\s+year",
+    r"mới\s*nhất",
+    r"latest",
+    r"gần\s*đây",
+    r"recent(?:ly)?",
+    r"hiện\s*tại",
+    r"currently",
+    r"now",
+    r"bây\s*giờ",
 ]
 
 _TIME_PATTERNS = [
@@ -144,12 +154,29 @@ _TIME_PATTERNS = [
 ]
 
 _MONTH_MAP = {
-    "jan": 1, "january": 1, "feb": 2, "february": 2,
-    "mar": 3, "march": 3, "apr": 4, "april": 4,
-    "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
-    "aug": 8, "august": 8, "sep": 9, "september": 9,
-    "oct": 10, "october": 10, "nov": 11, "november": 11,
-    "dec": 12, "december": 12,
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
 }
 
 
@@ -208,10 +235,10 @@ def _may_be_time_related(question: str) -> bool:
 
 INTENT_WEIGHTS: dict[str, dict[str, float]] = {
     "current_state": {"events": 1.0, "sections": 0.7},
-    "historical":    {"events": 0.8, "sections": 0.5},
-    "timeline":      {"events": 1.0, "sections": 0.3},
-    "comparative":   {"events": 0.5, "sections": 0.8},
-    "general":       {"events": 0.4, "sections": 1.0},
+    "historical": {"events": 0.8, "sections": 0.5},
+    "timeline": {"events": 1.0, "sections": 0.3},
+    "comparative": {"events": 0.5, "sections": 0.8},
+    "general": {"events": 0.4, "sections": 1.0},
 }
 
 # Keyword streams get this fraction of their corresponding vector stream weight.
@@ -337,6 +364,8 @@ def _enforce_time_boundary(
             filtered.append(r)
 
     return filtered
+
+
 # ── Language detection ─────────────────────────────────────────────────
 # Zero-token regex-based detection. The analyzer also outputs "language",
 # but this regex fallback covers the case where the analyzer fails or is
@@ -426,8 +455,14 @@ def _set_parent_on_wrappers(
     under *parent*, building a single tree on LangSmith.
     """
     for wrapped in (
-        embedder, vector_search, keyword_search, llm, cache,
-        rewriter, analyzer, event_search,
+        embedder,
+        vector_search,
+        keyword_search,
+        llm,
+        cache,
+        rewriter,
+        analyzer,
+        event_search,
     ):
         if wrapped is None:
             continue
@@ -490,7 +525,7 @@ class QueryPipeline:
         """
         q = question.lower().strip()
         q = re.sub(r"[^\w\s]", "", q)  # remove punctuation
-        q = re.sub(r"\s+", " ", q)     # collapse whitespace
+        q = re.sub(r"\s+", " ", q)  # collapse whitespace
         return q
 
     @staticmethod
@@ -567,12 +602,12 @@ class QueryPipeline:
     async def _extract_time_range_with_llm(self, question: str) -> TimeRange | None:
         now_ts = now().replace(tzinfo=None)
         prompt = (
-            'Extract the time range from this question. '
+            "Extract the time range from this question. "
             'Return ONLY a JSON object: {"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"} '
             'or {"start_date": null, "end_date": null} if no time range is implied. '
             'Use "now" as end_date for relative times like "past month" or "recent". '
-            f'Today is {now.strftime("%Y-%m-%d")}. '
-            f'Question: {question}'
+            f"Today is {now.strftime('%Y-%m-%d')}. "
+            f"Question: {question}"
         )
         try:
             raw = await self._llm.chat_completion(
@@ -652,7 +687,9 @@ class QueryPipeline:
                 date_str = f", {str(published_at)[:10]}"
 
             # Event-specific quality indicators
-            observation_count = result.metadata.get("observation_count") if result.metadata else None
+            observation_count = (
+                result.metadata.get("observation_count") if result.metadata else None
+            )
             stance = result.metadata.get("stance", "") if result.metadata else ""
             sentiment_score = result.metadata.get("sentiment_score") if result.metadata else None
 
@@ -698,13 +735,17 @@ class QueryPipeline:
         # Build parallel tasks — always at least vector + keyword sections
         async def _vec_sections():
             return await self._vector_search.search_similar(
-                query_embedding, top_k=input.top_k * 2,
-                source_id=input.source_id, time_range=time_range,
+                query_embedding,
+                top_k=input.top_k * 2,
+                source_id=input.source_id,
+                time_range=time_range,
             )
 
         async def _kw_sections():
             return await self._keyword_search.search_keyword(
-                kw_query, top_k=input.top_k, time_range=time_range,
+                kw_query,
+                top_k=input.top_k,
+                time_range=time_range,
             )
 
         tasks: list[tuple[str, Any]] = [
@@ -713,14 +754,19 @@ class QueryPipeline:
         ]
 
         if self._event_search:
+
             async def _vec_events():
                 return await self._event_search.search_events(
-                    query_embedding, top_k=input.top_k * 2, time_range=time_range,
+                    query_embedding,
+                    top_k=input.top_k * 2,
+                    time_range=time_range,
                 )
 
             async def _kw_events():
                 return await self._event_search.search_events_keyword(
-                    kw_query, top_k=input.top_k, time_range=time_range,
+                    kw_query,
+                    top_k=input.top_k,
+                    time_range=time_range,
                 )
 
             tasks.append(("events", _timed(_vec_events)))
@@ -728,10 +774,14 @@ class QueryPipeline:
 
         # GraphRAG: traverse knowledge graph when entities are detected
         if self._graph_rag and entities:
+
             async def _graph():
                 return await self._graph_rag.traverse(
-                    entities, top_k=10, time_range=time_range,
+                    entities,
+                    top_k=10,
+                    time_range=time_range,
                 )
+
             tasks.append(("graph", _timed(_graph)))
 
         # Run all tasks in parallel
@@ -759,7 +809,7 @@ class QueryPipeline:
         # Hard time-boundary enforcement: when the user asks about a specific
         # time range, exclude results whose date falls outside it.
         in_range = _enforce_time_boundary(diversified, time_range)
-        top_results = in_range[:input.top_k]
+        top_results = in_range[: input.top_k]
 
         return result_sets, top_results, step_times
 
@@ -783,8 +833,12 @@ class QueryPipeline:
                 },
             )
             _set_parent_on_wrappers(
-                self._embedder, self._vector_search, self._keyword_search,
-                self._llm, self._cache, root_span,
+                self._embedder,
+                self._vector_search,
+                self._keyword_search,
+                self._llm,
+                self._cache,
+                root_span,
                 rewriter=self._rewriter,
                 analyzer=self._analyzer,
                 event_search=self._event_search,
@@ -890,8 +944,11 @@ class QueryPipeline:
 
         # ── Multi-retrieval (parallel) + weighted RRF + diversity ───
         _, top_results, search_step_times = await self._retrieve_and_merge(
-            input, query_embedding, time_range,
-            intent=intent, rewritten_question=rewritten,
+            input,
+            query_embedding,
+            time_range,
+            intent=intent,
+            rewritten_question=rewritten,
             entities=analysis.entities if analysis.entities else None,
             analysis=analysis,
         )
@@ -999,7 +1056,9 @@ class QueryPipeline:
         )
         # Also store embedding for semantic cache (P2)
         _, step_times["semantic_cache_save"] = await _timed(
-            lambda: self._cache.semantic_set(cache_key, query_embedding.vector, result_json, ttl=ttl),
+            lambda: self._cache.semantic_set(
+                cache_key, query_embedding.vector, result_json, ttl=ttl
+            ),
         )
 
         inc_counter("query_total", {"status": "success", "cache": "miss"})
@@ -1046,8 +1105,12 @@ class QueryPipeline:
                 },
             )
             _set_parent_on_wrappers(
-                self._embedder, self._vector_search, self._keyword_search,
-                self._llm, self._cache, root_span,
+                self._embedder,
+                self._vector_search,
+                self._keyword_search,
+                self._llm,
+                self._cache,
+                root_span,
                 rewriter=self._rewriter,
                 analyzer=self._analyzer,
                 event_search=self._event_search,
@@ -1083,7 +1146,9 @@ class QueryPipeline:
                     lambda: self._rewriter.rewrite(input.question, input.chat_history)
                 )
                 if rewritten != input.question:
-                    logger.debug("Stream: question rewritten: %r → %r", input.question[:80], rewritten[:80])
+                    logger.debug(
+                        "Stream: question rewritten: %r → %r", input.question[:80], rewritten[:80]
+                    )
 
             query_embedding, step_times["embed"] = await _timed(
                 lambda: self._embedder.embed(rewritten),
@@ -1136,8 +1201,11 @@ class QueryPipeline:
 
             # ── Multi-retrieval (parallel) + weighted RRF + diversity ───
             _, top_results, search_step_times = await self._retrieve_and_merge(
-                input, query_embedding, time_range,
-                intent=intent, rewritten_question=rewritten,
+                input,
+                query_embedding,
+                time_range,
+                intent=intent,
+                rewritten_question=rewritten,
                 entities=analysis.entities if analysis.entities else None,
                 analysis=analysis,
             )
@@ -1230,11 +1298,11 @@ class QueryPipeline:
                     )
                     # Chunk the fallback result so the UI receives tokens
                     for i in range(0, len(full_answer), 30):
-                        yield {"type": "token", "data": full_answer[i:i + 30]}
+                        yield {"type": "token", "data": full_answer[i : i + 30]}
                 except Exception:
                     full_answer = "Xin lỗi, không thể tạo câu trả lời. Vui lòng thử lại."
                     for i in range(0, len(full_answer), 30):
-                        yield {"type": "token", "data": full_answer[i:i + 30]}
+                        yield {"type": "token", "data": full_answer[i : i + 30]}
             root_logger.warning("[STREAM] answer_len=%d", len(full_answer))
 
             yield {"type": "status", "data": {"status": "summarizing"}}

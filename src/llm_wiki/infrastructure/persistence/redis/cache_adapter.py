@@ -1,7 +1,6 @@
 import json
 import logging
 import math
-from typing import Optional
 
 import redis.asyncio as redis
 
@@ -30,7 +29,7 @@ class RedisCacheAdapter(CacheServicePort):
             self._client = redis.from_url(settings.redis_url, decode_responses=True)
         return self._client
 
-    async def get(self, key: str) -> Optional[str]:
+    async def get(self, key: str) -> str | None:
         try:
             client = await self._ensure_client()
             return await client.get(key)
@@ -54,9 +53,7 @@ class RedisCacheAdapter(CacheServicePort):
 
     # ── semantic cache ────────────────────────────────────────────────────
 
-    async def semantic_get(
-        self, embedding: list[float], threshold: float = 0.95
-    ) -> str | None:
+    async def semantic_get(self, embedding: list[float], threshold: float = 0.95) -> str | None:
         """Scan all stored question embeddings and return the best match above *threshold*."""
         try:
             client = await self._ensure_client()

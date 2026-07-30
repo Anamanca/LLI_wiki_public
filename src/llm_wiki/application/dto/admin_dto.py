@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -15,7 +14,7 @@ class CronJobInput:
     job_id: str
     name: str
     schedule: str
-    description: Optional[str] = None
+    description: str | None = None
     job_type: str = "background_task"
     enabled: bool = True
-    command: Optional[str] = None
+    command: str | None = None

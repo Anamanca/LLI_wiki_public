@@ -36,8 +36,7 @@ def get_metrics():
         logger.info("Prometheus metrics adapter initialised")
     except Exception:
         logger.warning(
-            "Failed to initialise Prometheus metrics adapter. "
-            "Falling back to no-op adapter.",
+            "Failed to initialise Prometheus metrics adapter. Falling back to no-op adapter.",
             exc_info=True,
         )
         _metrics = _create_null_adapter()

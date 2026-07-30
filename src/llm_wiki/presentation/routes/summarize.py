@@ -1,16 +1,18 @@
 from datetime import timedelta
 
-from llm_wiki.shared.datetime_utils import now
-
-from fastapi import APIRouter, Depends, Query as FastQuery
+from fastapi import APIRouter, Depends
+from fastapi import Query as FastQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.presentation.dependencies import container, get_db, traced_llm
-from llm_wiki.infrastructure.persistence.postgres.repositories.event_repository import PostgresEventRepository
 from llm_wiki.application.use_cases.query.summarize_time_range import (
     SummarizeTimeRangeUseCase,
     TimeRangeSummaryInput,
 )
+from llm_wiki.infrastructure.persistence.postgres.repositories.event_repository import (
+    PostgresEventRepository,
+)
+from llm_wiki.presentation.dependencies import get_db, traced_llm
+from llm_wiki.shared.datetime_utils import now
 
 router = APIRouter()
 
@@ -27,10 +29,12 @@ async def summarize_time_range(
         event_repo=PostgresEventRepository(db),
         llm=traced_llm("summarize_time_range"),
     )
-    result = await use_case.execute(TimeRangeSummaryInput(
-        start=start,
-        end=now_ts,
-    ))
+    result = await use_case.execute(
+        TimeRangeSummaryInput(
+            start=start,
+            end=now_ts,
+        )
+    )
     return {
         "summary": result.summary_text,
         "time_range": {

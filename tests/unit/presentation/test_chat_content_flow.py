@@ -33,18 +33,22 @@ def _simulate_chat_messages(messages, is_loading, status_label, pending_answer, 
     """Reproduce the final state ChatMessages would render."""
     rendered = list(messages)
     if is_loading:
-        rendered.append({
-            "id": "loading",
-            "role": "assistant",
-            "content": "",
-            "status_label": status_label,
-        })
+        rendered.append(
+            {
+                "id": "loading",
+                "role": "assistant",
+                "content": "",
+                "status_label": status_label,
+            }
+        )
     else:
         # final update effect: assign answer to pending assistant message
         rendered = [
             {
                 **m,
-                "content": pending_answer if m["role"] == "assistant" and m["content"] == "" else m["content"],
+                "content": pending_answer
+                if m["role"] == "assistant" and m["content"] == ""
+                else m["content"],
                 "citations": pending_citations if m["role"] == "assistant" else m.get("citations"),
             }
             for m in rendered
@@ -65,17 +69,25 @@ def test_chat_flow_question_to_answer():
 
     messages = [
         {"id": user_id, "role": "user", "content": question, "timestamp": "2026-07-21T00:00:00Z"},
-        {"id": assistant_id, "role": "assistant", "content": "", "citations": [], "timestamp": "2026-07-21T00:00:00Z"},
+        {
+            "id": assistant_id,
+            "role": "assistant",
+            "content": "",
+            "citations": [],
+            "timestamp": "2026-07-21T00:00:00Z",
+        },
     ]
 
-    sse_raw = "\n".join([
-        'data: {"type": "status", "status": "processing"}',
-        'data: {"type": "status", "status": "retrieving"}',
-        'data: {"type": "status", "status": "thinking"}',
-        'data: {"type": "status", "status": "summarizing"}',
-        'data: {"type": "complete", "answer": "RAG stands for retrieval-augmented generation.", "citations": [{"page_title": "RAG", "page_slug": "rag"}], "sources_used": []}',
-        'data: [DONE]',
-    ])
+    sse_raw = "\n".join(
+        [
+            'data: {"type": "status", "status": "processing"}',
+            'data: {"type": "status", "status": "retrieving"}',
+            'data: {"type": "status", "status": "thinking"}',
+            'data: {"type": "status", "status": "summarizing"}',
+            'data: {"type": "complete", "answer": "RAG stands for retrieval-augmented generation.", "citations": [{"page_title": "RAG", "page_slug": "rag"}], "sources_used": []}',
+            "data: [DONE]",
+        ]
+    )
     events = _parse_sse(sse_raw)
     complete = [e for e in events if e["type"] == "complete"][0]
 
@@ -96,11 +108,13 @@ def test_chat_flow_question_to_answer():
 
 
 def test_chat_flow_status_labels_during_loading():
-    sse_raw = "\n".join([
-        'data: {"type": "status", "status": "processing"}',
-        'data: {"type": "status", "status": "retrieving"}',
-        'data: {"type": "status", "status": "thinking"}',
-    ])
+    sse_raw = "\n".join(
+        [
+            'data: {"type": "status", "status": "processing"}',
+            'data: {"type": "status", "status": "retrieving"}',
+            'data: {"type": "status", "status": "thinking"}',
+        ]
+    )
     events = _parse_sse(sse_raw)
     labels = {
         "processing": "Đang phân tích câu hỏi...",

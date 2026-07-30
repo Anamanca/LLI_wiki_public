@@ -44,10 +44,9 @@ class LLMQueryRewriterAdapter(QueryRewriterPort):
         if not history:
             return question
 
-        recent = history[-(self._max_history_turns * 2):]
+        recent = history[-(self._max_history_turns * 2) :]
         history_text = "\n".join(
-            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-            for m in recent
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}" for m in recent
         )
 
         messages = [

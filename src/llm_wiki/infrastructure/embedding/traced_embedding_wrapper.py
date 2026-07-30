@@ -7,7 +7,6 @@ import time
 from llm_wiki.application.ports.search.vector_search import EmbeddingServicePort
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
 from llm_wiki.domain.value_objects.embedding import Embedding
-from llm_wiki.infrastructure.telemetry.business_metrics import track_duration
 from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
 
 

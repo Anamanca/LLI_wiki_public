@@ -1,13 +1,12 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.application.ports.search.vector_search import LLMClientPort
 from llm_wiki.application.ports.repositories.event_repository import EventRepository
+from llm_wiki.application.ports.search.vector_search import LLMClientPort
 from llm_wiki.domain.value_objects.time_range import TimeRange
 from llm_wiki.infrastructure.persistence.postgres import models as orm
 
@@ -17,7 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TimeRangeSummaryInput:
     start: datetime
-    end: Optional[datetime] = None
+    end: datetime | None = None
     top_k: int = 10
 
 
@@ -63,55 +62,40 @@ class SummarizeTimeRangeUseCase:
             )
         event_count = (await self._session.execute(event_count_q)).scalar() or 0
 
-        pages_q = (
-            select(
-                orm.Page.title,
-                orm.Page.slug,
-                orm.Page.published_at,
-                orm.Page.summary,
-            )
-            .where(orm.Page.published_at >= input.start)
-        )
+        pages_q = select(
+            orm.Page.title,
+            orm.Page.slug,
+            orm.Page.published_at,
+            orm.Page.summary,
+        ).where(orm.Page.published_at >= input.start)
         if input.end:
             pages_q = pages_q.where(orm.Page.published_at <= input.end)
         pages_q = pages_q.order_by(orm.Page.published_at.desc()).limit(input.top_k)
         page_result = await self._session.execute(pages_q)
         page_rows = page_result.all()
 
-        page_count_q = select(func.count(orm.Page.id)).where(
-            orm.Page.published_at >= input.start
-        )
+        page_count_q = select(func.count(orm.Page.id)).where(orm.Page.published_at >= input.start)
         if input.end:
             page_count_q = page_count_q.where(orm.Page.published_at <= input.end)
         page_count = (await self._session.execute(page_count_q)).scalar() or 0
 
-        items_q_base = select(orm.SourceItem).where(
-            orm.SourceItem.started_at >= input.start
-        )
+        items_q_base = select(orm.SourceItem).where(orm.SourceItem.started_at >= input.start)
         if input.end:
             items_q_base = items_q_base.where(orm.SourceItem.started_at <= input.end)
 
-        completed_q = items_q_base.where(
-            orm.SourceItem.status.in_(["completed", "published"])
-        )
+        completed_q = items_q_base.where(orm.SourceItem.status.in_(["completed", "published"]))
         completed_count = (
-            await self._session.execute(
-                select(func.count()).select_from(completed_q.subquery())
-            )
+            await self._session.execute(select(func.count()).select_from(completed_q.subquery()))
         ).scalar() or 0
 
         failed_q = items_q_base.where(orm.SourceItem.status == "failed")
         failed_count = (
-            await self._session.execute(
-                select(func.count()).select_from(failed_q.subquery())
-            )
+            await self._session.execute(select(func.count()).select_from(failed_q.subquery()))
         ).scalar() or 0
 
         rate_limited_q = items_q_base.where(orm.SourceItem.status == "rate_limited")
         rate_limited_count = (
-            await self._session.execute(
-                select(func.count()).select_from(rate_limited_q.subquery())
-            )
+            await self._session.execute(select(func.count()).select_from(rate_limited_q.subquery()))
         ).scalar() or 0
 
         top_events = [
@@ -121,7 +105,7 @@ class SummarizeTimeRangeUseCase:
                 "summary": e.consensus_summary or "",
                 "importance": e.importance_score,
             }
-            for e in events[:input.top_k]
+            for e in events[: input.top_k]
         ]
 
         top_pages = [
@@ -131,22 +115,18 @@ class SummarizeTimeRangeUseCase:
                 "published_at": str(r.published_at) if r.published_at else None,
                 "summary": r.summary or "",
             }
-            for r in page_rows[:input.top_k]
+            for r in page_rows[: input.top_k]
         ]
 
         context_parts = []
         if top_events:
             context_parts.append("## Key Events")
             for i, e in enumerate(top_events, 1):
-                context_parts.append(
-                    f"[{i}] {e['title']} ({e['date']})\n{e['summary']}"
-                )
+                context_parts.append(f"[{i}] {e['title']} ({e['date']})\n{e['summary']}")
         if top_pages:
             context_parts.append("## Recent Pages")
             for i, p in enumerate(top_pages, len(top_events) + 1):
-                context_parts.append(
-                    f"[{i}] {p['title']}\n{p['summary']}"
-                )
+                context_parts.append(f"[{i}] {p['title']}\n{p['summary']}")
 
         stats = (
             f"Summary stats: {event_count} significant events, "
@@ -163,8 +143,7 @@ class SummarizeTimeRangeUseCase:
             f"You are an expert analyst. Write a concise executive summary of "
             f"the situation from {time_str} based on the data below. "
             f"Highlight 3-5 key takeaways. Use [N] citations. "
-            f"Keep it under 500 words.\n\n{stats}\n\n"
-            + "\n\n".join(context_parts)
+            f"Keep it under 500 words.\n\n{stats}\n\n" + "\n\n".join(context_parts)
         )
 
         try:

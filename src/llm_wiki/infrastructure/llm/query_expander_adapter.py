@@ -61,7 +61,8 @@ class LLMQueryExpanderAdapter(QueryExpanderPort):
             terms = [line.strip() for line in raw.strip().split("\n") if line.strip()]
             # Remove any lines that look like markdown bullets or numbers
             terms = [
-                t for t in terms
+                t
+                for t in terms
                 if not t.startswith(("- ", "* ", "1.", "2.", "3.", "4.", "5.", "•"))
             ]
             if not terms:

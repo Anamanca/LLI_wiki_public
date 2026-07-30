@@ -23,9 +23,6 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
-
-from llm_wiki.shared.datetime_utils import now
 from typing import Any
 
 from llm_wiki.application.dto.query_dto import QueryInput
@@ -33,6 +30,7 @@ from llm_wiki.application.ports.search.answer_evaluator_port import (
     AnswerEvaluation,
     AnswerEvaluatorPort,
 )
+from llm_wiki.application.ports.search.event_search_port import EventSearchPort
 from llm_wiki.application.ports.search.graph_rag_port import GraphRAGPort
 from llm_wiki.application.ports.search.query_analyzer_port import (
     QueryAnalysis,
@@ -48,23 +46,23 @@ from llm_wiki.application.ports.search.vector_search import (
     LLMClientPort,
     VectorSearchPort,
 )
-from llm_wiki.application.ports.search.event_search_port import EventSearchPort
 from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort, TelemetrySpan
 from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
-from llm_wiki.domain.value_objects.embedding import Embedding, SearchResult
+from llm_wiki.domain.value_objects.embedding import SearchResult
 from llm_wiki.domain.value_objects.time_range import TimeRange
 from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter
+from llm_wiki.shared.datetime_utils import now
 
 logger = logging.getLogger(__name__)
 
 # ── Stopping thresholds ────────────────────────────────────────────────
 
-_MIN_FAITHFULNESS = 7.0       # Must be grounded in context
-_MIN_COMPLETENESS = 7.0       # Must address the question adequately
-_MAX_ATTEMPTS = 3             # Hard budget — never loop more than this
+_MIN_FAITHFULNESS = 7.0  # Must be grounded in context
+_MIN_COMPLETENESS = 7.0  # Must address the question adequately
+_MAX_ATTEMPTS = 3  # Hard budget — never loop more than this
 
 # ── Source diversity threshold ─────────────────────────────────────────
-_MIN_DISTINCT_SOURCES = 2     # Warn if all top results from < this many pages
+_MIN_DISTINCT_SOURCES = 2  # Warn if all top results from < this many pages
 
 # ── HyDE prompt ────────────────────────────────────────────────────────
 
@@ -80,7 +78,7 @@ _HYDE_SYSTEM_PROMPT = (
 _DECOMPOSE_SYSTEM_PROMPT = (
     "Phân rã câu hỏi phức tạp thành 2-4 câu hỏi con ĐƠN GIẢN, ĐỘC LẬP. "
     "Mỗi câu hỏi con phải có thể trả lời độc lập. "
-    "Output JSON: {\"sub_queries\": [\"...\", \"...\"]}. "
+    'Output JSON: {"sub_queries": ["...", "..."]}. '
     "CHỈ output JSON, không markdown."
 )
 
@@ -224,7 +222,10 @@ class SelfReflectiveRAGPipeline:
                 self._raw_vector_search._session,
                 recency_lambda=new_lambda,
             )
-            from llm_wiki.infrastructure.search.traced_search_wrapper import TracedVectorSearchWrapper
+            from llm_wiki.infrastructure.search.traced_search_wrapper import (
+                TracedVectorSearchWrapper,
+            )
+
             wrapper = TracedVectorSearchWrapper(rebuilt, self._telemetry)
             if root:
                 wrapper.set_parent_span(root)
@@ -235,7 +236,10 @@ class SelfReflectiveRAGPipeline:
                 self._raw_keyword_search._session,
                 recency_lambda=new_lambda,
             )
-            from llm_wiki.infrastructure.search.traced_search_wrapper import TracedKeywordSearchWrapper
+            from llm_wiki.infrastructure.search.traced_search_wrapper import (
+                TracedKeywordSearchWrapper,
+            )
+
             wrapper = TracedKeywordSearchWrapper(rebuilt, self._telemetry)
             if root:
                 wrapper.set_parent_span(root)
@@ -246,13 +250,18 @@ class SelfReflectiveRAGPipeline:
                 self._raw_event_search._session,
                 recency_lambda=new_lambda,
             )
-            from llm_wiki.infrastructure.search.traced_event_search_wrapper import TracedEventSearchWrapper
+            from llm_wiki.infrastructure.search.traced_event_search_wrapper import (
+                TracedEventSearchWrapper,
+            )
+
             wrapper = TracedEventSearchWrapper(rebuilt, self._telemetry)
             if root:
                 wrapper.set_parent_span(root)
             self._event_search = wrapper
 
-        logger.debug("Rebuilt search adapters with recency_lambda=%.3f for intent=%r", new_lambda, intent)
+        logger.debug(
+            "Rebuilt search adapters with recency_lambda=%.3f for intent=%r", new_lambda, intent
+        )
 
     # ── Cache helpers (delegates to base pipeline) ───────────────────────
 
@@ -283,6 +292,7 @@ class SelfReflectiveRAGPipeline:
             return None
         try:
             from llm_wiki.application.use_cases.query.pipeline import _SEMANTIC_THRESHOLD
+
             vector = embedding.vector if hasattr(embedding, "vector") else embedding
             raw = await self._cache.semantic_get(vector, _SEMANTIC_THRESHOLD)
             if raw:
@@ -291,8 +301,16 @@ class SelfReflectiveRAGPipeline:
             logger.debug("Semantic cache lookup failed, ignoring", exc_info=True)
         return None
 
-    async def _save_cache(self, question: str, source_id: str | None, answer: str, sources: list[dict],
-                          embedding: Any, tokens_used: int, attempts: int) -> None:
+    async def _save_cache(
+        self,
+        question: str,
+        source_id: str | None,
+        answer: str,
+        sources: list[dict],
+        embedding: Any,
+        tokens_used: int,
+        attempts: int,
+    ) -> None:
         """Save result to both exact and semantic cache."""
         if not self._cache:
             return
@@ -332,9 +350,14 @@ class SelfReflectiveRAGPipeline:
             # Wire all traced wrappers under the root span so LangSmith
             # shows a single trace tree instead of isolated runs.
             from llm_wiki.application.use_cases.query.pipeline import _set_parent_on_wrappers
+
             _set_parent_on_wrappers(
-                self._embedder, self._vector_search, self._keyword_search,
-                self._llm, self._cache, root_span,
+                self._embedder,
+                self._vector_search,
+                self._keyword_search,
+                self._llm,
+                self._cache,
+                root_span,
                 rewriter=self._rewriter,
                 analyzer=self._analyzer,
                 event_search=self._event_search,
@@ -357,15 +380,16 @@ class SelfReflectiveRAGPipeline:
             "hyde_embedding": None,
             "sub_results": [],
             "stop_reason": "max_attempts",
-            "prev_content_ids": [],   # track for re-rank skipping
-            "prev_context": "",       # track for eval skipping
+            "prev_content_ids": [],  # track for re-rank skipping
+            "prev_context": "",  # track for eval skipping
         }
 
         try:
             # ── Cache check (before any LLM/DB work) ─────────────────────
             # Check exact-match cache first
             exact_cached = await self._try_exact_cache(
-                input.question, source_id=input.source_id,
+                input.question,
+                source_id=input.source_id,
             )
             if exact_cached:
                 inc_counter("query_total", {"status": "success", "cache": "exact"})
@@ -409,7 +433,9 @@ class SelfReflectiveRAGPipeline:
                 state["attempt"] += 1
                 logger.info(
                     "Reflective RAG attempt %d/%d, strategy=%s",
-                    state["attempt"], self._max_attempts, state["strategy"],
+                    state["attempt"],
+                    self._max_attempts,
+                    state["strategy"],
                 )
 
                 # Retrieve (with strategy-specific behavior)
@@ -423,7 +449,9 @@ class SelfReflectiveRAGPipeline:
                 if self._re_ranker and state["top_results"] and len(state["top_results"]) > 5:
                     if results_changed or state["attempt"] == 1:
                         state["top_results"] = await self._re_ranker.rerank(
-                            state["rewritten_question"], state["top_results"], top_n=20,
+                            state["rewritten_question"],
+                            state["top_results"],
+                            top_n=20,
                         )
                     else:
                         logger.debug("Skipping re-rank: top results unchanged from prior attempt")
@@ -447,7 +475,9 @@ class SelfReflectiveRAGPipeline:
                         state["evaluation"] = await self._evaluate(state)
 
                 # Source diversity check: if all results from ≤1 page, bias scores down
-                state["evaluation"] = self._check_source_diversity(state["top_results"], state["evaluation"])
+                state["evaluation"] = self._check_source_diversity(
+                    state["top_results"], state["evaluation"]
+                )
 
                 # Decide
                 if state["evaluation"].should_stop:
@@ -467,7 +497,9 @@ class SelfReflectiveRAGPipeline:
                     refined = state["evaluation"].refined_query
                     if refined and refined != state["rewritten_question"]:
                         state["rewritten_question"] = refined
-                        logger.debug("Refining query: %r → %r", state["question"][:80], refined[:80])
+                        logger.debug(
+                            "Refining query: %r → %r", state["question"][:80], refined[:80]
+                        )
                         # Re-embed the refined query
                         if self._embedder:
                             try:
@@ -500,7 +532,9 @@ class SelfReflectiveRAGPipeline:
                 answer=state["answer"],
                 sources=state["sources"],
                 embedding=state.get("embedding"),
-                tokens_used=(getattr(self._llm, "last_usage", None) or {}).get("total_tokens", 0) if self._llm else 0,
+                tokens_used=(getattr(self._llm, "last_usage", None) or {}).get("total_tokens", 0)
+                if self._llm
+                else 0,
                 attempts=state["attempt"],
             )
 
@@ -519,17 +553,26 @@ class SelfReflectiveRAGPipeline:
                         "intent": state["intent"],
                         "stop_reason": state["stop_reason"],
                         "total_latency_ms": round(total_latency, 2),
-                        "faithfulness": state["evaluation"].faithfulness if state["evaluation"] else None,
-                        "completeness": state["evaluation"].completeness if state["evaluation"] else None,
+                        "faithfulness": state["evaluation"].faithfulness
+                        if state["evaluation"]
+                        else None,
+                        "completeness": state["evaluation"].completeness
+                        if state["evaluation"]
+                        else None,
                     },
                 )
 
             return {
                 "answer": state["answer"],
                 "sources": state["sources"],
-                "tokens_used": (getattr(self._llm, "last_usage", None) or {}).get("total_tokens", 0) if self._llm else 0,
+                "tokens_used": (getattr(self._llm, "last_usage", None) or {}).get("total_tokens", 0)
+                if self._llm
+                else 0,
                 "cache_hit": False,
-                "pipeline_steps": {"attempts": state["attempt"], "stop_reason": state["stop_reason"]},
+                "pipeline_steps": {
+                    "attempts": state["attempt"],
+                    "stop_reason": state["stop_reason"],
+                },
             }
 
         except Exception as exc:
@@ -552,7 +595,9 @@ class SelfReflectiveRAGPipeline:
                 rewritten = await self._rewriter.rewrite(input.question, input.chat_history)
                 if rewritten != input.question:
                     state["rewritten_question"] = rewritten
-                    logger.debug("Reflective: rewritten %r → %r", input.question[:80], rewritten[:80])
+                    logger.debug(
+                        "Reflective: rewritten %r → %r", input.question[:80], rewritten[:80]
+                    )
             except Exception:
                 pass
 
@@ -595,7 +640,9 @@ class SelfReflectiveRAGPipeline:
 
         if strategy == "hyde":
             # Reuse cached HyDE doc if available (skip re-generation)
-            hyde_doc = state.get("_hyde_doc") or await self._generate_hyde(state["rewritten_question"])
+            hyde_doc = state.get("_hyde_doc") or await self._generate_hyde(
+                state["rewritten_question"]
+            )
             state["_hyde_doc"] = hyde_doc  # cache for potential retry
             if self._embedder:
                 hyde_embedding = await self._embedder.embed(hyde_doc)
@@ -604,23 +651,35 @@ class SelfReflectiveRAGPipeline:
                     # Build parallel tasks — same 4 streams as default + graph
                     tasks = [
                         self._vector_search.search_similar(
-                            hyde_embedding, top_k=input.top_k * 2,
-                            source_id=input.source_id, time_range=time_range,
+                            hyde_embedding,
+                            top_k=input.top_k * 2,
+                            source_id=input.source_id,
+                            time_range=time_range,
                         ),
                         self._keyword_search.search_keyword(
-                            kw_query, top_k=input.top_k, time_range=time_range,
+                            kw_query,
+                            top_k=input.top_k,
+                            time_range=time_range,
                         ),
                     ]
                     stream_names = ["sections", "keyword_sections"]
 
                     if self._event_search:
-                        tasks.append(self._event_search.search_events(
-                            hyde_embedding, top_k=input.top_k * 2, time_range=time_range,
-                        ))
+                        tasks.append(
+                            self._event_search.search_events(
+                                hyde_embedding,
+                                top_k=input.top_k * 2,
+                                time_range=time_range,
+                            )
+                        )
                         stream_names.append("events")
-                        tasks.append(self._event_search.search_events_keyword(
-                            kw_query, top_k=input.top_k, time_range=time_range,
-                        ))
+                        tasks.append(
+                            self._event_search.search_events_keyword(
+                                kw_query,
+                                top_k=input.top_k,
+                                time_range=time_range,
+                            )
+                        )
                         stream_names.append("keyword_events")
 
                     tasks.append(self._get_graph_results(state))
@@ -628,7 +687,10 @@ class SelfReflectiveRAGPipeline:
 
                     results_raw = await asyncio.gather(*tasks, return_exceptions=True)
                     result_sets, top_results = self._merge_streams(
-                        stream_names, results_raw, intent, input.top_k,
+                        stream_names,
+                        results_raw,
+                        intent,
+                        input.top_k,
                         time_range=time_range,
                     )
                     state["top_results"] = top_results
@@ -638,7 +700,11 @@ class SelfReflectiveRAGPipeline:
             # The refined query is set in state["rewritten_question"] before entering
             # this handler; we just need to use it for retrieval.
             state["top_results"] = await self._default_retrieval(
-                input, state["embedding"], time_range, intent, state,
+                input,
+                state["embedding"],
+                time_range,
+                intent,
+                state,
             )
 
         elif strategy == "decompose":
@@ -662,11 +728,15 @@ class SelfReflectiveRAGPipeline:
                         if self._vector_search and self._keyword_search:
                             sq_vec, sq_kw = await asyncio.gather(
                                 self._vector_search.search_similar(
-                                    sq_embedding, top_k=max(5, input.top_k // 2),
-                                    source_id=input.source_id, time_range=time_range,
+                                    sq_embedding,
+                                    top_k=max(5, input.top_k // 2),
+                                    source_id=input.source_id,
+                                    time_range=time_range,
                                 ),
                                 self._keyword_search.search_keyword(
-                                    sq, top_k=max(5, input.top_k // 2), time_range=time_range,
+                                    sq,
+                                    top_k=max(5, input.top_k // 2),
+                                    time_range=time_range,
                                 ),
                                 return_exceptions=True,
                             )
@@ -674,7 +744,8 @@ class SelfReflectiveRAGPipeline:
                             _, sq_top = self._merge_streams(
                                 ["sections", "keyword_sections"],
                                 [sq_vec, sq_kw],
-                                intent, input.top_k,
+                                intent,
+                                input.top_k,
                                 time_range=time_range,
                             )
                             # Deduplicate cross-sub-query by content_id
@@ -692,37 +763,52 @@ class SelfReflectiveRAGPipeline:
                             seen_ids.add(r.content_id)
                             all_results.append(r)
 
-                state["top_results"] = all_results[:input.top_k] if all_results else []
+                state["top_results"] = all_results[: input.top_k] if all_results else []
             else:
                 # Fallback to default
-                state["top_results"] = await self._default_retrieval(input, query_embedding, time_range, intent, state)
+                state["top_results"] = await self._default_retrieval(
+                    input, query_embedding, time_range, intent, state
+                )
 
         elif strategy == "expand" and self._expander:
             # Expand query with synonyms for keyword search
             expanded_query = await self._expander.expand(
-                state["rewritten_question"], intent=intent,
+                state["rewritten_question"],
+                intent=intent,
             )
             if self._vector_search and self._keyword_search and query_embedding:
                 # Build parallel tasks — same 4 streams as default + graph
                 tasks = [
                     self._vector_search.search_similar(
-                        query_embedding, top_k=input.top_k * 2,
-                        source_id=input.source_id, time_range=time_range,
+                        query_embedding,
+                        top_k=input.top_k * 2,
+                        source_id=input.source_id,
+                        time_range=time_range,
                     ),
                     self._keyword_search.search_keyword(
-                        expanded_query, top_k=input.top_k, time_range=time_range,
+                        expanded_query,
+                        top_k=input.top_k,
+                        time_range=time_range,
                     ),
                 ]
                 stream_names = ["sections", "keyword_sections"]
 
                 if self._event_search:
-                    tasks.append(self._event_search.search_events(
-                        query_embedding, top_k=input.top_k * 2, time_range=time_range,
-                    ))
+                    tasks.append(
+                        self._event_search.search_events(
+                            query_embedding,
+                            top_k=input.top_k * 2,
+                            time_range=time_range,
+                        )
+                    )
                     stream_names.append("events")
-                    tasks.append(self._event_search.search_events_keyword(
-                        expanded_query, top_k=input.top_k, time_range=time_range,
-                    ))
+                    tasks.append(
+                        self._event_search.search_events_keyword(
+                            expanded_query,
+                            top_k=input.top_k,
+                            time_range=time_range,
+                        )
+                    )
                     stream_names.append("keyword_events")
 
                 tasks.append(self._get_graph_results(state))
@@ -730,21 +816,33 @@ class SelfReflectiveRAGPipeline:
 
                 results_raw = await asyncio.gather(*tasks, return_exceptions=True)
                 result_sets, top_results = self._merge_streams(
-                    stream_names, results_raw, intent, input.top_k,
+                    stream_names,
+                    results_raw,
+                    intent,
+                    input.top_k,
                     time_range=time_range,
                 )
                 state["top_results"] = top_results
             else:
-                state["top_results"] = await self._default_retrieval(input, query_embedding, time_range, intent, state)
+                state["top_results"] = await self._default_retrieval(
+                    input, query_embedding, time_range, intent, state
+                )
 
         else:
             # Default strategy — standard multi-retrieval
-            state["top_results"] = await self._default_retrieval(input, query_embedding, time_range, intent, state)
+            state["top_results"] = await self._default_retrieval(
+                input, query_embedding, time_range, intent, state
+            )
 
         return state
 
     async def _default_retrieval(
-        self, input: QueryInput, query_embedding, time_range, intent: str, state: dict,
+        self,
+        input: QueryInput,
+        query_embedding,
+        time_range,
+        intent: str,
+        state: dict,
     ) -> list[SearchResult]:
         """Run the standard 4-stream retrieval + optional GraphRAG."""
         if not query_embedding or not self._vector_search or not self._keyword_search:
@@ -759,26 +857,42 @@ class SelfReflectiveRAGPipeline:
         task_names = []
 
         # Core streams
-        tasks.append(self._vector_search.search_similar(
-            query_embedding, top_k=input.top_k * 2,
-            source_id=input.source_id, time_range=time_range,
-        ))
+        tasks.append(
+            self._vector_search.search_similar(
+                query_embedding,
+                top_k=input.top_k * 2,
+                source_id=input.source_id,
+                time_range=time_range,
+            )
+        )
         task_names.append("sections")
 
-        tasks.append(self._keyword_search.search_keyword(
-            kw_query, top_k=input.top_k, time_range=time_range,
-        ))
+        tasks.append(
+            self._keyword_search.search_keyword(
+                kw_query,
+                top_k=input.top_k,
+                time_range=time_range,
+            )
+        )
         task_names.append("keyword_sections")
 
         # Event streams if available
         if self._event_search:
-            tasks.append(self._event_search.search_events(
-                query_embedding, top_k=input.top_k * 2, time_range=time_range,
-            ))
+            tasks.append(
+                self._event_search.search_events(
+                    query_embedding,
+                    top_k=input.top_k * 2,
+                    time_range=time_range,
+                )
+            )
             task_names.append("events")
-            tasks.append(self._event_search.search_events_keyword(
-                kw_query, top_k=input.top_k, time_range=time_range,
-            ))
+            tasks.append(
+                self._event_search.search_events_keyword(
+                    kw_query,
+                    top_k=input.top_k,
+                    time_range=time_range,
+                )
+            )
             task_names.append("keyword_events")
 
         # Graph stream if entities available
@@ -789,7 +903,10 @@ class SelfReflectiveRAGPipeline:
         results_raw = await asyncio.gather(*tasks, return_exceptions=True)
 
         result_sets, top_results = self._merge_streams(
-            task_names, results_raw, intent, input.top_k,
+            task_names,
+            results_raw,
+            intent,
+            input.top_k,
             time_range=time_range,
         )
         return top_results
@@ -802,22 +919,28 @@ class SelfReflectiveRAGPipeline:
         if not entities:
             return []
         try:
-            return await self._graph_rag.traverse(entities, top_k=10, time_range=state.get("time_range"))
+            return await self._graph_rag.traverse(
+                entities, top_k=10, time_range=state.get("time_range")
+            )
         except Exception:
             return []
 
     # ── Merge streams with RRF ──────────────────────────────────────────
 
     def _merge_streams(
-        self, names: list[str], results_raw: list, intent: str, top_k: int,
+        self,
+        names: list[str],
+        results_raw: list,
+        intent: str,
+        top_k: int,
         time_range: TimeRange | None = None,
     ) -> tuple[dict[str, list[SearchResult]], list[SearchResult]]:
         """Merge multiple retrieval streams via RRF + diversity + time filter."""
         from llm_wiki.application.use_cases.query.pipeline import (
             _build_rrf_weights,
-            _weighted_rrf_fusion,
             _diversify,
             _enforce_time_boundary,
+            _weighted_rrf_fusion,
         )
 
         result_sets: dict[str, list[SearchResult]] = {}
@@ -914,15 +1037,18 @@ class SelfReflectiveRAGPipeline:
             )
 
         from llm_wiki.application.use_cases.query.pipeline import _temporal_addendum
+
         system_prompt += _temporal_addendum(intent, language=lang)
 
         messages = [{"role": "system", "content": system_prompt}]
         for h in (input.chat_history or [])[-6:]:
             messages.append({"role": h["role"], "content": h["content"]})
-        messages.append({
-            "role": "user",
-            "content": f"Context:\n\n{state['context']}\n\nQuestion: {input.question}",
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Context:\n\n{state['context']}\n\nQuestion: {input.question}",
+            }
+        )
         return messages
 
     # ── Generation (used by execute() and silent retry loop) ────────────────
@@ -948,7 +1074,8 @@ class SelfReflectiveRAGPipeline:
             try:
                 state["answer"] = await self._llm.chat_completion(
                     messages=self._build_messages(input, state),
-                    temperature=0.3, max_tokens=16384,
+                    temperature=0.3,
+                    max_tokens=16384,
                 )
             except Exception:
                 state["answer"] = "Xin lỗi, không thể tạo câu trả lời. Vui lòng thử lại."
@@ -976,9 +1103,14 @@ class SelfReflectiveRAGPipeline:
             # Wire all traced wrappers under the root span so LangSmith
             # shows a single trace tree instead of isolated runs.
             from llm_wiki.application.use_cases.query.pipeline import _set_parent_on_wrappers
+
             _set_parent_on_wrappers(
-                self._embedder, self._vector_search, self._keyword_search,
-                self._llm, self._cache, root_span,
+                self._embedder,
+                self._vector_search,
+                self._keyword_search,
+                self._llm,
+                self._cache,
+                root_span,
                 rewriter=self._rewriter,
                 analyzer=self._analyzer,
                 event_search=self._event_search,
@@ -989,7 +1121,8 @@ class SelfReflectiveRAGPipeline:
         try:
             # ── Cache check ───────────────────────────────────────────────
             exact_cached = await self._try_exact_cache(
-                input.question, source_id=input.source_id,
+                input.question,
+                source_id=input.source_id,
             )
             if exact_cached:
                 inc_counter("query_total", {"status": "success", "cache": "exact"})
@@ -1076,7 +1209,9 @@ class SelfReflectiveRAGPipeline:
             # Re-rank if available
             if self._re_ranker and state["top_results"] and len(state["top_results"]) > 5:
                 state["top_results"] = await self._re_ranker.rerank(
-                    state["rewritten_question"], state["top_results"], top_n=20,
+                    state["rewritten_question"],
+                    state["top_results"],
+                    top_n=20,
                 )
 
             state["context"] = self._pipeline._build_context(state["top_results"])
@@ -1088,7 +1223,7 @@ class SelfReflectiveRAGPipeline:
                 yield {"type": "status", "data": {"status": "thinking"}}
                 # Stream the empty answer as tokens
                 for i in range(0, len(no_context_answer), 30):
-                    yield {"type": "token", "data": no_context_answer[i:i + 30]}
+                    yield {"type": "token", "data": no_context_answer[i : i + 30]}
                 state["answer"] = no_context_answer
             elif self._llm:
                 messages = self._build_messages(input, state)
@@ -1114,23 +1249,29 @@ class SelfReflectiveRAGPipeline:
                 if not full_answer:
                     try:
                         result = await self._llm.chat_completion(
-                            messages=messages, temperature=0.3, max_tokens=16384,
+                            messages=messages,
+                            temperature=0.3,
+                            max_tokens=16384,
                         )
-                        full_answer = result if isinstance(result, str) else result.get("content", "")
+                        full_answer = (
+                            result if isinstance(result, str) else result.get("content", "")
+                        )
                         # Chunk the fallback result
                         for i in range(0, len(full_answer), 30):
-                            yield {"type": "token", "data": full_answer[i:i + 30]}
+                            yield {"type": "token", "data": full_answer[i : i + 30]}
                     except Exception:
                         full_answer = "Xin lỗi, không thể tạo câu trả lời. Vui lòng thử lại."
                         for i in range(0, len(full_answer), 30):
-                            yield {"type": "token", "data": full_answer[i:i + 30]}
+                            yield {"type": "token", "data": full_answer[i : i + 30]}
 
                 state["answer"] = full_answer
 
             # Evaluate the first answer
             yield {"type": "status", "data": {"status": "summarizing"}}
             state["evaluation"] = await self._evaluate(state)
-            state["evaluation"] = self._check_source_diversity(state["top_results"], state["evaluation"])
+            state["evaluation"] = self._check_source_diversity(
+                state["top_results"], state["evaluation"]
+            )
 
             # ── If answer is good, yield complete and return ────────────
             if state["evaluation"].should_stop:
@@ -1141,10 +1282,16 @@ class SelfReflectiveRAGPipeline:
 
                 # Save cache + emit metrics
                 await self._save_cache(
-                    question=input.question, source_id=input.source_id,
-                    answer=state["answer"], sources=state["sources"],
+                    question=input.question,
+                    source_id=input.source_id,
+                    answer=state["answer"],
+                    sources=state["sources"],
                     embedding=state.get("embedding"),
-                    tokens_used=(getattr(self._llm, "last_usage", None) or {}).get("total_tokens", 0) if self._llm else 0,
+                    tokens_used=(getattr(self._llm, "last_usage", None) or {}).get(
+                        "total_tokens", 0
+                    )
+                    if self._llm
+                    else 0,
                     attempts=state["attempt"],
                 )
                 self._emit_metrics(state, (time.time() - t0) * 1000)
@@ -1153,7 +1300,8 @@ class SelfReflectiveRAGPipeline:
                         span=root_span,
                         outputs={"answer_length": len(state["answer"]), "answer": state["answer"]},
                         metadata={
-                            "attempts": 1, "stop_reason": "quality_ok",
+                            "attempts": 1,
+                            "stop_reason": "quality_ok",
                             "intent": state["intent"],
                             "faithfulness": state["evaluation"].faithfulness,
                             "completeness": state["evaluation"].completeness,
@@ -1164,7 +1312,8 @@ class SelfReflectiveRAGPipeline:
             # ── Answer needs refinement — notify user and retry ─────────
             logger.info(
                 "Stream attempt 1: F=%.1f C=%.1f below threshold, refining...",
-                state["evaluation"].faithfulness, state["evaluation"].completeness,
+                state["evaluation"].faithfulness,
+                state["evaluation"].completeness,
             )
             yield {"type": "status", "data": {"status": "refining"}}
 
@@ -1189,7 +1338,9 @@ class SelfReflectiveRAGPipeline:
                 state["attempt"] += 1
                 logger.info(
                     "Reflective stream retry %d/%d, strategy=%s",
-                    state["attempt"], self._max_attempts, state["strategy"],
+                    state["attempt"],
+                    self._max_attempts,
+                    state["strategy"],
                 )
 
                 state = await self._retrieve_with_strategy(input, state)
@@ -1201,7 +1352,9 @@ class SelfReflectiveRAGPipeline:
                 if self._re_ranker and state["top_results"] and len(state["top_results"]) > 5:
                     if results_changed or state["attempt"] == 2:
                         state["top_results"] = await self._re_ranker.rerank(
-                            state["rewritten_question"], state["top_results"], top_n=20,
+                            state["rewritten_question"],
+                            state["top_results"],
+                            top_n=20,
                         )
 
                 state["context"] = self._pipeline._build_context(state["top_results"])
@@ -1210,12 +1363,12 @@ class SelfReflectiveRAGPipeline:
 
                 state = await self._generate(input, state)
 
-                if context_changed or state["attempt"] == 2:
-                    state["evaluation"] = await self._evaluate(state)
-                elif state["evaluation"] is None:
+                if context_changed or state["attempt"] == 2 or state["evaluation"] is None:
                     state["evaluation"] = await self._evaluate(state)
 
-                state["evaluation"] = self._check_source_diversity(state["top_results"], state["evaluation"])
+                state["evaluation"] = self._check_source_diversity(
+                    state["top_results"], state["evaluation"]
+                )
 
                 if state["evaluation"].should_stop:
                     state["stop_reason"] = "quality_ok"
@@ -1244,10 +1397,14 @@ class SelfReflectiveRAGPipeline:
 
             # Save cache
             await self._save_cache(
-                question=input.question, source_id=input.source_id,
-                answer=state["answer"], sources=state["sources"],
+                question=input.question,
+                source_id=input.source_id,
+                answer=state["answer"],
+                sources=state["sources"],
                 embedding=state.get("embedding"),
-                tokens_used=(getattr(self._llm, "last_usage", None) or {}).get("total_tokens", 0) if self._llm else 0,
+                tokens_used=(getattr(self._llm, "last_usage", None) or {}).get("total_tokens", 0)
+                if self._llm
+                else 0,
                 attempts=state["attempt"],
             )
             self._emit_metrics(state, (time.time() - t0) * 1000)
@@ -1267,8 +1424,12 @@ class SelfReflectiveRAGPipeline:
                         "intent": state["intent"],
                         "stop_reason": state["stop_reason"],
                         "total_latency_ms": round((time.time() - t0) * 1000, 2),
-                        "faithfulness": state["evaluation"].faithfulness if state["evaluation"] else None,
-                        "completeness": state["evaluation"].completeness if state["evaluation"] else None,
+                        "faithfulness": state["evaluation"].faithfulness
+                        if state["evaluation"]
+                        else None,
+                        "completeness": state["evaluation"].completeness
+                        if state["evaluation"]
+                        else None,
                     },
                 )
 
@@ -1276,7 +1437,8 @@ class SelfReflectiveRAGPipeline:
             inc_counter("query_total", {"status": "error", "cache": "reflective_failure"})
             if telemetry and root_span:
                 await telemetry.end_span(
-                    span=root_span, error=str(exc),
+                    span=root_span,
+                    error=str(exc),
                     metadata={"error_type": type(exc).__name__},
                 )
             # Always yield a "complete" event so the frontend can
@@ -1313,7 +1475,9 @@ class SelfReflectiveRAGPipeline:
                 "answer": state["answer"],
                 "citations": citations,
                 "sources_used": [],
-                "tokens_used": (getattr(self._llm, "last_usage", None) or {}).get("total_tokens", 0) if self._llm else 0,
+                "tokens_used": (getattr(self._llm, "last_usage", None) or {}).get("total_tokens", 0)
+                if self._llm
+                else 0,
                 "attempts": state["attempt"],
                 "stop_reason": state["stop_reason"],
             },
@@ -1325,8 +1489,11 @@ class SelfReflectiveRAGPipeline:
         """Evaluate the current answer with LLM-as-judge."""
         if not state["answer"] or not state["context"]:
             return AnswerEvaluation(
-                faithfulness=0.0, completeness=0.0, relevance=0.0,
-                should_stop=True, missing_info="Empty answer or context",
+                faithfulness=0.0,
+                completeness=0.0,
+                relevance=0.0,
+                should_stop=True,
+                missing_info="Empty answer or context",
             )
 
         try:
@@ -1359,7 +1526,8 @@ class SelfReflectiveRAGPipeline:
 
     @staticmethod
     def _check_source_diversity(
-        top_results: list[SearchResult], evaluation: AnswerEvaluation,
+        top_results: list[SearchResult],
+        evaluation: AnswerEvaluation,
     ) -> AnswerEvaluation:
         """Check that top results span multiple distinct pages.
 
@@ -1379,13 +1547,17 @@ class SelfReflectiveRAGPipeline:
         if len(distinct_pages) < _MIN_DISTINCT_SOURCES and len(top_results) >= 3:
             logger.debug(
                 "Source diversity low: %d distinct pages from %d results",
-                len(distinct_pages), len(top_results),
+                len(distinct_pages),
+                len(top_results),
             )
             # Downgrade relevance by 2 points (clamped at 0) and push toward expand
             adjusted_relevance = max(0.0, evaluation.relevance - 2.0)
             evaluation.relevance = adjusted_relevance
             # Force should_stop=False unless already stopping on hard grounds
-            if evaluation.faithfulness >= _MIN_FAITHFULNESS and evaluation.completeness >= _MIN_COMPLETENESS:
+            if (
+                evaluation.faithfulness >= _MIN_FAITHFULNESS
+                and evaluation.completeness >= _MIN_COMPLETENESS
+            ):
                 # Quality is fine despite low diversity — don't force retry
                 pass
             elif adjusted_relevance < 5 and evaluation.suggested_strategy == "refine_query":
@@ -1458,9 +1630,12 @@ class SelfReflectiveRAGPipeline:
     def _emit_metrics(self, state: dict, latency_ms: float) -> None:
         """Emit Prometheus business metrics for this pipeline run."""
         inc_counter("query_total", {"status": "success", "cache": "reflective"})
-        inc_counter("reflection_attempts", {"stop_reason": state["stop_reason"]}, value=state["attempt"])
+        inc_counter(
+            "reflection_attempts", {"stop_reason": state["stop_reason"]}, value=state["attempt"]
+        )
         if state["evaluation"]:
             from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
+
             try:
                 get_metrics().histogram("reflection_faithfulness", state["evaluation"].faithfulness)
                 get_metrics().histogram("reflection_completeness", state["evaluation"].completeness)

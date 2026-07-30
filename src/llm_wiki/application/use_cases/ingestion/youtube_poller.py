@@ -12,24 +12,25 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from llm_wiki.shared.datetime_utils import now
 from typing import Any
 
 import httpx
-from sqlalchemy import select, update as sql_update
+from sqlalchemy import select
+from sqlalchemy import update as sql_update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.config import settings
-from llm_wiki.infrastructure.persistence.postgres.models import Source, SourceItem, ScanLog
+from llm_wiki.infrastructure.persistence.postgres.models import ScanLog, Source, SourceItem
+from llm_wiki.shared.datetime_utils import now
 
 logger = logging.getLogger(__name__)
 
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 
 # Safety cap for first-time / backfill scans — prevents runaway pagination.
-MAX_BACKFILL_PAGES = 50   # 50 pages × 50 items = 2500 videos
-MAX_DAILY_PAGES = 10      # 10 pages × 50 items = 500 videos
+MAX_BACKFILL_PAGES = 50  # 50 pages × 50 items = 2500 videos
+MAX_DAILY_PAGES = 10  # 10 pages × 50 items = 500 videos
 
 
 # ── Quota tracking (module-level, reset on process restart) ────────────────
@@ -42,16 +43,20 @@ def _consume_quota(source_id: str, units: int) -> None:
 
 # ── Exceptions ──────────────────────────────────────────────────────────────
 
+
 class YouTubeQuotaExceeded(Exception):
     """Raised when YouTube returns 403 quotaExceeded."""
+
     pass
 
 
 # ── Result types ────────────────────────────────────────────────────────────
 
+
 @dataclass
 class PollResult:
     """Returned by poll_channel — consumed by admin.py for scan_logs."""
+
     video_ids: list[str] = field(default_factory=list)
     found: int = 0
     inserted: int = 0
@@ -61,6 +66,7 @@ class PollResult:
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
 
 def _is_quota_exceeded_error(status_code: int, body: dict) -> bool:
     """Detect YouTube quota exhaustion from the response."""
@@ -130,12 +136,16 @@ async def _paginate(
 
 # ── Cheap daily poll: channels.list → playlistItems.list ────────────────────
 
+
 async def _get_uploads_playlist_id(channel_id: str) -> str:
     """Get the channel's uploads playlist ID. Cost: 1 unit."""
-    body = await _youtube_get("/channels", {
-        "part": "contentDetails",
-        "id": channel_id,
-    })
+    body = await _youtube_get(
+        "/channels",
+        {
+            "part": "contentDetails",
+            "id": channel_id,
+        },
+    )
     items = body.get("items", [])
     if not items:
         raise RuntimeError(f"Channel not found: {channel_id}")
@@ -198,7 +208,9 @@ async def _poll_uploads_playlist(
                                     items.append(it)
                         logger.debug(
                             "_poll_uploads: stopping at page %d (oldest=%s < since=%s)",
-                            page_num + 1, oldest_pub_str, since.isoformat(),
+                            page_num + 1,
+                            oldest_pub_str,
+                            since.isoformat(),
                         )
                         return items, api_calls
                 except (ValueError, TypeError):
@@ -211,10 +223,7 @@ async def _poll_uploads_playlist(
 
     # If no since or we exhausted the playlist, filter by since here.
     if since is not None:
-        items = [
-            it for it in items
-            if _item_published_after(it, since - buffer)
-        ]
+        items = [it for it in items if _item_published_after(it, since - buffer)]
 
     return items, api_calls
 
@@ -232,6 +241,7 @@ def _item_published_after(item: dict[str, Any], threshold: datetime) -> bool:
 
 
 # ── Parsing ─────────────────────────────────────────────────────────────────
+
 
 def _extract_video_info(item: dict[str, Any]) -> dict[str, Any]:
     """Extract title, external_id, url, published_at from a YouTube API item."""
@@ -262,6 +272,7 @@ def _extract_video_info(item: dict[str, Any]) -> dict[str, Any]:
 
 
 # ── DB helpers ──────────────────────────────────────────────────────────────
+
 
 async def _insert_source_items(
     db: AsyncSession,
@@ -335,6 +346,7 @@ async def _mark_source_items_rate_limited(source_id: str, db: AsyncSession) -> N
 
 # ── Main entry points ───────────────────────────────────────────────────────
 
+
 async def poll_channel(
     source: Source,
     db: AsyncSession,
@@ -378,7 +390,9 @@ async def poll_channel(
         # Step 3: Paginate playlist items
         max_pages = MAX_BACKFILL_PAGES if (backfill or since is None) else MAX_DAILY_PAGES
         playlist_items, api_calls = await _poll_uploads_playlist(
-            playlist_id, since, max_pages=max_pages,
+            playlist_id,
+            since,
+            max_pages=max_pages,
         )
         result.api_calls += api_calls
         result.quota_used += api_calls  # playlistItems.list = 1 unit per page
@@ -419,7 +433,9 @@ async def poll_channel(
             )
             if db_result.rowcount and db_result.rowcount > 0:
                 inserted += 1
-            if v["published_at"] and (newest_published_at is None or v["published_at"] > newest_published_at):
+            if v["published_at"] and (
+                newest_published_at is None or v["published_at"] > newest_published_at
+            ):
                 newest_published_at = v["published_at"]
 
         await db.commit()
@@ -436,7 +452,10 @@ async def poll_channel(
 
         logger.info(
             "poll_channel %s: found %d, new %d, quota %d units",
-            source.name, result.found, result.inserted, result.quota_used,
+            source.name,
+            result.found,
+            result.inserted,
+            result.quota_used,
         )
         result.video_ids = [v["external_id"] for v in video_infos]
         return result
@@ -454,6 +473,7 @@ async def poll_channel(
 
 # ── Legacy backfill (playlist + video full scan) ────────────────────────────
 # These functions are used by backfill_channel() for manual "Scan Now" runs.
+
 
 async def get_channel_playlists(channel_id: str) -> list[dict[str, Any]]:
     """Fetch all playlists for a channel."""
@@ -539,9 +559,13 @@ async def backfill_channel(
                 logger.warning("Failed to fetch playlist %s: %s", pl_id, exc)
 
         # Step 2: All videos (newest first)
-        videos = await get_all_channel_videos_paginated(source.external_id, order="date", max_pages=20)
+        videos = await get_all_channel_videos_paginated(
+            source.external_id, order="date", max_pages=20
+        )
         video_infos = [_extract_video_info(it) for it in videos]
-        video_infos = [v for v in video_infos if v["external_id"] and v["external_id"] not in seen_video_ids]
+        video_infos = [
+            v for v in video_infos if v["external_id"] and v["external_id"] not in seen_video_ids
+        ]
         count = await _insert_source_items(db, str(source.id), video_infos, priority=2)
         video_items_count = count
 

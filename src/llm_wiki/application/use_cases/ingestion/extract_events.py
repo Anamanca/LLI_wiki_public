@@ -1,18 +1,15 @@
 import logging
-
-from llm_wiki.application.ports.repositories.event_repository import EventRepository
-from llm_wiki.application.ports.search.vector_search import LLMClientPort, EmbeddingServicePort
-from llm_wiki.application.ports.repositories.page_repository import PageRepository
-from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort
-from llm_wiki.domain.entities.event import EventCanonical, EventObservation
-from llm_wiki.domain.entities.entity import Entity, EventEntityLink
-from llm_wiki.domain.value_objects.identifiers import EventId, PageId
-from llm_wiki.application.ports.repositories.entity_repository import EntityRepository
-
 from datetime import datetime
-
-from llm_wiki.shared.datetime_utils import now
 from uuid import uuid4
+
+from llm_wiki.application.ports.repositories.entity_repository import EntityRepository
+from llm_wiki.application.ports.repositories.event_repository import EventRepository
+from llm_wiki.application.ports.search.vector_search import EmbeddingServicePort, LLMClientPort
+from llm_wiki.application.ports.telemetry.telemetry_port import TelemetryPort
+from llm_wiki.domain.entities.entity import Entity, EventEntityLink
+from llm_wiki.domain.entities.event import EventCanonical, EventObservation
+from llm_wiki.domain.value_objects.identifiers import EventId, PageId
+from llm_wiki.shared.datetime_utils import now
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +80,17 @@ class ExtractEventsUseCase:
         try:
             response = await self._llm.chat_completion(
                 messages=[
-                    {"role": "system", "content": "You extract structured events from text. Return only valid JSON."},
+                    {
+                        "role": "system",
+                        "content": "You extract structured events from text. Return only valid JSON.",
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
             )
 
             import json
+
             data = json.loads(response)
             if isinstance(data, dict):
                 data = [data]
@@ -105,7 +106,9 @@ class ExtractEventsUseCase:
                     canonical = EventCanonical(
                         id=EventId(str(uuid4())),
                         title=event_title,
-                        normalized_date=datetime.strptime(evt["date"], "%Y-%m-%d").date() if "date" in evt else None,
+                        normalized_date=datetime.strptime(evt["date"], "%Y-%m-%d").date()
+                        if "date" in evt
+                        else None,
                         category=evt.get("category"),
                         entities=evt.get("entities", {}),
                         importance_score=0.5,

@@ -3,7 +3,6 @@
 import json
 import logging
 from datetime import datetime
-from llm_wiki.shared.datetime_utils import now
 
 from llm_wiki.application.ports.search.query_analyzer_port import (
     QueryAnalysis,
@@ -11,6 +10,7 @@ from llm_wiki.application.ports.search.query_analyzer_port import (
 )
 from llm_wiki.application.ports.search.vector_search import LLMClientPort
 from llm_wiki.domain.value_objects.time_range import TimeRange
+from llm_wiki.shared.datetime_utils import now
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +54,10 @@ CHỈ output JSON, không markdown."""
 # Intent → retrieval weights (from 29_LLM_wiki production config)
 INTENT_WEIGHTS: dict[str, dict[str, float]] = {
     "current_state": {"events": 1.0, "sections": 0.7},
-    "historical":    {"events": 0.8, "sections": 0.5},
-    "timeline":      {"events": 1.0, "sections": 0.3},
-    "comparative":   {"events": 0.5, "sections": 0.8},
-    "general":       {"events": 0.4, "sections": 1.0},
+    "historical": {"events": 0.8, "sections": 0.5},
+    "timeline": {"events": 1.0, "sections": 0.3},
+    "comparative": {"events": 0.5, "sections": 0.8},
+    "general": {"events": 0.4, "sections": 1.0},
 }
 
 
@@ -160,25 +160,27 @@ class LLMQueryAnalyzerAdapter(QueryAnalyzerPort):
 
             # Keyword extraction for full-text search
             keywords: list[str] = [
-                str(k).strip() for k in parsed.get("keywords", [])
-                if k and str(k).strip()
+                str(k).strip() for k in parsed.get("keywords", []) if k and str(k).strip()
             ]
             key_phrases: list[str] = [
-                str(p).strip() for p in parsed.get("key_phrases", [])
-                if p and str(p).strip()
+                str(p).strip() for p in parsed.get("key_phrases", []) if p and str(p).strip()
             ]
             search_query = str(parsed.get("search_query", "") or "").strip()
 
             # Sub-questions for complex queries
             sub_questions: list[str] = [
-                str(sq).strip() for sq in parsed.get("sub_questions", [])
-                if sq and str(sq).strip()
+                str(sq).strip() for sq in parsed.get("sub_questions", []) if sq and str(sq).strip()
             ]
 
             logger.debug(
                 "Query analyzed: intent=%s lang=%s time_range=%s entities=%d keywords=%d phrases=%d sub_qs=%d",
-                intent, language, time_range, len(entities),
-                len(keywords), len(key_phrases), len(sub_questions),
+                intent,
+                language,
+                time_range,
+                len(entities),
+                len(keywords),
+                len(key_phrases),
+                len(sub_questions),
             )
             return QueryAnalysis(
                 intent=intent,

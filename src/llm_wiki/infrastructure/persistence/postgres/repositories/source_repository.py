@@ -1,29 +1,29 @@
-from datetime import datetime
-from llm_wiki.shared.datetime_utils import now
-from typing import Optional
-
-from sqlalchemy import select, or_
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.application.ports.repositories.source_repository import SourceRepository, SourceItemRepository
+from llm_wiki.application.ports.repositories.source_repository import (
+    SourceItemRepository,
+    SourceRepository,
+)
 from llm_wiki.domain.entities.source import Source, SourceItem
 from llm_wiki.domain.value_objects.identifiers import SourceId, SourceItemId
 from llm_wiki.infrastructure.persistence.postgres import models as orm
-from llm_wiki.infrastructure.persistence.postgres.mappers import SourceMapper, SourceItemMapper
+from llm_wiki.infrastructure.persistence.postgres.mappers import SourceItemMapper, SourceMapper
+from llm_wiki.shared.datetime_utils import now
 
 
 class PostgresSourceRepository(SourceRepository):
     def __init__(self, session: AsyncSession):
         self._session = session
 
-    async def get_by_id(self, source_id: SourceId) -> Optional[Source]:
+    async def get_by_id(self, source_id: SourceId) -> Source | None:
         result = await self._session.execute(
             select(orm.Source).where(orm.Source.id == source_id.value)
         )
         row = result.scalar_one_or_none()
         return SourceMapper.to_domain(row) if row else None
 
-    async def get_by_platform_external_id(self, platform: str, external_id: str) -> Optional[Source]:
+    async def get_by_platform_external_id(self, platform: str, external_id: str) -> Source | None:
         result = await self._session.execute(
             select(orm.Source).where(
                 orm.Source.platform == platform,
@@ -58,7 +58,7 @@ class PostgresSourceItemRepository(SourceItemRepository):
         self._session = session
         self._mapper = SourceItemMapper()
 
-    async def get_by_id(self, item_id: SourceItemId) -> Optional[SourceItem]:
+    async def get_by_id(self, item_id: SourceItemId) -> SourceItem | None:
         result = await self._session.execute(
             select(orm.SourceItem).where(orm.SourceItem.id == item_id.value)
         )
@@ -67,7 +67,7 @@ class PostgresSourceItemRepository(SourceItemRepository):
 
     async def get_by_source_and_external_id(
         self, source_id: SourceId, external_id: str
-    ) -> Optional[SourceItem]:
+    ) -> SourceItem | None:
         result = await self._session.execute(
             select(orm.SourceItem).where(
                 orm.SourceItem.source_id == source_id.value,
@@ -84,7 +84,7 @@ class PostgresSourceItemRepository(SourceItemRepository):
         await self._session.flush()
         return self._mapper.to_domain(orm_item)
 
-    async def claim_next_pending(self) -> Optional[SourceItem]:
+    async def claim_next_pending(self) -> SourceItem | None:
         result = await self._session.execute(
             select(orm.SourceItem)
             .where(orm.SourceItem.status == "pending")

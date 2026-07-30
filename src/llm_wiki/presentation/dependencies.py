@@ -1,21 +1,20 @@
 from dependency_injector import containers, providers
 
+from llm_wiki.application.use_cases.ingestion.extract_events import ExtractEventsUseCase
+from llm_wiki.application.use_cases.ingestion.integrate_wiki import IntegrateWikiUseCase
+from llm_wiki.application.use_cases.ingestion.process_video import (
+    ProcessVideoUseCase,
+    RetryableIngestion,
+)
+from llm_wiki.application.use_cases.query.ask_question import AskQuestionUseCase
+from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
+from llm_wiki.application.use_cases.query.stream_answer import StreamAnswerUseCase
 from llm_wiki.config import settings
-from llm_wiki.infrastructure.persistence.postgres.repositories.source_repository import PostgresSourceRepository, PostgresSourceItemRepository
-from llm_wiki.infrastructure.persistence.postgres.repositories.page_repository import PostgresPageRepository, PostgresPageSectionRepository
-from llm_wiki.infrastructure.persistence.postgres.repositories.event_repository import PostgresEventRepository
-from llm_wiki.infrastructure.persistence.postgres.repositories.entity_repository import PostgresEntityRepository
-from llm_wiki.infrastructure.persistence.file import ChatSessionFileRepository
-from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter
 from llm_wiki.infrastructure.embedding.ollama_adapter import OllamaEmbeddingAdapter
+from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter
+from llm_wiki.infrastructure.persistence.file import ChatSessionFileRepository
 from llm_wiki.infrastructure.persistence.redis.cache_adapter import RedisCacheAdapter
 from llm_wiki.infrastructure.telemetry import create_telemetry_adapter
-from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
-from llm_wiki.application.use_cases.query.ask_question import AskQuestionUseCase
-from llm_wiki.application.use_cases.query.stream_answer import StreamAnswerUseCase
-from llm_wiki.application.use_cases.ingestion.integrate_wiki import IntegrateWikiUseCase
-from llm_wiki.application.use_cases.ingestion.process_video import ProcessVideoUseCase, RetryableIngestion
-from llm_wiki.application.use_cases.ingestion.extract_events import ExtractEventsUseCase
 
 
 def traced_llm(name: str = "llm_chat_completion"):
@@ -117,6 +116,3 @@ class Container(containers.DeclarativeContainer):
 
 container = Container()
 container.config.from_pydantic(settings)
-
-from llm_wiki.infrastructure.persistence.postgres.database import get_db  # noqa: E402
-

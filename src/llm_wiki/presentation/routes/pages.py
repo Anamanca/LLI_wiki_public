@@ -1,13 +1,14 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from llm_wiki.presentation.dependencies import get_db
-from llm_wiki.infrastructure.persistence.postgres.repositories.page_repository import PostgresPageRepository
 from llm_wiki.infrastructure.persistence.postgres import models as orm
-from llm_wiki.domain.value_objects.identifiers import PageId
+from llm_wiki.infrastructure.persistence.postgres.repositories.page_repository import (
+    PostgresPageRepository,
+)
+from llm_wiki.presentation.dependencies import get_db
 
 router = APIRouter()
 
@@ -22,7 +23,7 @@ async def get_page(slug: str, db: AsyncSession = Depends(get_db)):
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
 
-    page_id = UUID(str(page.id.value)) if hasattr(page.id, 'value') else UUID(str(page.id))
+    page_id = UUID(str(page.id.value)) if hasattr(page.id, "value") else UUID(str(page.id))
 
     # Fetch sections
     sections_q = (
@@ -80,7 +81,11 @@ async def get_page(slug: str, db: AsyncSession = Depends(get_db)):
     source_url = None
     if page.source_id:
         src_result = await db.execute(
-            select(orm.Source).where(orm.Source.id == page.source_id.value if hasattr(page.source_id, 'value') else page.source_id)
+            select(orm.Source).where(
+                orm.Source.id == page.source_id.value
+                if hasattr(page.source_id, "value")
+                else page.source_id
+            )
         )
         src = src_result.scalar_one_or_none()
         if src:

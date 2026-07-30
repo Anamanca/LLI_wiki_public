@@ -29,22 +29,35 @@ class Settings(BaseSettings):
 
     llm_provider: str = Field(default="auto", validation_alias="LLM_PROVIDER")
     opencode_api_key: str = Field(default="", validation_alias="OPENCODE_API_KEY")
-    opencode_base_url: str = Field(default="https://opencode.ai/zen/go/v1", validation_alias="OPENCODE_BASE_URL")
-    opencode_primary_model: str = Field(default="deepseek-v4-flash", validation_alias="OPENCODE_PRIMARY_MODEL")
-    opencode_fallback_model: str = Field(default="deepseek-v4-flash", validation_alias="OPENCODE_FALLBACK_MODEL")
-    opencode_chat_model: str = Field(default="deepseek-v4-flash", validation_alias="OPENCODE_CHAT_MODEL")
+    opencode_base_url: str = Field(
+        default="https://opencode.ai/zen/go/v1", validation_alias="OPENCODE_BASE_URL"
+    )
+    opencode_primary_model: str = Field(
+        default="deepseek-v4-flash", validation_alias="OPENCODE_PRIMARY_MODEL"
+    )
+    opencode_fallback_model: str = Field(
+        default="deepseek-v4-flash", validation_alias="OPENCODE_FALLBACK_MODEL"
+    )
+    opencode_chat_model: str = Field(
+        default="deepseek-v4-flash", validation_alias="OPENCODE_CHAT_MODEL"
+    )
 
     gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY")
-    gemini_base_url: str = Field(default="https://generativelanguage.googleapis.com/v1beta/openai/", validation_alias="GEMINI_BASE_URL")
-    gemini_primary_model: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_PRIMARY_MODEL")
-    gemini_fallback_model: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_FALLBACK_MODEL")
+    gemini_base_url: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta/openai/",
+        validation_alias="GEMINI_BASE_URL",
+    )
+    gemini_primary_model: str = Field(
+        default="gemini-2.5-flash", validation_alias="GEMINI_PRIMARY_MODEL"
+    )
+    gemini_fallback_model: str = Field(
+        default="gemini-2.5-flash", validation_alias="GEMINI_FALLBACK_MODEL"
+    )
     gemini_chat_model: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_CHAT_MODEL")
 
     temporal_precision_enabled: bool = True
     reranker_enabled: bool = Field(default=True, validation_alias="RERANKER_ENABLED")
-    cross_encoder_enabled: bool = Field(
-        default=False, validation_alias="CROSS_ENCODER_ENABLED"
-    )
+    cross_encoder_enabled: bool = Field(default=False, validation_alias="CROSS_ENCODER_ENABLED")
     cross_encoder_model: str = Field(
         default="BAAI/bge-reranker-v2-m3", validation_alias="CROSS_ENCODER_MODEL"
     )

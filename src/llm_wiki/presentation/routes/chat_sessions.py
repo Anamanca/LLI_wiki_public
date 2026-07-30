@@ -6,19 +6,15 @@ They replace the stub implementations in ``stubs.py``.
 
 from __future__ import annotations
 
-from datetime import datetime
-from llm_wiki.shared.datetime_utils import now
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from llm_wiki.application.ports.repositories.chat_session_repository import (
     ChatMessage,
     ChatSessionRepository,
 )
 from llm_wiki.presentation.dependencies import container
-
+from llm_wiki.shared.datetime_utils import now
 
 router = APIRouter()
 
@@ -33,12 +29,12 @@ class ChatMessagePayload(BaseModel):
 
 
 class ChatSessionCreatePayload(BaseModel):
-    title: Optional[str] = None
+    title: str | None = None
 
 
 class ChatSessionUpdatePayload(BaseModel):
     messages: list[ChatMessagePayload]
-    title: Optional[str] = None
+    title: str | None = None
 
 
 class ChatSessionMetaResponse(BaseModel):
@@ -118,17 +114,13 @@ async def update_chat_session(
     session = await repo.get_by_id(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    session.messages = [
-        ChatMessage(role=m.role, content=m.content) for m in payload.messages
-    ]
+    session.messages = [ChatMessage(role=m.role, content=m.content) for m in payload.messages]
     # Auto-title from the first user message when the session still has the
     # default placeholder title.
     if payload.title is not None:
         session.title = payload.title
     elif session.title in ("New Chat", "Untitled", "", None):
-        first_user = next(
-            (m for m in payload.messages if m.role == "user"), None
-        )
+        first_user = next((m for m in payload.messages if m.role == "user"), None)
         if first_user:
             session.title = first_user.content[:60]
     await repo.save(session)

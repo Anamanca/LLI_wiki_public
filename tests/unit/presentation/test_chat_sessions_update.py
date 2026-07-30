@@ -1,7 +1,7 @@
-import pytest
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi import HTTPException
 
 from llm_wiki.application.ports.repositories.chat_session_repository import (
@@ -29,25 +29,33 @@ def mock_repo():
 
 @pytest.mark.asyncio
 async def test_update_chat_session_auto_titles_from_first_user_message(mock_repo):
-    payload = type("P", (), {
-        "messages": [
-            ChatMessage(role="user", content="What is retrieval augmented generation?"),
-            ChatMessage(role="assistant", content="It is..."),
-        ],
-        "title": None,
-    })()
+    payload = type(
+        "P",
+        (),
+        {
+            "messages": [
+                ChatMessage(role="user", content="What is retrieval augmented generation?"),
+                ChatMessage(role="assistant", content="It is..."),
+            ],
+            "title": None,
+        },
+    )()
     result = await update_chat_session("sess-1", payload, mock_repo)
     assert result.title == "What is retrieval augmented generation?"
 
 
 @pytest.mark.asyncio
 async def test_update_chat_session_respects_explicit_title(mock_repo):
-    payload = type("P", (), {
-        "messages": [
-            ChatMessage(role="user", content="Question"),
-        ],
-        "title": "Custom Title",
-    })()
+    payload = type(
+        "P",
+        (),
+        {
+            "messages": [
+                ChatMessage(role="user", content="Question"),
+            ],
+            "title": "Custom Title",
+        },
+    )()
     result = await update_chat_session("sess-1", payload, mock_repo)
     assert result.title == "Custom Title"
 
@@ -55,12 +63,16 @@ async def test_update_chat_session_respects_explicit_title(mock_repo):
 @pytest.mark.asyncio
 async def test_update_chat_session_keeps_existing_custom_title(mock_repo):
     mock_repo.get_by_id.return_value.title = "Existing Title"
-    payload = type("P", (), {
-        "messages": [
-            ChatMessage(role="user", content="New question"),
-        ],
-        "title": None,
-    })()
+    payload = type(
+        "P",
+        (),
+        {
+            "messages": [
+                ChatMessage(role="user", content="New question"),
+            ],
+            "title": None,
+        },
+    )()
     result = await update_chat_session("sess-1", payload, mock_repo)
     assert result.title == "Existing Title"
 
@@ -68,9 +80,13 @@ async def test_update_chat_session_keeps_existing_custom_title(mock_repo):
 @pytest.mark.asyncio
 async def test_update_chat_session_missing_returns_404(mock_repo):
     mock_repo.get_by_id.return_value = None
-    payload = type("P", (), {
-        "messages": [],
-        "title": None,
-    })()
+    payload = type(
+        "P",
+        (),
+        {
+            "messages": [],
+            "title": None,
+        },
+    )()
     with pytest.raises(HTTPException, match="Session not found"):
         await update_chat_session("missing", payload, mock_repo)

@@ -1,18 +1,17 @@
-from llm_wiki.application.ports.repositories.source_repository import SourceItemRepository
-from llm_wiki.application.ports.repositories.page_repository import PageRepository, PageSectionRepository
-from llm_wiki.application.ports.repositories.event_repository import EventRepository
+import re
+from uuid import uuid4
+
 from llm_wiki.application.ports.repositories.entity_repository import EntityRepository
+from llm_wiki.application.ports.repositories.event_repository import EventRepository
+from llm_wiki.application.ports.repositories.page_repository import (
+    PageRepository,
+    PageSectionRepository,
+)
 from llm_wiki.application.ports.search.vector_search import EmbeddingServicePort
 from llm_wiki.domain.entities.page import Page, PageSection
-from llm_wiki.domain.value_objects.identifiers import PageId, SourceId, SourceItemId
 from llm_wiki.domain.entities.source import SourceItem
-from llm_wiki.domain.exceptions import IngestionFailedError
-
-import re
-from datetime import datetime
-
+from llm_wiki.domain.value_objects.identifiers import PageId, SourceId
 from llm_wiki.shared.datetime_utils import now
-from uuid import uuid4
 
 
 class IntegrateWikiUseCase:
@@ -105,7 +104,7 @@ class IntegrateWikiUseCase:
             match = re.match(r"^#{1,3}\s+(.+)", sec)
             if match:
                 heading = match.group(1).strip()
-                body = sec[match.end():].strip()
+                body = sec[match.end() :].strip()
                 result.append((heading, body))
             else:
                 if result:

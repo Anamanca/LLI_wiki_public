@@ -4,8 +4,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 TEST_DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:test@localhost:5432/test"
+    "DATABASE_URL", "postgresql+asyncpg://postgres:test@localhost:5432/test"
 )
 
 

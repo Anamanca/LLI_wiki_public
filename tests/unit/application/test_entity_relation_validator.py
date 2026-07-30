@@ -1,13 +1,9 @@
 """Tests for the migrated 64-predicate entity relation taxonomy."""
 
-import pytest
-
 from llm_wiki.application.use_cases.ingestion.entity_relation_validator import (
-    VALID_PREDICATES,
     PREDICATE_TYPE_MATRIX,
+    VALID_PREDICATES,
     _is_direction_forbidden,
-    COMPANY_TYPES,
-    PERSON_TYPES,
 )
 
 

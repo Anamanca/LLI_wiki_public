@@ -8,8 +8,8 @@ touch Prometheus primitives directly. Every call is a safe no-op when
 from __future__ import annotations
 
 import time
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator
 
 from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
 
@@ -27,9 +27,7 @@ def track_duration(
         get_metrics().histogram(metric_name, duration, labels or {})
 
 
-def inc_counter(
-    metric_name: str, labels: dict[str, str] | None = None, value: float = 1
-) -> None:
+def inc_counter(metric_name: str, labels: dict[str, str] | None = None, value: float = 1) -> None:
     """Increment a counter by *value* (default 1)."""
     get_metrics().counter(metric_name, value, labels or {})
 

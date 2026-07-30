@@ -76,7 +76,8 @@ class LLMRerankerAdapter(RerankerPort):
             if result:
                 logger.debug(
                     "Re-ranked %d docs → %d (top score: %.2f, bottom: %.2f)",
-                    len(documents), len(result),
+                    len(documents),
+                    len(result),
                     sorted_docs[0][0] if sorted_docs else 0,
                     sorted_docs[-1][0] if sorted_docs else 0,
                 )
@@ -87,17 +88,21 @@ class LLMRerankerAdapter(RerankerPort):
             return documents[:top_n]
 
     async def _score_batch(
-        self, query: str, documents: list[SearchResult],
+        self,
+        query: str,
+        documents: list[SearchResult],
     ) -> dict[str, tuple[float, SearchResult]]:
         """Score a batch of documents."""
         doc_list = []
         for idx, doc in enumerate(documents):
             content_preview = (doc.content or "")[:500].replace("\n", " ")
-            doc_list.append({
-                "id": str(idx),
-                "title": doc.title or "",
-                "content": content_preview,
-            })
+            doc_list.append(
+                {
+                    "id": str(idx),
+                    "title": doc.title or "",
+                    "content": content_preview,
+                }
+            )
 
         user_prompt = (
             f"Câu hỏi: {query}\n\n"

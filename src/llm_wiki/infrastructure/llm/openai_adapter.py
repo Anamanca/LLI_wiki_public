@@ -1,6 +1,7 @@
 import json
 import logging
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import httpx
 
@@ -150,7 +151,9 @@ class OpenAIAdapter(LLMClientPort):
         }
         async with httpx.AsyncClient(timeout=180.0) as client:
             try:
-                async with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
+                async with client.stream(
+                    "POST", url, headers=self._headers(), json=payload
+                ) as resp:
                     logger.warning("LLM stream status: %s", resp.status_code)
                     resp.raise_for_status()
                     chunk_count = 0
@@ -193,7 +196,11 @@ class OpenAIAdapter(LLMClientPort):
                                     }
                             except (json.JSONDecodeError, KeyError, IndexError):
                                 continue
-                    logger.warning("LLM stream finished: chunks=%d, content_chunks=%d", chunk_count, content_count)
+                    logger.warning(
+                        "LLM stream finished: chunks=%d, content_chunks=%d",
+                        chunk_count,
+                        content_count,
+                    )
             except Exception as e:
                 llm_logger.error("Stream error: %s", str(e))
                 raise

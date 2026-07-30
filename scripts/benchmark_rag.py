@@ -68,7 +68,9 @@ async def build_pipeline() -> QueryPipeline:
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark RAG pipeline")
-    parser.add_argument("--questions", required=True, type=Path, help="Path to JSONL questions file")
+    parser.add_argument(
+        "--questions", required=True, type=Path, help="Path to JSONL questions file"
+    )
     parser.add_argument("--output", required=True, type=Path, help="Path to write metrics JSON")
     parser.add_argument("--warmup", type=int, default=1, help="Number of warmup questions")
     parser.add_argument("--repeat", type=int, default=1, help="Repeat each question N times")
@@ -105,22 +107,26 @@ async def main() -> int:
                 if result.get("cache_hit"):
                     cache_hits += 1
                 pipeline_steps = result.get("pipeline_steps", {})
-                records.append({
-                    "question": question,
-                    "latency_ms": round(latency_ms, 2),
-                    "tokens_used": result.get("tokens_used", 0),
-                    "cache_hit": result.get("cache_hit", False),
-                    "pipeline_steps": {
-                        k: round(v * 1000, 2) for k, v in pipeline_steps.items()
-                    },
-                })
+                records.append(
+                    {
+                        "question": question,
+                        "latency_ms": round(latency_ms, 2),
+                        "tokens_used": result.get("tokens_used", 0),
+                        "cache_hit": result.get("cache_hit", False),
+                        "pipeline_steps": {
+                            k: round(v * 1000, 2) for k, v in pipeline_steps.items()
+                        },
+                    }
+                )
             except Exception as exc:
                 errors += 1
-                records.append({
-                    "question": question,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                })
+                records.append(
+                    {
+                        "question": question,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    }
+                )
 
     latencies = [r["latency_ms"] for r in records if "latency_ms" in r]
     metrics = {
@@ -145,7 +151,11 @@ async def main() -> int:
     for r in records:
         step_keys.update(r.get("pipeline_steps", {}).keys())
     for key in step_keys:
-        values = [r["pipeline_steps"][key] for r in records if "pipeline_steps" in r and key in r["pipeline_steps"]]
+        values = [
+            r["pipeline_steps"][key]
+            for r in records
+            if "pipeline_steps" in r and key in r["pipeline_steps"]
+        ]
         if values:
             metrics["step_latency_ms"][key] = {
                 "mean": round(statistics.mean(values), 2),
