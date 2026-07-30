@@ -340,8 +340,8 @@ async def list_cron_jobs(db: AsyncSession = Depends(get_db)):
     rows = result.scalars().all()
 
     # Pre-fetch K8s state once for all kubernetes_cronjob entries.
-    cronjobs_map = await _list_k8s_cronjobs()
-    jobs_list = await _list_k8s_jobs()
+    _ = await _list_k8s_cronjobs()
+    _ = await _list_k8s_jobs()
     bg_status, bg_alive = await _background_task_status(db)
 
     jobs = []
@@ -456,8 +456,8 @@ async def get_scan_logs(
     if source_id:
         try:
             sid = UUID(source_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid source ID")
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail="Invalid source ID") from err
         q = q.where(orm.ScanLog.source_id == sid)
     if days > 0:
         cutoff = now() - timedelta(days=days)
@@ -480,7 +480,7 @@ async def get_scan_logs(
             "error_message": l.error_message,
             "success": l.success,
         }
-        for l in logs
+        for log in logs
     ]
 
 
@@ -503,8 +503,8 @@ async def admin_health(db: AsyncSession = Depends(get_db)):
 async def restart_item(item_id: str, db: AsyncSession = Depends(get_db)):
     try:
         iid = UUID(item_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid item ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid item ID") from err
     result = await db.execute(select(orm.SourceItem).where(orm.SourceItem.id == iid))
     item = result.scalar_one_or_none()
     if not item:
@@ -520,8 +520,8 @@ async def restart_item(item_id: str, db: AsyncSession = Depends(get_db)):
 async def restart_source(source_id: str, db: AsyncSession = Depends(get_db)):
     try:
         sid = UUID(source_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid source ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid source ID") from err
     error_statuses = ["failed", "no_captions", "rate_limited", "skipped"]
     result = await db.execute(
         select(orm.SourceItem).where(
@@ -590,8 +590,8 @@ async def update_api_key(key_id: str, _: dict):
 async def delete_api_key(key_id: str, db: AsyncSession = Depends(get_db)):
     try:
         kid = UUID(key_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid API key ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid API key ID") from err
     result = await db.execute(select(orm.ApiKey).where(orm.ApiKey.id == kid))
     key = result.scalar_one_or_none()
     if not key:
@@ -605,8 +605,8 @@ async def delete_api_key(key_id: str, db: AsyncSession = Depends(get_db)):
 async def activate_api_key(key_id: str, db: AsyncSession = Depends(get_db)):
     try:
         kid = UUID(key_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid API key ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid API key ID") from err
     result = await db.execute(select(orm.ApiKey).where(orm.ApiKey.id == kid))
     key = result.scalar_one_or_none()
     if not key:

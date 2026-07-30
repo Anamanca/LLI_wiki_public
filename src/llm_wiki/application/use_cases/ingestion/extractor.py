@@ -6,6 +6,7 @@ Flow: RapidAPI → yt-dlp fallback → GPU whisper
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -27,10 +28,8 @@ COOKIE_FILE_NAME = "youtube.cookies.txt"
 
 def _ensure_transcript_dir() -> None:
     """Ensure the transcript directory exists (best-effort, called lazily)."""
-    try:
+    with contextlib.suppress(OSError):
         os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
-    except OSError:
-        pass
 
 
 @dataclass
@@ -195,10 +194,10 @@ async def _run_ytdlp(args: list[str], timeout: float = 300.0) -> str:
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
+    except TimeoutError as exc:
         proc.kill()
         await proc.wait()
-        raise RuntimeError(f"yt-dlp timed out after {timeout}s")
+        raise RuntimeError(f"yt-dlp timed out after {timeout}s") from exc
 
     if proc.returncode not in (0, None):
         err_text = stderr.decode("utf-8", errors="replace")[:500]
@@ -326,16 +325,6 @@ async def check_video_accessible(
         "refused",
         "reset",
         "aborted",
-    ]
-    permanent_keywords = [
-        "private",
-        "members",
-        "unavailable",
-        "removed",
-        "deleted",
-        "not found",
-        "premieres",
-        "upcoming",
     ]
 
     last_err = ""
@@ -714,13 +703,15 @@ async def extract_transcript(
                         logger.warning("Failed to save transcript for %s: %s", video_id, exc)
                     return whisper_transcript
             except Exception as e:
-                # Re-raise permanent errors so worker classify_extract_error handles them correctly
-                # (members-only, private, deleted → no_captions NO MORE; → requires_membership/unavailable)
+                # Re-raise permanent errors so worker classify_extract_error handles them
+                # correctly (members-only, private, deleted → no_captions NO MORE;
+                # → requires_membership/unavailable)
                 permanent = _classify_video_error(str(e))
                 if permanent:
                     logger.info("Permanent error for %s: %s", video_id, permanent)
                     raise RuntimeError(f"Video permanently unavailable: {permanent}") from e
-                # Re-raise transient errors (anti-bot, 429, network) too — worker will retry with backoff
+                # Re-raise transient errors (anti-bot, 429, network) too —
+                # worker will retry with backoff
                 logger.warning(
                     "Whisper failed for %s: %s — propagating to worker for retry", video_id, e
                 )

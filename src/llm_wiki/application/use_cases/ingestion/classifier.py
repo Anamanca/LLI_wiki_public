@@ -18,17 +18,23 @@ import re
 
 logger = logging.getLogger(__name__)
 
-CLASSIFY_SYSTEM_PROMPT = """Bạn là chuyên gia phân tích dữ liệu và trích xuất kiến thức (Knowledge Extractor).
+CLASSIFY_SYSTEM_PROMPT = """Bạn là chuyên gia phân tích dữ liệu và trích xuất \
+kiến thức (Knowledge Extractor).
 Nhiệm vụ của bạn là đọc bản dịch video và phân loại nội dung một cách khoa học, logic.
 
 == HƯỚNG DẪN TRÍCH XUẤT ==
 1. main_topic: Tiêu đề mô tả đầy đủ chủ đề cốt lõi (5-15 từ). Phải chứa thực thể chính.
-2. domain: Chọn 1 giá trị chính xác: "finance", "stock_market", "macroeconomics", "real_estate", "crypto", "business", "technology", "general".
-3. subtopics: Mảng các chủ đề phụ chi tiết. Hãy liệt kê cụ thể các sự kiện hoặc khái niệm được thảo luận.
-4. key_entities: Liệt kê TẤT CẢ các thực thể: mã chứng khoán (VD: VCB, VNINDEX), tên công ty, tên người, chỉ số kinh tế (CPI, GDP, lãi suất FED), các chính sách/luật pháp.
+2. domain: Chọn 1 giá trị chính xác: "finance", "stock_market", "macroeconomics",
+   "real_estate", "crypto", "business", "technology", "general".
+3. subtopics: Mảng các chủ đề phụ chi tiết. Hãy liệt kê cụ thể các sự kiện hoặc khái niệm
+   được thảo luận.
+4. key_entities: Liệt kê TẤT CẢ các thực thể: mã chứng khoán (VD: VCB, VNINDEX),
+   tên công ty, tên ngườichỉ số kinh tế (CPI, GDP, lãi suất FED), các chính sách/luật pháp.
 5. language: "en", "vi", hoặc "mixed".
-6. summary_3sentences: Ba câu tóm tắt cực kỳ chi tiết, bao gồm: luận điểm chính, các con số/dữ liệu then chốt, và kết luận của diễn giả.
-7. existing_pages_to_update: Mảng các slug bài viết hiện có cần được cập nhật (để trống nếu không biết).
+6. summary_3sentences: Ba câu tóm tắt cực kỳ chi tiết, bao gồm: luận điểm chính,
+   các con số/dữ liệu then chốt, và kết luận của diễn giả.
+7. existing_pages_to_update: Mảng các slug bài viết hiện có cần được cập nhật
+   (để trống nếu không biết).
 
 == NGUYÊN TẮC QUAN TRỌNG (COMPENSATE FOR FLASH MODEL) ==
 - Ưu tiên các dữ liệu định lượng (con số, tỷ lệ %).
@@ -36,18 +42,32 @@ Nhiệm vụ của bạn là đọc bản dịch video và phân loại nội du
 - Viết tóm tắt có tính phân tích cao, không viết chung chung.
 
 == VÍ DỤ OUTPUT MONG ĐỢI ==
-VIDEO: "Phân tích thị trường chứng khoán 15/3: VN-Index giảm 12.5 điểm do khối ngoại bán ròng 850 tỷ.
-Cổ phiếu ngân hàng VCB, BID giảm mạnh nhất. Chuyên gia Nguyễn Văn A nhận định đây là nhịp điều chỉnh
-kỹ thuật, khuyến nghị mua vào vùng 1240-1250. CPI tháng 3 dự báo tăng 0.5%."
+VIDEO: "Phân tích thị trường chứng khoán 15/3: VN-Index giảm 12.5 điểm do khối ngoại
+bán ròng 850 tỷ. Cổ phiếu ngân hàng VCB, BID giảm mạnh nhất. Chuyên gia Nguyễn Văn A
+nhận định đây là nhịp điều chỉnh kỹ thuật, khuyến nghị mua vào vùng 1240-1250.
+CPI tháng 3 dự báo tăng 0.5%."
 
 OUTPUT:
 {
-  "main_topic": "VN-Index giảm 12.5 điểm do khối ngoại bán ròng, chuyên gia khuyến nghị mua vào vùng hỗ trợ",
+  "main_topic": "VN-Index giảm 12.5 điểm do khối ngoại bán ròng, chuyên gia khuyến nghị"
+                " mua vào vùng hỗ trợ",
   "domain": "stock_market",
-  "subtopics": ["Áp lực bán ròng khối ngoại", "Diễn biến cổ phiếu ngân hàng VCB và BID", "Nhận định và khuyến nghị của chuyên gia", "Dự báo CPI tháng 3"],
-  "key_entities": ["VN-Index", "VCB", "BID", "Nguyễn Văn A", "CPI", "12.5 điểm", "850 tỷ", "1240-1250 điểm"],
+  "subtopics": [
+    "Áp lực bán ròng khối ngoại",
+    "Diễn biến cổ phiếu ngân hàng VCB và BID",
+    "Nhận định và khuyến nghị của chuyên gia",
+    "Dự báo CPI tháng 3"
+  ],
+  "key_entities": [
+    "VN-Index", "VCB", "BID", "Nguyễn Văn A", "CPI",
+    "12.5 điểm", "850 tỷ", "1240-1250 điểm"
+  ],
   "language": "vi",
-  "summary_3sentences": "VN-Index giảm 12.5 điểm trong phiên 15/3 do áp lực bán ròng 850 tỷ đồng từ khối ngoại, tập trung vào nhóm ngân hàng VCB và BID. Chuyên gia Nguyễn Văn A nhận định đây chỉ là nhịp điều chỉnh kỹ thuật và khuyến nghị nhà đầu tư mua vào khi chỉ số về vùng 1240-1250 điểm. CPI tháng 3 được dự báo tăng 0.5%, không gây áp lực lớn lên mặt bằng lãi suất.",
+  "summary_3sentences": "VN-Index giảm 12.5 điểm trong phiên 15/3 do áp lực bán ròng 850 tỷ"
+                        " đồng từ khối ngoại, tập trung vào nhóm ngân hàng VCB và BID. Chuyên gia"
+                        " Nguyễn Văn A nhận định đây chỉ là nhịp điều chỉnh kỹ thuật và khuyến"
+                        " nghị nhà đầu tư mua vào khi chỉ số về vùng 1240-1250 điểm. CPI tháng 3"
+                        " được dự báo tăng 0.5%, không gây áp lực lớn lên mặt bằng lãi suất.",
   "existing_pages_to_update": []
 }
 
@@ -159,9 +179,6 @@ async def classify_transcript(
         (primary_model, 16.0),
     ]
 
-    last_error: Exception | None = None
-    last_raw = ""
-
     for model, backoff in models_to_try:
         try:
             resp = await asyncio.wait_for(
@@ -204,12 +221,10 @@ async def classify_transcript(
                 model,
                 backoff,
             )
-            last_error = TimeoutError(f"Classification timed out after {timeout}s")
         except RateLimitError:
             logger.warning("Rate limited on %s — propagating", model)
             raise
         except Exception as exc:
-            last_error = exc
             logger.warning(
                 "Classification attempt failed (model=%s, backoff=%.0fs): %s",
                 model,

@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import random
@@ -414,7 +415,8 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
     if merge_classify_enabled:
         # Path A: Skip classifier — wiki_consumer will use Pass 1 classification
         logger.info(
-            "Worker %d: MERGE_CLASSIFY_ENABLED=true — skipping classifier, wiki_consumer will self-classify",
+            "Worker %d: MERGE_CLASSIFY_ENABLED=true — skipping classifier, "
+            "wiki_consumer will self-classify",
             WORKER_ID,
         )
         classification_data = {
@@ -455,12 +457,11 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
             await handle_job_failure(item, exc, db)
             return
 
-        await _log_event(
-            db,
-            item.id,
-            "classify_done",
-            f"Classified: {classification_data.get('main_topic', '')}, lang={classification_data.get('language', '')}",
+        classify_msg = (
+            f"Classified: {classification_data.get('main_topic', '')}, "
+            f"lang={classification_data.get('language', '')}"
         )
+        await _log_event(db, item.id, "classify_done", classify_msg)
 
         # Build summary_vector from classifier output
         classification_text = classification_data.get(
@@ -576,8 +577,8 @@ async def handle_job_failure(
     item.error_message = error_msg
 
     if is_temporary_pause:
-        # Rate-limit/402: reset to pending with 24-hour backoff (pending until manual reset or next day)
-        # DON'T increment retry_count
+        # Rate-limit/402: reset to pending with 24-hour backoff
+        # (pending until manual reset or next day). DON'T increment retry_count
         item.status = "pending"
         item.retry_after = now() + timedelta(hours=24)
         await _log_event(
@@ -597,9 +598,11 @@ async def handle_job_failure(
         if is_payment_required:
             source = await db.get(Source, item.source_id)
             source_name = source.name if source else "unknown"
-            await send_telegram_alert(
-                f"🚨 API Quota/Payment limit reached: [{source_name}] {item.title or item.external_id}\n{error_msg[:200]}"
+            alert = (
+                f"🚨 API Quota/Payment limit reached: [{source_name}] "
+                f"{item.title or item.external_id}\n{error_msg[:200]}"
             )
+            await send_telegram_alert(alert)
     else:
         item.retry_count = (item.retry_count or 0) + 1
         if item.retry_count <= 2:
@@ -628,9 +631,11 @@ async def handle_job_failure(
             source = await db.get(Source, item.source_id)
             source_name = source.name if source else "unknown"
             await push_error_web(item.id, error_msg, db, event_type="error")
-            await send_telegram_alert(
-                f"⚠️ Ingest failed: [{source_name}] {item.title or item.external_id}\n{error_msg[:200]}"
+            alert = (
+                f"⚠️ Ingest failed: [{source_name}] "
+                f"{item.title or item.external_id}\n{error_msg[:200]}"
             )
+            await send_telegram_alert(alert)
             logger.error(
                 "Worker %d: Job %s permanently failed after %d attempts",
                 WORKER_ID,
@@ -669,11 +674,13 @@ async def worker_loop() -> None:
                     # Report pending queue depth every idle cycle
                     from sqlalchemy import func, select
 
-                    from llm_wiki.infrastructure.persistence.postgres.models import SourceItem as SI
+                    from llm_wiki.infrastructure.persistence.postgres.models import SourceItem
 
                     pending_count = (
                         await db.execute(
-                            select(func.count()).select_from(SI).where(SI.status == "pending")
+                            select(func.count())
+                            .select_from(SourceItem)
+                            .where(SourceItem.status == "pending")
                         )
                     ).scalar() or 0
                     set_gauge("ingestion_queue_depth", float(pending_count), {"queue": "cpu"})
@@ -707,19 +714,15 @@ async def worker_loop() -> None:
                 logger.critical(
                     "Worker %d: DB offline or in recovery. Sleeping for 60s.", WORKER_ID
                 )
-                try:
+                with contextlib.suppress(Exception):
                     set_worker_state(
                         WORKER_ID, "error", error="DB Offline / Recovery Mode. Paused 60s."
                     )
-                except Exception:
-                    pass
                 await asyncio.sleep(60)
             else:
                 logger.error("Worker %d loop error: %s", WORKER_ID, loop_exc)
-                try:
+                with contextlib.suppress(Exception):
                     set_worker_state(WORKER_ID, "error", error=str(loop_exc)[:500])
-                except Exception:
-                    pass
                 await asyncio.sleep(5)
 
     logger.info("Worker %d shutting down", WORKER_ID)
@@ -785,10 +788,8 @@ async def main() -> None:
         for task in (health_task, heartbeat_task):
             task.cancel()
         for task in (health_task, heartbeat_task):
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
 
     logger.info("CPU worker %d stopped", WORKER_ID)
 

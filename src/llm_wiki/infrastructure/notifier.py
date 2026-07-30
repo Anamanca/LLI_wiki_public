@@ -121,8 +121,10 @@ async def notify_rate_limit(
         # Using NULL source_item_id via raw SQL since FK is NOT NULL in the model
         await db.execute(
             text(
-                "INSERT INTO ingestion_logs (id, source_item_id, event_type, message, metadata_json, created_at) "
-                "SELECT gen_random_uuid(), id, 'rate_limit_hit', :message, :meta, now() FROM source_items WHERE status='rate_limited' LIMIT 1"
+                "INSERT INTO ingestion_logs "
+                "(id, source_item_id, event_type, message, metadata_json, created_at) "
+                "SELECT gen_random_uuid(), id, 'rate_limit_hit', :message, :meta, now() "
+                "FROM source_items WHERE status='rate_limited' LIMIT 1"
             ),
             {
                 "message": message,

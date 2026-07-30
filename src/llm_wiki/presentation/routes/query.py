@@ -157,10 +157,7 @@ async def ask_question(
     # Select pipeline based on config
     from llm_wiki.config import settings
 
-    if settings.reasoning_enabled:
-        pipeline = adapters["reflective"]
-    else:
-        pipeline = adapters["standard"]
+    pipeline = adapters["reflective"] if settings.reasoning_enabled else adapters["standard"]
 
     query_input = QueryInput(
         question=payload.question,
@@ -225,10 +222,7 @@ async def ask_question_stream(
 
     from llm_wiki.config import settings
 
-    if settings.reasoning_enabled:
-        pipeline = adapters["reflective"]
-    else:
-        pipeline = adapters["standard"]
+    pipeline = adapters["reflective"] if settings.reasoning_enabled else adapters["standard"]
 
     query_input = QueryInput(
         question=payload.question,
@@ -253,7 +247,10 @@ async def ask_question_stream(
             chunk_data = chunk.get("data")
 
             if chunk_type == "status":
-                yield f"data: {json.dumps({'type': 'status', 'status': chunk_data.get('status') if isinstance(chunk_data, dict) else chunk_data})}\n\n"
+                status_data = (
+                    chunk_data.get("status") if isinstance(chunk_data, dict) else chunk_data
+                )
+                yield (f"data: {json.dumps({'type': 'status', 'status': status_data})}\n\n")
             elif chunk_type == "complete":
                 citations = [
                     {
@@ -268,7 +265,15 @@ async def ask_question_stream(
                         chunk_data.get("citations", []) if isinstance(chunk_data, dict) else []
                     )
                 ]
-                yield f"data: {json.dumps({'type': 'complete', 'answer': chunk_data.get('answer') if isinstance(chunk_data, dict) else '', 'citations': citations, 'sources_used': chunk_data.get('sources_used', []) if isinstance(chunk_data, dict) else []})}\n\n"
+                complete_data = {
+                    "type": "complete",
+                    "answer": chunk_data.get("answer") if isinstance(chunk_data, dict) else "",
+                    "citations": citations,
+                    "sources_used": chunk_data.get("sources_used", [])
+                    if isinstance(chunk_data, dict)
+                    else [],
+                }
+                yield f"data: {json.dumps(complete_data)}\n\n"
             else:
                 yield f"data: {json.dumps(chunk, default=str)}\n\n"
 

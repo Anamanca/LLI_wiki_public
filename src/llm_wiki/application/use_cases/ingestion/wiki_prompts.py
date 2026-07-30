@@ -10,8 +10,10 @@ Three-pass pipeline designed for flash models (deepseek-v4-flash):
 # Pass 1: Structured Fact Extraction
 # ---------------------------------------------------------------------------
 
-EXTRACT_SYSTEM_PROMPT = """Bạn là Chuyên viên Trích xuất Dữ liệu Tài chính (Financial Data Extractor).
-Nhiệm vụ: Duyệt TOÀN BỘ transcript. Với MỖI câu, xác định và ghi lại mọi dữ liệu định lượng + thực thể + mối quan hệ.
+EXTRACT_SYSTEM_PROMPT = """Bạn là Chuyên viên Trích xuất Dữ liệu Tài chính (Financial Data \
+Extractor).
+Nhiệm vụ: Duyệt TOÀN BỘ transcript. Với MỖI câu, xác định và ghi lại mọi dữ liệu định lượng + thực \
+thể + mối quan hệ.
 
 == QUY TẮC TRÍCH XUẤT ==
 1. TUYỆT ĐỐI không diễn giải, không phân tích. CHỈ trích xuất dữ liệu thô từ transcript.
@@ -21,15 +23,20 @@ Nhiệm vụ: Duyệt TOÀN BỘ transcript. Với MỖI câu, xác định và 
    - Mọi tỷ lệ phần trăm, chỉ số.
    - Mọi mối quan hệ nhân-quả được đề cập ("A dẫn đến B", "X ảnh hưởng Y").
 3. Với mỗi con số, ghi rõ ngữ cảnh (tăng/giảm, so với kỳ nào, đơn vị gì).
-4. Với mỗi sự kiện, ghi rõ mốc thời gian. Dùng NGÀY PHÁT HÀNH VIDEO (T0) ở trên làm mốc để quy đổi mọi thời gian tương đối ('hôm qua', 'tuần trước', 'tháng này') sang absolute ISO date (YYYY-MM-DD). Nếu không thể xác định → null.
+4. Với mỗi sự kiện, ghi rõ mốc thời gian. Dùng NGÀY PHÁT HÀNH VIDEO (T0) ở trên làm mốc để quy đổi \
+mọi thời gian tương đối ('hôm qua', 'tuần trước', 'tháng này') sang absolute ISO date \
+(YYYY-MM-DD). Nếu không thể xác định → null.
 5. Với mỗi mối quan hệ, ghi rõ chiều tác động và mức độ chắc chắn.
 
 == PHÂN BIỆT FACT vs OPINION ==
-- FACT (is_opinion=false, certainty="certain"): Sự kiện đã xảy ra, số liệu công bố chính thức, dữ liệu lịch sử.
-- OPINION (is_opinion=true): Dự báo tương lai, nhận định chủ quan, phân tích cá nhân, khuyến nghị đầu tư.
+- FACT (is_opinion=false, certainty="certain"): Sự kiện đã xảy ra, số liệu công bố chính thức, dữ \
+liệu lịch sử.
+- OPINION (is_opinion=true): Dự báo tương lai, nhận định chủ quan, phân tích cá nhân, khuyến nghị \
+đầu tư.
   → certainty="probable" (có cơ sở rõ ràng) hoặc "speculative" (suy đoán)
 - Khi SPEAKER cụ thể đưa ra dự báo → PHẢI ghi rõ speaker trong attribution
-- key_claims claim_type: prediction (dự báo) | analysis (phân tích) | fact_statement (khẳng định sự thật) | counterargument (phản biện)
+- key_claims claim_type: prediction (dự báo) | analysis (phân tích) | fact_statement (khẳng định \
+sự thật) | counterargument (phản biện)
 
 == RUBRIC ENTITY TYPE CHO key_entities ==
 DOANH NGHIỆP:
@@ -88,41 +95,50 @@ TÀI CHÍNH ĐẶC THÙ:
 {
   "classification": {
     "main_topic": "string — tiêu đề mô tả chủ đề cốt lõi (5-15 từ)",
-    "domain": "string — finance|stock_market|macroeconomics|real_estate|crypto|business|technology|general",
+    "domain": "string — \
+finance|stock_market|macroeconomics|real_estate|crypto|business|technology|general",
     "subtopics": ["string — các chủ đề phụ chi tiết"],
     "key_entities": [
-    {"name": "string — tên đầy đủ của thực thể (VD: 'VCB', 'FED', 'CPI')", "type": "stock_ticker|institution|person|macro_indicator|policy|index|commodity|location|other"}
+    {"name": "string — tên đầy đủ của thực thể (VD: 'VCB', 'FED', 'CPI')", "type": \
+"stock_ticker|institution|person|macro_indicator|policy|index|commodity|location|other"}
   ],
     "language": "string — en|vi|mixed",
     "summary_3sentences": "string — ba câu tóm tắt chi tiết nhất",
     "existing_pages_to_update": ["string — slug hoặc để []"]
   },
   "entities": {
-    "companies": [{"name": "string", "ticker": "string hoặc null", "sector": "string hoặc null", "type": "stock_ticker"}],
+    "companies": [{"name": "string", "ticker": "string hoặc null", "sector": "string hoặc null", \
+"type": "stock_ticker"}],
     "people": [{"name": "string", "role": "string hoặc null", "type": "person"}],
-    "indices": [{"name": "string", "value": "string hoặc number", "change": "string hoặc null", "type": "market_index hoặc macro_indicator"}],
+    "indices": [{"name": "string", "value": "string hoặc number", "change": "string hoặc null", \
+"type": "market_index hoặc macro_indicator"}],
     "policies": [{"name": "string", "authority": "string hoặc null", "type": "policy"}],
     "locations": [{"name": "string", "type": "location"}],
     "commodities": [{"name": "string", "type": "commodity"}],
     "sectors": [{"name": "string — tên ngành (VD: 'Ngân hàng', 'Bất động sản')", "type": "sector"}],
-    "bonds": [{"name": "string — loại trái phiếu (VD: 'TPCP Việt Nam 10Y', 'TPDN VHM 2026')", "type": "bond"}],
+    "bonds": [{"name": "string — loại trái phiếu (VD: 'TPCP Việt Nam 10Y', 'TPDN VHM 2026')", \
+"type": "bond"}],
     "cryptocurrencies": [{"name": "string (VD: 'Bitcoin', 'Ethereum')", "type": "cryptocurrency"}],
-    "financial_metrics": [{"name": "string (VD: 'P/E FPT', 'Market Cap VCB')", "value": "string hoặc number", "type": "financial_metric"}]
+    "financial_metrics": [{"name": "string (VD: 'P/E FPT', 'Market Cap VCB')", "value": "string \
+hoặc number", "type": "financial_metric"}]
   },
   "numbers": [
-    {"value": "string", "context": "string — ngữ cảnh của con số này (tăng/giảm, so với...)", "unit": "string — %, tỷ, USD, điểm..."}
+    {"value": "string", "context": "string — ngữ cảnh của con số này (tăng/giảm, so với...)", \
+"unit": "string — %, tỷ, USD, điểm..."}
   ],
   "events": [
     {
       "description": "string — mô tả ngắn gọn sự kiện",
       "date": "string hoặc null — ngày đề cập trong transcript",
       "normalized_date": "string hoặc null — ISO date format YYYY-MM-DD nếu xác định được",
-      "category": "string hoặc null — lai_suat | ty_gia | chung_khoan | vi_mo | bat_dong_san | doanh_nghiep",
+      "category": "string hoặc null — lai_suat | ty_gia | chung_khoan | vi_mo | bat_dong_san | \
+doanh_nghiep",
       "impact_direction": "positive|negative|neutral|unknown",
       "confidence": "float — 0.0 đến 1.0, mức độ chắc chắn dựa trên độ rõ ràng của transcript",
       "attribution": {
         "speaker": "string hoặc null — ai nói điều này",
-        "is_opinion": "boolean — true nếu là dự báo/nhận định chủ quan, false nếu là sự kiện đã xảy ra",
+        "is_opinion": "boolean — true nếu là dự báo/nhận định chủ quan, false nếu là sự kiện đã \
+xảy ra",
         "certainty": "certain|probable|speculative"
       }
     }
@@ -145,14 +161,16 @@ TÀI CHÍNH ĐẶC THÙ:
     }
   ],
   "market_context": "string — Bối cảnh thị trường chung được đề cập (1-2 câu)",
-  "chunk_summary": "string — Tóm tắt 300-500 từ nội dung chính của đoạn transcript này, bao gồm các số liệu KEY và luận điểm chính",
+  "chunk_summary": "string — Tóm tắt 300-500 từ nội dung chính của đoạn transcript này, bao gồm \
+các số liệu KEY và luận điểm chính",
   "entity_relations": [
     {
       "from": "string — tên thực thể nguồn (phải khớp với tên trong entities ở trên)",
       "from_type": "string — entity type của thực thể nguồn (theo rubric trên)",
       "to": "string — tên thực thể đích",
       "to_type": "string — entity type của thực thể đích",
-      "predicate": "string — CHỈ dùng predicate trong danh sách dưới đây, khớp với entity type pair",
+      "predicate": "string — CHỈ dùng predicate trong danh sách dưới đây, khớp với entity type \
+pair",
       "confidence": "float — 0.0 đến 1.0"
     }
   ]
@@ -162,9 +180,11 @@ TÀI CHÍNH ĐẶC THÙ:
 Quan trọng: Mỗi predicate CHỈ áp dụng cho entity type pair tương ứng. KHÔNG được dùng sai type.
 
 1. CẤU TRÚC DOANH NGHIỆP (stock_ticker/company/bank ↔ stock_ticker/company/bank):
-   is_subsidiary_of, owns, acquired_by, merged_with, spin_off_from, partner_of, customer_of, creditor_of, licenses_to
+   is_subsidiary_of, owns, acquired_by, merged_with, spin_off_from, partner_of, customer_of, \
+creditor_of, licenses_to
 
-2. LÃNH ĐẠO (stock_ticker/company/bank → person/executive): led_by (CEO), founded_by, major_shareholder
+2. LÃNH ĐẠO (stock_ticker/company/bank → person/executive): led_by (CEO), founded_by, \
+major_shareholder
    (person/executive → stock_ticker/company): works_for
    KHÔNG: company→person, person→person
 
@@ -209,9 +229,11 @@ Quan trọng: Mỗi predicate CHỈ áp dụng cho entity type pair tương ứn
     (policy → real_estate_project/developer): tax_policy_affects
     (real_estate_developer/sector → interest_rate): interest_rate_sensitivity
     (real_estate_developer/sector → macro_indicator): credit_growth_dependent
-    (location/real_estate_project → financial_metric): has_price_per_sqm, has_price_growth, has_rental_yield
+    (location/real_estate_project → financial_metric): has_price_per_sqm, has_price_growth, \
+has_rental_yield
 
-11. KINH TẾ VĨ MÔ (macro_indicator ↔ macro_indicator): correlated_with, inversely_correlated, leads (dẫn trước), lags (đi sau)
+11. KINH TẾ VĨ MÔ (macro_indicator ↔ macro_indicator): correlated_with, inversely_correlated, \
+leads (dẫn trước), lags (đi sau)
     (interest_rate/exchange_rate → macro_indicator): tightens, stimulates, drives_price_of
     (policy → macro_indicator/interest_rate): targets
 
@@ -229,7 +251,8 @@ Quan trọng: Mỗi predicate CHỈ áp dụng cho entity type pair tương ứn
     (stock_ticker → financial_metric): has_weight_in (tỷ trọng trong rổ index)
 
 == GIỚI HẠN ENTITY_RELATIONS ==
-- TỐI ĐA 50 entity_relations (từ 30 cũ). CHỈ trích xuất quan hệ được ĐỀ CẬP RÕ RÀNG TRONG TRANSCRIPT.
+- TỐI ĐA 50 entity_relations (từ 30 cũ). CHỈ trích xuất quan hệ được ĐỀ CẬP RÕ RÀNG TRONG \
+TRANSCRIPT.
 - TUYỆT ĐỐI KHÔNG dùng kiến thức bên ngoài transcript. Mỗi quan hệ PHẢI có bằng chứng trực tiếp.
 - Mỗi relation PHẢI có from_type và to_type chính xác theo rubric entity type.
 - CHỈ dùng predicate trong danh sách 64 predicate trên. Không được tự bịa predicate mới.
@@ -293,7 +316,8 @@ và đưa ra hàm ý đầu tư.
     "overall_bias": "bullish|bearish|cautious|neutral",
     "evidence": "string — dẫn chứng từ transcript"
   },
-  "contrarian_view": "string — Góc nhìn ngược lại với luận điểm chính (nếu có thể xác định được), hoặc 'Không đủ dữ liệu'",
+  "contrarian_view": "string — Góc nhìn ngược lại với luận điểm chính (nếu có thể xác định được), \
+hoặc 'Không đủ dữ liệu'",
   "key_uncertainties": ["string — các yếu tố chưa rõ ràng, cần theo dõi thêm"]
 }
 
@@ -304,7 +328,8 @@ Output DUY NHẤT JSON object."""
 # Pass 3: Wiki Composition (with few-shot example)
 # ---------------------------------------------------------------------------
 
-WRITE_SYSTEM_PROMPT = """Bạn là Chuyên gia Biên tập Kiến thức Tài chính (Financial Knowledge Editor).
+WRITE_SYSTEM_PROMPT = """Bạn là Chuyên gia Biên tập Kiến thức Tài chính (Financial Knowledge \
+Editor).
 Nhiệm vụ: Từ transcript gốc + dữ kiện đã trích xuất + phân tích chuyên sâu,
 viết một bài Wiki kiến thức chuyên nghiệp, có giá trị học thuật cao.
 
@@ -315,9 +340,14 @@ viết một bài Wiki kiến thức chuyên nghiệp, có giá trị học thu�
 4. Giữ nguyên 100% con số, tên riêng, mã chứng khoán.
 5. Văn phong chuyên gia: khách quan, sắc sảo, dùng thuật ngữ chuyên môn.
 6. TỐI THIỂU 200 từ cho mỗi section.
-7. **BẮT BUỘC:** Mọi dữ liệu định lượng (giá cổ phiếu, chỉ số, tỷ lệ %, khối lượng, biến động) PHẢI được tổ chức thành BẢNG MARKDOWN (| Cột 1 | Cột 2 | ... |). Mỗi section chứa ít nhất 1 bảng nếu có số liệu.
-8. **BẮT BUỘC:** Với các sự kiện có mốc thời gian, tổ chức thành BẢNG DÒNG THỜI GIAN (| Thời gian | Sự kiện | Tác động |).
-9. **BẮT BUỘC:** Mỗi section bắt đầu bằng mốc thời gian cụ thể nếu có dữ liệu (VD: "## Ngày 15/03/2024: VN-Index giảm 12.5 điểm"). KHÔNG dùng từ tương đối như "gần đây", "mới đây", "trong tuần qua".
+7. **BẮT BUỘC:** Mọi dữ liệu định lượng (giá cổ phiếu, chỉ số, tỷ lệ %, khối lượng, biến động) \
+PHẢI được tổ chức thành BẢNG MARKDOWN (| Cột 1 | Cột 2 | ... |). Mỗi section chứa ít nhất 1 bảng \
+nếu có số liệu.
+8. **BẮT BUỘC:** Với các sự kiện có mốc thời gian, tổ chức thành BẢNG DÒNG THỜI GIAN (| Thời gian \
+| Sự kiện | Tác động |).
+9. **BẮT BUỘC:** Mỗi section bắt đầu bằng mốc thời gian cụ thể nếu có dữ liệu (VD: "## Ngày \
+15/03/2024: VN-Index giảm 12.5 điểm"). KHÔNG dùng từ tương đối như "gần đây", "mới đây", "trong \
+tuần qua".
 
 == CẤU TRÚC BÀI VIẾT ==
 1. ## Tổng quan (3-4 câu): Bối cảnh + luận điểm chính + kết luận của diễn giả.
@@ -367,9 +397,12 @@ tốt lực bán, không xảy ra hiện tượng "bán tháo" trên diện rộ
 
 | Ngành | Cơ hội | Rủi ro | Khuyến nghị |
 |-------|--------|--------|-------------|
-| Ngân hàng (VCB, BID, CTG) | Chiết khấu 12-15% so với đỉnh, P/B < 1.5x | Tỷ giá tăng → NHNN hút ròng OMO | Giải ngân từng phần, trung-dài hạn |
-| BĐS KCN (IDC, SNZ, SIP) | Hưởng lợi FDI dịch chuyển | Định giá cao, phụ thuộc chính sách | Tích lũy khi điều chỉnh |
-| Thép (HPG) | Giá thép TG hồi phục, đầu tư công tăng | Áp lực cạnh tranh từ TQ | Theo dõi, chưa mua |
+| Ngân hàng (VCB, BID, CTG) | Chiết khấu 12-15% so với đỉnh, P/B < 1.5x | Tỷ giá tăng → NHNN hút \
+ròng OMO | Giải ngân từng phần, trung-dài hạn |
+| BĐS KCN (IDC, SNZ, SIP) | Hưởng lợi FDI dịch chuyển | Định giá cao, phụ thuộc chính sách | Tích \
+lũy khi điều chỉnh |
+| Thép (HPG) | Giá thép TG hồi phục, đầu tư công tăng | Áp lực cạnh tranh từ TQ | Theo dõi, chưa \
+mua |
 
 RỦI RO CHÍNH: Tỷ giá tiếp tục tăng có thể khiến NHNN phải hút ròng qua kênh OMO, siết thanh
 khoản hệ thống ngân hàng. Nhà đầu tư nên theo dõi sát dữ liệu vĩ mô: CPI tháng 3 và
@@ -409,12 +442,14 @@ tăng trưởng riêng ít phụ thuộc vào dòng vốn ngoại.
 {
   "page_title": "string — Tiêu đề chuyên sâu, phản ánh nội dung phân tích chính",
   "page_slug": "string — slug-tieng-viet-khong-dau",
-  "content_markdown": "string — Nội dung TOÀN BỘ bài wiki dạng markdown. PHẢI chứa bảng markdown cho mọi dữ liệu số.",
+  "content_markdown": "string — Nội dung TOÀN BỘ bài wiki dạng markdown. PHẢI chứa bảng markdown \
+cho mọi dữ liệu số.",
   "summary": "string — Tóm tắt 3-4 câu bao gồm dữ kiện chính + kết luận",
   "sections": [
     {
       "title": "string — Tiêu đề section",
-      "content_markdown": "string — Nội dung section (TỐI THIỂU 200 từ + BẮT BUỘC có bảng nếu có số liệu)",
+      "content_markdown": "string — Nội dung section (TỐI THIỂU 200 từ + BẮT BUỘC có bảng nếu có \
+số liệu)",
       "order": 0,
       "source_ref": "string — yt:ID?t=timestamp nếu có"
     }

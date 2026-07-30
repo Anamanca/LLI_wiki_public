@@ -7,18 +7,21 @@ from llm_wiki.application.ports.search.vector_search import LLMClientPort
 
 logger = logging.getLogger(__name__)
 
-REWRITE_SYSTEM_PROMPT = """Bạn là trợ lý viết lại câu hỏi. Nhiệm vụ: Tạo câu hỏi ĐỘC LẬP, ĐẦY ĐỦ ngữ cảnh từ lịch sử chat.
-
-QUY TẮC:
-1. Giải quyết đại từ/ẩn dụ: "nó", "ông ấy", "cái đó", "vụ này", "thế còn" → thay bằng danh từ cụ thể
-2. Giữ nguyên ý định người dùng, không thêm thông tin mới
-3. Nếu câu hỏi đã độc lập, trả về nguyên bản
-4. Output: CHỈ câu hỏi đã viết lại, không thêm gì khác
-
-Ví dụ:
-Lịch sử: ["Giá dầu thô hiện nay thế nào?", "Giá dầu thô WTI đang ở 72 USD/thùng"]
-Câu hỏi: "còn vàng thì sao?"
-→ Giá vàng hiện nay thế nào?"""
+REWRITE_SYSTEM_PROMPT = (
+    "Bạn là trợ lý viết lại câu hỏi. Nhiệm vụ:"
+    " Tạo câu hỏi ĐỘC LẬP, ĐẦY ĐỦ ngữ cảnh từ lịch sử chat."
+    "\n\nQUY TẮC:\n"
+    '1. Giải quyết đại từ/ẩn dụ: "nó", "ông ấy", "cái đó",'
+    ' "vụ này", "thế còn" → thay bằng danh từ cụ thể\n'
+    "2. Giữ nguyên ý định người dùng, không thêm thông tin mới\n"
+    "3. Nếu câu hỏi đã độc lập, trả về nguyên bản\n"
+    "4. Output: CHỈ câu hỏi đã viết lại, không thêm gì khác\n"
+    "\nVí dụ:\n"
+    'Lịch sử: ["Giá dầu thô hiện nay thế nào?",'
+    ' "Giá dầu thô WTI đang ở 72 USD/thùng"]\n'
+    'Câu hỏi: "còn vàng thì sao?"\n'
+    "→ Giá vàng hiện nay thế nào?"
+)
 
 
 class LLMQueryRewriterAdapter(QueryRewriterPort):

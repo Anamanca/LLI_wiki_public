@@ -127,7 +127,7 @@ class CrossEncoderRerankerAdapter(RerankerPort):
 
         # Pair scores with documents and sort descending
         scored: list[tuple[float, int, SearchResult]] = []
-        for idx, (doc, score) in enumerate(zip(documents, all_scores)):
+        for idx, (doc, score) in enumerate(zip(documents, all_scores, strict=False)):
             scored.append((float(score), idx, doc))
 
         scored.sort(key=lambda x: x[0], reverse=True)

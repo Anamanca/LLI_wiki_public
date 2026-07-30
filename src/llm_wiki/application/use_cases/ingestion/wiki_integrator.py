@@ -95,11 +95,11 @@ def extract_json_from_llm_response(content_text: str) -> dict[str, Any]:
         if repaired is not None:
             logger.warning("Repaired truncated JSON (original error: %s chars)", len(json_str))
             return repaired
-        raise ValueError(f"Unrepairable JSON: {json_str[:200]}")
+        raise ValueError(f"Unrepairable JSON: {json_str[:200]}") from None
 
 
 def _repair_truncated_json(json_str: str) -> dict[str, Any] | None:
-    """Try to repair a truncated JSON object by auto-closing brackets/braces and removing trailing fragments."""
+    """Try to repair truncated JSON by auto-closing brackets/braces and removing fragments."""
     stack: list[str] = []
     in_string = False
     escape_next = False
@@ -119,11 +119,14 @@ def _repair_truncated_json(json_str: str) -> dict[str, Any] | None:
             continue
         if ch in "{[":
             stack.append("}" if ch == "{" else "]")
-        elif ch in "}]":
-            if stack and ((ch == "}" and stack[-1] == "}") or (ch == "]" and stack[-1] == "]")):
-                stack.pop()
-                if not stack:
-                    last_valid_pos = i + 1
+        elif (
+            ch in "}]"
+            and stack
+            and ((ch == "}" and stack[-1] == "}") or (ch == "]" and stack[-1] == "]"))
+        ):
+            stack.pop()
+            if not stack:
+                last_valid_pos = i + 1
 
     if not stack:
         return None
@@ -223,7 +226,10 @@ VI_FILLERS = r"\b(à|ừm|nhỉ|nhé|nha|ờ|hả|nè|nhá|đúng không|phải 
 EN_FILLERS = (
     r"\b(um|uh|like|you know|I mean|sort of|kind of|basically|actually|literally|right|okay|so)\b"
 )
-COMBINED_FILLERS = r"\b(à|ừm|nhỉ|nhé|nha|um|uh|like|you know|I mean|sort of|kind of|basically|actually|literally)\b"
+COMBINED_FILLERS = (
+    r"\b(à|ừm|nhỉ|nhé|nha|um|uh|like|you know|I mean|sort of|kind of|basically|actually|"
+    r"literally)\b"
+)
 
 
 def _preprocess_transcript(transcript_text: str, lang: str | None = None) -> str:
@@ -410,7 +416,9 @@ def _merge_extracted_facts(facts_list: list[dict[str, Any]]) -> dict[str, Any]:
                 merged_events.append(ev)
 
         for rel in facts.get("relationships", []):
-            key = f"{rel.get('source', '')}|{rel.get('target', '')}|{rel.get('relation_type', '')}".lower()
+            key = (
+                f"{rel.get('source', '')}|{rel.get('target', '')}|{rel.get('relation_type', '')}"
+            ).lower()
             if key not in seen_relationships:
                 seen_relationships.add(key)
                 merged_relationships.append(rel)
@@ -519,7 +527,7 @@ async def _call_llm_json(
             raise
         content2 = _content_from_raw(raw_resp2)
         if not content2.strip():
-            raise ValueError(f"{pass_label}: empty response from LLM on retry")
+            raise ValueError(f"{pass_label}: empty response from LLM on retry") from None
         return await asyncio.to_thread(extract_json_from_llm_response, content2)
 
 
@@ -553,13 +561,14 @@ async def _pass_extract(
         t0_str = published_at.strftime("%Y-%m-%d")
         t0_instruction = (
             f"NGAY PHAT HANH VIDEO (T0): {t0_str}\n"
-            f"QUY TAC TEMPORAL: Quy doi moi moc thoi gian tuong doi sang ngay tuyet doi (ISO YYYY-MM-DD).\n"
-            f"Neu khong the quy doi -> de normalized_date = null.\n\n"
+            "QUY TAC TEMPORAL: Quy doi moi moc thoi gian tuong doi sang ngay tuyet doi"
+            f" (ISO YYYY-MM-DD).\n"
+            "Neu khong the quy doi -> de normalized_date = null.\n\n"
         )
 
     user_content = (
-        t0_instruction
-        + f"Phan loai:\n- Chu de: {classification.get('main_topic', '')}\n{domain_info}{entities_info}"
+        t0_instruction + f"Phan loai:\n- Chu de: {classification.get('main_topic', '')}\n"
+        f"{domain_info}{entities_info}"
         f"- Chu de phu: {', '.join(classification.get('subtopics', []))}\n"
         f"- Ngon ngu: {classification.get('language', 'vi')}\n\n"
         f"Transcript:\n{transcript_text[:100_000]}"
@@ -629,13 +638,14 @@ async def _pass_extract_chunked(
         t0_str = published_at.strftime("%Y-%m-%d")
         t0_instruction = (
             f"NGAY PHAT HANH VIDEO (T0): {t0_str}\n"
-            f"QUY TAC TEMPORAL: Quy doi moi moc thoi gian tuong doi sang ngay tuyet doi (ISO YYYY-MM-DD).\n"
+            "QUY TAC TEMPORAL: Quy doi moi moc thoi gian tuong doi sang ngay tuyet doi"
+            f" (ISO YYYY-MM-DD).\n"
             f"- 'hom nay' -> {t0_str}\n"
             f"- 'hom qua' -> ngay truoc {t0_str}\n"
             f"- 'tuan truoc' -> {t0_str} tru 7 ngay\n"
             f"- 'thang nay' -> {t0_str[:7]}-01 (giu thang, ngay 01 neu khong ro)\n"
             f"- 'quy X' -> uoc tinh tu T0\n"
-            f"Neu khong the quy doi chinh xac -> de normalized_date = null.\n\n"
+            "Neu khong the quy doi chinh xac -> de normalized_date = null.\n\n"
         )
 
     async def _extract_chunk(chunk: str, idx: int, prev_summary: str = "") -> dict[str, Any]:
@@ -644,13 +654,15 @@ async def _pass_extract_chunked(
             context_prefix = (
                 f"[NGU CANH TU DOAN TRUOC]\n"
                 f"Tom tat doan {idx}: {prev_summary[:500]}\n"
-                f"Dung ngu canh nay de giai quyet coreference (VD: 'ong ay', 'chi so nay' -> xac dinh tu context).\n"
+                "Dung ngu canh nay de giai quyet coreference"
+                " (VD: 'ong ay', 'chi so nay' -> xac dinh tu context).\n"
                 f"[/NGU CANH]\n\n"
             )
 
         user_content = (
             t0_instruction + context_prefix + f"[DOAN {idx + 1}/{len(chunks)}]\n"
-            f"Phan loai:\n- Chu de: {classification.get('main_topic', '')}\n{domain_info}{entities_info}"
+            f"Phan loai:\n- Chu de: {classification.get('main_topic', '')}\n"
+            f"{domain_info}{entities_info}"
             f"- Chu de phu: {', '.join(classification.get('subtopics', []))}\n"
             f"- Ngon ngu: {classification.get('language', 'vi')}\n\n"
             f"Transcript (doan {idx + 1}):\n{chunk}"
@@ -680,7 +692,8 @@ async def _pass_extract_chunked(
 
     merged = _merge_extracted_facts(facts_list)
     logger.info(
-        "Pass 1 chunked OK: merged %d companies, %d people, %d numbers, %d events, %d relationships, %d entity_relations from %d/%d chunks",
+        "Pass 1 chunked OK: merged %d companies, %d people, %d numbers, %d events,"
+        " %d relationships, %d entity_relations from %d/%d chunks",
         len(merged.get("entities", {}).get("companies", [])),
         len(merged.get("entities", {}).get("people", [])),
         len(merged.get("numbers", [])),
@@ -836,7 +849,8 @@ async def _pass_write(
         t0_prefix = f"Video phat hanh ngay: {published_at.strftime('%Y-%m-%d')}\n\n"
 
     user_parts = [
-        f"{t0_prefix}Phan loai:\n- Chu de: {classification.get('main_topic', '')}\n{domain_info}{entities_info}"
+        f"{t0_prefix}Phan loai:\n- Chu de: {classification.get('main_topic', '')}\n"
+        f"{domain_info}{entities_info}"
         f"- Chu de phu: {', '.join(classification.get('subtopics', []))}\n"
         f"- Ngon ngu: {classification.get('language', 'vi')}\n"
         f"- Tom tat: {classification.get('summary_3sentences', '')}",
@@ -861,7 +875,8 @@ async def _pass_write(
         user_parts.insert(
             0,
             f"**CHE DO: CAP NHAT TRANG HIEN CO**\n"
-            f"Trang wiki da co {overview.count('[')} section. Day la danh sach TAT CA section da co:\n\n"
+            f"Trang wiki da co {overview.count('[')} section."
+            f" Day la danh sach TAT CA section da co:\n\n"
             f"{overview}\n\n"
             f"**QUAN TRONG:** Chi viet CAC SECTION MOI, khong co trong danh sach tren.\n"
             f"KHONG viet lai, copy, hay tom tat cac section da co.\n"
@@ -1161,7 +1176,7 @@ async def _update_page(
     )
     max_order = order_result.scalar() or 0
 
-    for idx, sec in enumerate(data.get("sections", [])):
+    for _idx, sec in enumerate(data.get("sections", [])):
         sec_content = sec.get("content_markdown", "")
         # Guard: reject thin/non-substantive section content (< 200 chars).
         # The WRITE prompt requires "TỐI THIỂU 200 từ" per section. Content below
@@ -1254,7 +1269,8 @@ async def _run_extraction_pass(
         published_at=published_at,
     )
     logger.info(
-        "Pass 1 OK: %d companies, %d people, %d numbers, %d events, %d relationships, %d entity_relations, %d chunk summaries",
+        "Pass 1 OK: %d companies, %d people, %d numbers, %d events, %d relationships,"
+        " %d entity_relations, %d chunk summaries",
         len(facts.get("entities", {}).get("companies", [])),
         len(facts.get("entities", {}).get("people", [])),
         len(facts.get("numbers", [])),
@@ -1503,7 +1519,6 @@ class WikiIntegrator:
                 new_entity_names = [k["name"] if isinstance(k, dict) else str(k) for k in ke_list]
 
         best_match: orm.Page | None = None
-        matched_similarity: float = 0.0
         if matches:
             for candidate, sim in matches:
                 should_merge, reason = _should_merge(
@@ -1514,7 +1529,6 @@ class WikiIntegrator:
                 )
                 if should_merge:
                     best_match = candidate
-                    matched_similarity = sim
                     logger.info(
                         "Match accepted for page '%s': %s",
                         best_match.title,

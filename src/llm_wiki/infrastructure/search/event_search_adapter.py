@@ -85,7 +85,6 @@ class PgVectorEventSearchAdapter(EventSearchPort):
             credential_parts.append(f"quan điểm: {stance}")
         credential = f" ({'; '.join(credential_parts)})" if credential_parts else ""
 
-        normalized_date = row.get("event_date")  # ec.normalized_date
         event_date_str = str(row.get("event_date")) if row.get("event_date") else None
 
         return SearchResult(
@@ -211,10 +210,7 @@ class PgVectorEventSearchAdapter(EventSearchPort):
         params: dict = {"query": query, "limit": top_k}
         where_sql = self._build_kw_where(params, time_range)
 
-        if use_plainto:
-            query_func = "plainto_tsquery"
-        else:
-            query_func = "to_tsquery"
+        query_func = "plainto_tsquery" if use_plainto else "to_tsquery"
 
         sql = text(f"""
             SELECT eo.id, eo.description AS content, ec.title AS heading_title,

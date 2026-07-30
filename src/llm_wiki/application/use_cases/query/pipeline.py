@@ -196,7 +196,6 @@ def _month_year_delta(m: re.Match) -> timedelta | None:
 
 def _year_delta(m: re.Match) -> timedelta | None:
     year = int(m.group(1))
-    now_ts = now().replace(tzinfo=None)
     if year < 2000 or year > now.year:
         return None
     start = datetime(year, 1, 1)
@@ -212,7 +211,6 @@ _TIME_KEYWORDS = re.compile(
 
 
 def _extract_time_range(question: str) -> TimeRange | None:
-    now_ts = now().replace(tzinfo=None)
     for pattern, delta_fn in _TIME_PATTERNS:
         m = re.search(pattern, question, re.IGNORECASE)
         if not m:
@@ -386,56 +384,52 @@ def _detect_language(question: str) -> str:
     return "vi" if _VI_DIACRITICS.search(question.lower()) else "en"
 
 
+_EN_TEMPORAL_ADDENDUM: dict[str, str] = {
+    "timeline": (
+        "\n\nNOTE: The user needs a CHRONOLOGICAL TIMELINE. "
+        "Sort the answer by chronological order. "
+        "Each milestone MUST have a specific date (day-month-year)."
+    ),
+    "historical": (
+        "\n\nNOTE: The user is asking about PAST EVENTS. "
+        "Include specific dates for all information."
+    ),
+    "current_state": (
+        "\n\nNOTE: The user is asking about the CURRENT STATE. "
+        "Prioritize the most recent information, include specific dates."
+    ),
+    "comparative": (
+        "\n\nNOTE: The user wants a COMPARISON. "
+        "Present a clear side-by-side comparison with dates for each data point."
+    ),
+}
+
+_VI_TEMPORAL_ADDENDUM: dict[str, str] = {
+    "timeline": (
+        "\n\nLƯU Ý: Ngườdùng cần DIỄN BIẾN THEO THỜI GIAN. "
+        "Sắp xếp câu trả lờtheo trình tự thờgian. "
+        "Mỗi mốc phải có ngày tháng năm cụ thể."
+    ),
+    "historical": (
+        "\n\nLƯU Ý: Ngườdùng hỏi về SỰ KIỆN TRONG QUÁ KHỨ. "
+        "Ghi rõ ngày tháng năm cụ thể cho mọi thông tin."
+    ),
+    "current_state": (
+        "\n\nLƯU Ý: Ngườdùng hỏi về TÌNH HÌNH HIỆN TẠI. "
+        "Ưu tiên thông tin mớnhất, ghi rõ ngày tháng."
+    ),
+    "comparative": (
+        "\n\nLƯU Ý: Ngườdùng muốn SO SÁNH. "
+        "Trình bày đối chiếu rõ ràng, ghi rõ thờđiểm của từng dữ liệu."
+    ),
+}
+
+
 def _temporal_addendum(intent: str, language: str = "vi") -> str:
     """Return intent-specific temporal instructions for the LLM synthesis prompt."""
     if language == "en":
-        # English variants
-        if intent == "timeline":
-            return (
-                "\n\nNOTE: The user needs a CHRONOLOGICAL TIMELINE. "
-                "Sort the answer by chronological order. "
-                "Each milestone MUST have a specific date (day-month-year)."
-            )
-        elif intent == "historical":
-            return (
-                "\n\nNOTE: The user is asking about PAST EVENTS. "
-                "Include specific dates for all information."
-            )
-        elif intent == "current_state":
-            return (
-                "\n\nNOTE: The user is asking about the CURRENT STATE. "
-                "Prioritize the most recent information, include specific dates."
-            )
-        elif intent == "comparative":
-            return (
-                "\n\nNOTE: The user wants a COMPARISON. "
-                "Present a clear side-by-side comparison with dates for each data point."
-            )
-        return ""
-    else:
-        # Vietnamese variants (default)
-        if intent == "timeline":
-            return (
-                "\n\nLƯU Ý: Người dùng cần DIỄN BIẾN THEO THỜI GIAN. "
-                "Sắp xếp câu trả lời theo trình tự thời gian. "
-                "Mỗi mốc phải có ngày tháng năm cụ thể."
-            )
-        elif intent == "historical":
-            return (
-                "\n\nLƯU Ý: Người dùng hỏi về SỰ KIỆN TRONG QUÁ KHỨ. "
-                "Ghi rõ ngày tháng năm cụ thể cho mọi thông tin."
-            )
-        elif intent == "current_state":
-            return (
-                "\n\nLƯU Ý: Người dùng hỏi về TÌNH HÌNH HIỆN TẠI. "
-                "Ưu tiên thông tin mới nhất, ghi rõ ngày tháng."
-            )
-        elif intent == "comparative":
-            return (
-                "\n\nLƯU Ý: Người dùng muốn SO SÁNH. "
-                "Trình bày đối chiếu rõ ràng, ghi rõ thời điểm của từng dữ liệu."
-            )
-        return ""
+        return _EN_TEMPORAL_ADDENDUM.get(intent, "")
+    return _VI_TEMPORAL_ADDENDUM.get(intent, "")
 
 
 def _set_parent_on_wrappers(
@@ -600,7 +594,6 @@ class QueryPipeline:
         }
 
     async def _extract_time_range_with_llm(self, question: str) -> TimeRange | None:
-        now_ts = now().replace(tzinfo=None)
         prompt = (
             "Extract the time range from this question. "
             'Return ONLY a JSON object: {"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"} '
@@ -789,7 +782,7 @@ class QueryPipeline:
         results_raw = await asyncio.gather(*coros, return_exceptions=True)
 
         result_sets: dict[str, list[SearchResult]] = {}
-        for (name, _), raw in zip(tasks, results_raw):
+        for (name, _), raw in zip(tasks, results_raw, strict=True):
             if isinstance(raw, Exception):
                 logger.warning("Search stream '%s' failed: %s", name, raw)
                 result_sets[name] = []

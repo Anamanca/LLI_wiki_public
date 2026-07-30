@@ -9,6 +9,7 @@ Daily scan strategy:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -258,10 +259,8 @@ def _extract_video_info(item: dict[str, Any]) -> dict[str, Any]:
     published_at = None
     raw_pub = snippet.get("publishedAt")
     if raw_pub:
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             published_at = datetime.fromisoformat(raw_pub.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            pass
 
     return {
         "external_id": video_id,

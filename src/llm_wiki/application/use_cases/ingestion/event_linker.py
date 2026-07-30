@@ -296,7 +296,9 @@ async def detect_contradictions(
             from_event_id=event_id,
             to_event_id=event_id,
             relation_type="contradicts",
-            description=f"Stance conflict: {our_obs.stance or 'unknown'} vs {opposite.stance or 'unknown'}",
+            description=(
+                f"Stance conflict: {our_obs.stance or 'unknown'} vs {opposite.stance or 'unknown'}"
+            ),
             confidence=0.5,
         )
         db.add(link)

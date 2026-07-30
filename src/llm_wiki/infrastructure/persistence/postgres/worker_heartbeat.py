@@ -44,7 +44,8 @@ async def write_heartbeat(
                         current_job_id = EXCLUDED.current_job_id,
                         current_stage = EXCLUDED.current_stage,
                         stage_started_at = CASE
-                            WHEN worker_heartbeats.current_stage IS DISTINCT FROM EXCLUDED.current_stage
+                            WHEN worker_heartbeats.current_stage
+                                IS DISTINCT FROM EXCLUDED.current_stage
                             THEN :now
                             ELSE worker_heartbeats.stage_started_at
                         END,

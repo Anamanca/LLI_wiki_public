@@ -47,6 +47,13 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+# Rules that don't match project conventions:
+# B008 — Depends() in FastAPI params is idiomatic (not a bug)
+# E402 — conditional imports in query.py avoid circular deps
+# F821 — forward-reference type aliases (EntityId, EventId, etc.)
+# N818 — DomainException, YouTubeQuotaExceeded are intentional names
+# N806 — lowercase var naming in tests for MockClient
+ignore = ["B008", "E402", "F821", "N818", "N806"]
 
 [tool.mypy]
 strict = false

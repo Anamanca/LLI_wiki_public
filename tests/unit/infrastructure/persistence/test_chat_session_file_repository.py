@@ -44,7 +44,8 @@ async def test_save_persists_messages(repo):
     # Read raw file to verify persistence
     path = os.path.join(repo._base_dir, f"{session.id}.json")
     assert os.path.exists(path)
-    raw = json.loads(open(path, encoding="utf-8").read())
+    with open(path, encoding="utf-8") as f:
+        raw = json.loads(f.read())
     assert raw["messages"] == [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
@@ -90,7 +91,8 @@ async def test_list_sessions_returns_all(repo):
 async def test_list_sessions_skips_corrupt_files(repo):
     session = await repo.create()
     corrupt_path = os.path.join(repo._base_dir, "bad.json")
-    open(corrupt_path, "w", encoding="utf-8").write("not json")
+    with open(corrupt_path, "w", encoding="utf-8") as f:
+        f.write("not json")
     sessions = await repo.list_sessions()
     assert any(s.id == session.id for s in sessions)
     assert len(sessions) == 1

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from uuid import UUID
 
 
 @dataclass
@@ -29,6 +30,9 @@ class ScanLock:
     completed_at: datetime | None = None
 
 
+ApiKeyId = UUID
+
+
 @dataclass
 class ApiKey:
     id: "ApiKeyId"
@@ -40,20 +44,5 @@ class ApiKey:
     rate_limited_until: datetime | None = None
     usage_count: int = 0
     last_used_at: datetime | None = None
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-
-
-@dataclass
-class CronJob:
-    id: int
-    job_id: str
-    name: str
-    schedule: str
-    description: str | None = None
-    job_type: str = "background_task"
-    managed: bool = True
-    enabled: bool = True
-    command: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))

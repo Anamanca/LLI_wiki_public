@@ -4,6 +4,7 @@ Optional stub/read-only routes for the admin UI. Admin operational routes
 via src/llm_wiki/presentation/routes/admin.py.
 """
 
+import contextlib
 from collections import defaultdict
 from uuid import UUID
 
@@ -200,8 +201,8 @@ async def system_stats():
 async def get_source(source_id: str, db: AsyncSession = Depends(get_db)):
     try:
         sid = UUID(source_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid source ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid source ID") from err
     result = await db.execute(select(orm.Source).where(orm.Source.id == sid))
     src = result.scalar_one_or_none()
     if not src:
@@ -255,8 +256,8 @@ async def get_source(source_id: str, db: AsyncSession = Depends(get_db)):
 async def update_source(source_id: str, db: AsyncSession = Depends(get_db)):
     try:
         sid = UUID(source_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid source ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid source ID") from err
     result = await db.execute(select(orm.Source).where(orm.Source.id == sid))
     src = result.scalar_one_or_none()
     if not src:
@@ -280,8 +281,8 @@ async def update_source(source_id: str, db: AsyncSession = Depends(get_db)):
 async def delete_source(source_id: str, db: AsyncSession = Depends(get_db)):
     try:
         sid = UUID(source_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid source ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid source ID") from err
     result = await db.execute(select(orm.Source).where(orm.Source.id == sid))
     src = result.scalar_one_or_none()
     if not src:
@@ -295,8 +296,8 @@ async def delete_source(source_id: str, db: AsyncSession = Depends(get_db)):
 async def scan_source(source_id: str, db: AsyncSession = Depends(get_db)):
     try:
         sid = UUID(source_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid source ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid source ID") from err
     result = await db.execute(select(orm.Source).where(orm.Source.id == sid))
     src = result.scalar_one_or_none()
     if not src:
@@ -323,8 +324,8 @@ async def list_source_items(
 ):
     try:
         sid = UUID(source_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid source ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid source ID") from err
 
     q = select(orm.SourceItem).where(orm.SourceItem.source_id == sid)
     if status:
@@ -355,8 +356,8 @@ async def list_source_items(
 async def skip_source_item(item_id: str, db: AsyncSession = Depends(get_db)):
     try:
         iid = UUID(item_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid item ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid item ID") from err
     result = await db.execute(select(orm.SourceItem).where(orm.SourceItem.id == iid))
     item = result.scalar_one_or_none()
     if not item:
@@ -371,8 +372,8 @@ async def skip_source_item(item_id: str, db: AsyncSession = Depends(get_db)):
 async def retry_source_item(item_id: str, db: AsyncSession = Depends(get_db)):
     try:
         iid = UUID(item_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid item ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid item ID") from err
     result = await db.execute(select(orm.SourceItem).where(orm.SourceItem.id == iid))
     item = result.scalar_one_or_none()
     if not item:
@@ -389,8 +390,8 @@ async def retry_source_item(item_id: str, db: AsyncSession = Depends(get_db)):
 async def submit_transcript(item_id: str, db: AsyncSession = Depends(get_db)):
     try:
         iid = UUID(item_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid item ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid item ID") from err
     result = await db.execute(select(orm.SourceItem).where(orm.SourceItem.id == iid))
     item = result.scalar_one_or_none()
     if not item:
@@ -408,8 +409,8 @@ async def submit_transcript(item_id: str, db: AsyncSession = Depends(get_db)):
 async def update_page(page_id: str, db: AsyncSession = Depends(get_db)):
     try:
         pid = UUID(page_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid page ID")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid page ID") from err
     result = await db.execute(select(orm.Page).where(orm.Page.id == pid))
     page = result.scalar_one_or_none()
     if not page:
@@ -452,10 +453,8 @@ async def page_graph(
         .join(orm.Source, orm.Page.source_id == orm.Source.id, isouter=True)
     )
     if source_id:
-        try:
+        with contextlib.suppress(ValueError):
             q = q.where(orm.Page.source_id == UUID(source_id))
-        except ValueError:
-            pass
     q = q.limit(limit).offset(offset)
     result = await db.execute(q)
     rows = result.all()
@@ -569,8 +568,8 @@ async def entity_graph(
     if entity_id:
         try:
             seed_ids.add(UUID(entity_id))
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid entity_id")
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail="Invalid entity_id") from err
 
     if entity_type and not seed_ids:
         # No seed: pick the most connected entities of the requested type.

@@ -14,42 +14,45 @@ from llm_wiki.shared.datetime_utils import now
 
 logger = logging.getLogger(__name__)
 
-ANALYZE_SYSTEM_PROMPT = """Phân tích câu hỏi người dùng. Output JSON (không markdown).
-
-1. INTENT (phân loại):
-- current_state: hỏi về tình hình hiện tại ("hiện nay", "bây giờ", "đang")
-- historical: hỏi về quá khứ cụ thể ("năm 2023", "tháng trước")
-- timeline: hỏi về diễn biến theo thời gian ("từ...đến nay", "diễn biến")
-- comparative: hỏi so sánh ("so với", "khác gì", "giữa...và")
-- general: câu hỏi chung
-
-2. TIME_RANGE: trích xuất khoảng thời gian {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"} hoặc null
-
-3. ENTITIES: thực thể được nhắc đến
-Loại: stock_ticker, commodity, location, macro_indicator, person, organization, policy
-Mỗi entity: {"name": "...", "type": "..."}
-
-4. KEYWORDS (QUAN TRỌNG — dùng cho full-text search):
-- keywords: 3-8 từ khóa QUAN TRỌNG NHẤT, đã loại bỏ stop-words (cho, tôi, biết, những, nào, về, trong, là, có, các, và, của, được, không, để, với, sẽ, ra, này, đã, đang, từ...).
-  Chỉ giữ: danh từ riêng, thuật ngữ chuyên ngành, số liệu, địa danh, tên tổ chức.
-  Nếu câu hỏi tiếng Việt, THÊM cả bản tiếng Anh của thuật ngữ để search được cả nội dung tiếng Anh.
-  Ví dụ: hỏi "vàng" → keywords: ["vàng", "gold", "giá vàng"]
-  Ví dụ: hỏi "AI trong y tế" → keywords: ["AI", "artificial intelligence", "y tế", "healthcare", "medical"]
-- key_phrases: 1-3 CỤM TỪ GHÉP quan trọng cần match chính xác.
-  Ví dụ: ["thị trường chứng khoán", "lãi suất ngân hàng"]
-- search_query: chuỗi dùng cho full-text search PostgreSQL tsquery.
-  Các từ/cụm nối bằng " | " (OR logic). Bao gồm cả tiếng Việt VÀ tiếng Anh.
-  Ví dụ: "vàng | gold | giá vàng | kim loại quý"
-
-5. SUB_QUESTIONS: nếu câu hỏi PHỨC TẠP (nhiều khía cạnh, cần tra cứu nhiều bước), phân rã thành 2-4 câu hỏi con ĐƠN GIẢN, ĐỘC LẬP.
-Nếu câu hỏi đơn giản → mảng rỗng [].
-
-6. LANGUAGE: "vi" nếu câu hỏi bằng tiếng Việt, "en" nếu bằng tiếng Anh.
-
-Output JSON đầy đủ:
-{"intent": "...", "time_range": {"start": "YYYY-MM-DD hoặc null", "end": "YYYY-MM-DD hoặc null"}, "entities": [{"name": "...", "type": "..."}], "language": "vi", "keywords": [...], "key_phrases": [...], "search_query": "...", "sub_questions": [...]}
-
-CHỈ output JSON, không markdown."""
+ANALYZE_SYSTEM_PROMPT = (
+    "Phân tích câu hỏi ngườdùng. Output JSON (không markdown).\n\n"
+    "1. INTENT (phân loại):\n"
+    '- current_state: hỏi về tình hình hiện tại ("hiện nay", "bây giờ", "đang")\n'
+    '- historical: hỏi về quá khứ cụ thể ("năm 2023", "tháng trước")\n'
+    '- timeline: hỏi về diễn biến theo thờgian ("từ...đến nay", "diễn biến")\n'
+    '- comparative: hỏi so sánh ("so với", "khác gì", "giữa...và")\n'
+    "- general: câu hỏi chung\n\n"
+    '2. TIME_RANGE: trích xuất khoảng thờgian {"start": "YYYY-MM-DD", '
+    '"end": "YYYY-MM-DD"} hoặc null\n\n'
+    "3. ENTITIES: thực thể được nhắc đến\n"
+    "Loại: stock_ticker, commodity, location, macro_indicator, person, organization, policy\n"
+    'Mỗi entity: {"name": "...", "type": "..."}\n\n'
+    "4. KEYWORDS (QUAN TRỌNG — dùng cho full-text search):\n"
+    "- keywords: 3-8 từ khóa QUAN TRỌNG NHẤT, đã loại bỏ stop-words (cho, tôi, "
+    "biết, những, nào, về, trong, là, có, các, và, của, được, không, để, với, "
+    "sẽ, ra, này, đã, đang, từ...).\n"
+    "  Chỉ giữ: danh từ riêng, thuật ngữ chuyên ngành, số liệu, địa danh, tên tổ chức.\n"
+    "  Nếu câu hỏi tiếng Việt, THÊM cả bản tiếng Anh của thuật ngữ để search được "
+    "cả nội dung tiếng Anh.\n"
+    '  Ví dụ: hỏi "vàng" → keywords: ["vàng", "gold", "giá vàng"]\n'
+    '  Ví dụ: hỏi "AI trong y tế" → keywords: ["AI", "artificial intelligence", '
+    '"y tế", "healthcare", "medical"]\n'
+    "- key_phrases: 1-3 CỤM TỪ GHÉP quan trọng cần match chính xác.\n"
+    '  Ví dụ: ["thị trường chứng khoán", "lãi suất ngân hàng"]\n'
+    "- search_query: chuỗi dùng cho full-text search PostgreSQL tsquery.\n"
+    '  Các từ/cụm nối bằng " | " (OR logic). Bao gồm cả tiếng Việt VÀ tiếng Anh.\n'
+    '  Ví dụ: "vàng | gold | giá vàng | kim loại quý"\n\n'
+    "5. SUB_QUESTIONS: nếu câu hỏi PHỨC TẠP (nhiều khía cạnh, cần tra cứu nhiều bước), "
+    "phân rã thành 2-4 câu hỏi con ĐƠN GIẢN, ĐỘC LẬP.\n"
+    "Nếu câu hỏi đơn giản → mảng rỗng [].\n\n"
+    '6. LANGUAGE: "vi" nếu câu hỏi bằng tiếng Việt, "en" nếu bằng tiếng Anh.\n\n'
+    "Output JSON đầy đủ:\n"
+    '{"intent": "...", "time_range": {"start": "YYYY-MM-DD hoặc null", '
+    '"end": "YYYY-MM-DD hoặc null"}, "entities": [{"name": "...", "type": "..."}], '
+    '"language": "vi", "keywords": [...], "key_phrases": [...], "search_query": "...", '
+    '"sub_questions": [...]}\n\n'
+    "CHỈ output JSON, không markdown."
+)
 
 # Intent → retrieval weights (from 29_LLM_wiki production config)
 INTENT_WEIGHTS: dict[str, dict[str, float]] = {
@@ -92,10 +95,10 @@ def _extract_json(text: str) -> dict:
                 candidate = text[start : i + 1]
                 try:
                     return json.loads(candidate)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
                     # The balance algorithm found a pair but it may include
                     # nested strings with unmatched braces; try to resync.
-                    raise ValueError("Unbalanced JSON braces in response")
+                    raise ValueError("Unbalanced JSON braces in response") from exc
     raise ValueError("No balanced JSON object found in response")
 
 
@@ -173,7 +176,8 @@ class LLMQueryAnalyzerAdapter(QueryAnalyzerPort):
             ]
 
             logger.debug(
-                "Query analyzed: intent=%s lang=%s time_range=%s entities=%d keywords=%d phrases=%d sub_qs=%d",
+                "Query analyzed: intent=%s lang=%s time_range=%s "
+                "entities=%d keywords=%d phrases=%d sub_qs=%d",
                 intent,
                 language,
                 time_range,

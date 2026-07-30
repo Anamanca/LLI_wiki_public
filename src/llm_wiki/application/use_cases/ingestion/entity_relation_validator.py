@@ -144,11 +144,9 @@ PERSON_TYPES: frozenset[str] = frozenset(
 
 def _is_direction_forbidden(from_type: str, to_type: str) -> bool:
     """Company → Person and Person → Person are always forbidden."""
-    if from_type in COMPANY_TYPES and to_type in PERSON_TYPES:
-        return True
-    if from_type in PERSON_TYPES and to_type in PERSON_TYPES:
-        return True
-    return False
+    return (from_type in COMPANY_TYPES and to_type in PERSON_TYPES) or (
+        from_type in PERSON_TYPES and to_type in PERSON_TYPES
+    )
 
 
 # ── Type compatibility matrix (all 64 predicates) ──────────────────────────
@@ -443,7 +441,9 @@ def validate_relations_batch(
         else:
             rejected += 1
             reasons.append(
-                f"{rel.get('from', '?')} —{rel.get('predicate', '?')}→ {rel.get('to', '?')}: {result.reason}"
+                f"{rel.get('from', '?')}"
+                f" —{rel.get('predicate', '?')}→"
+                f" {rel.get('to', '?')}: {result.reason}"
             )
 
     return valid, rejected, reasons

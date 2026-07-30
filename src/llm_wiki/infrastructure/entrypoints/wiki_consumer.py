@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import signal
@@ -160,7 +161,7 @@ async def _save_section_vectors(page_id_str: str | None, db: AsyncSession) -> in
     tasks = [_embed_single_text(t, sem) for t in section_texts]
     section_vectors = await asyncio.gather(*tasks)
 
-    for section, vector in zip(page_sections, section_vectors):
+    for section, vector in zip(page_sections, section_vectors, strict=False):
         section.section_vector = vector
     await db.commit()
     logger.info(
@@ -218,7 +219,7 @@ async def process_wiki_job(item_id: UUID) -> None:
         )
 
         # Max wiki consumer retries before permanent fail
-        WIKI_MAX_RETRIES = 5
+        WIKI_MAX_RETRIES = 5  # noqa: N806
 
         # Create a root span for EVERY job — both fresh wiki integration
         # and cached-page retry paths. This ensures end_span is always
@@ -240,7 +241,8 @@ async def process_wiki_job(item_id: UUID) -> None:
 
         if cached_page_id:
             logger.info(
-                "Wiki consumer %d: skipping wiki integration for %s — page %s already created, retrying embedding only",
+                "Wiki consumer %d: skipping wiki integration for %s — "
+                "page %s already created, retrying embedding only",
                 CONSUMER_ID,
                 item.external_id,
                 cached_page_id,
@@ -304,7 +306,10 @@ async def process_wiki_job(item_id: UUID) -> None:
                 item.started_at = None
                 if item.retry_count > WIKI_MAX_RETRIES:
                     item.status = "failed"
-                    item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: timeout"
+                    item.error_message = (
+                        f"Wiki integration permanently failed after {item.retry_count} "
+                        "attempts: timeout"
+                    )
                     inc_counter(
                         "ingestion_jobs_total",
                         {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
@@ -339,7 +344,10 @@ async def process_wiki_job(item_id: UUID) -> None:
                 item.started_at = None
                 if item.retry_count > WIKI_MAX_RETRIES:
                     item.status = "failed"
-                    item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: {error_str[:400]}"
+                    item.error_message = (
+                        f"Wiki integration permanently failed after {item.retry_count} "
+                        f"attempts: {error_str[:400]}"
+                    )
                     inc_counter(
                         "ingestion_jobs_total",
                         {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
@@ -406,7 +414,10 @@ async def process_wiki_job(item_id: UUID) -> None:
             item.started_at = None
             if item.retry_count > WIKI_MAX_RETRIES:
                 item.status = "failed"
-                item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: section embedding timeout"
+                item.error_message = (
+                    f"Wiki integration permanently failed after {item.retry_count} "
+                    "attempts: section embedding timeout"
+                )
                 inc_counter(
                     "ingestion_jobs_total",
                     {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)},
@@ -440,7 +451,10 @@ async def process_wiki_job(item_id: UUID) -> None:
             item.started_at = None
             if item.retry_count > WIKI_MAX_RETRIES:
                 item.status = "failed"
-                item.error_message = f"Wiki integration permanently failed after {item.retry_count} attempts: section embedding error"
+                item.error_message = (
+                    f"Wiki integration permanently failed after {item.retry_count} "
+                    "attempts: section embedding error"
+                )
                 inc_counter(
                     "ingestion_jobs_total",
                     {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)},
@@ -593,10 +607,8 @@ async def main() -> None:
         for task in (health_task, heartbeat_task):
             task.cancel()
         for task in (health_task, heartbeat_task):
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
         await close_redis()
 
     logger.info("Wiki consumer %d stopped", CONSUMER_ID)

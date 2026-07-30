@@ -52,7 +52,9 @@ QUY TẮC DỪNG:
   - "expand" khi relevance 5-7 nhưng context hơi ít
 
 Output JSON:
-{"faithfulness": 0-10, "completeness": 0-10, "relevance": 0-10, "should_stop": true/false, "missing_info": "...", "refined_query": "...", "suggested_strategy": "..."}
+{"faithfulness": 0-10, "completeness": 0-10, "relevance": 0-10,
+ "should_stop": true/false, "missing_info": "...",
+ "refined_query": "...", "suggested_strategy": "..."}
 
 CHỈ output JSON, không markdown."""
 

@@ -1,8 +1,10 @@
 """Benchmark the RAG pipeline with tracing on and off.
 
 Usage:
-    LANGSMITH_TRACING=false python scripts/benchmark_rag.py --questions eval/questions.jsonl --output metrics/baseline.json
-    LANGSMITH_TRACING=true  python scripts/benchmark_rag.py --questions eval/questions.jsonl --output metrics/traced.json
+    LANGSMITH_TRACING=false python scripts/benchmark_rag.py \
+        --questions eval/questions.jsonl --output metrics/baseline.json
+    LANGSMITH_TRACING=true  python scripts/benchmark_rag.py \
+        --questions eval/questions.jsonl --output metrics/traced.json
 """
 
 from __future__ import annotations
@@ -20,16 +22,22 @@ import sqlalchemy.ext.asyncio
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from llm_wiki.application.dto.query_dto import QueryInput
-from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
-from llm_wiki.config import settings
-from llm_wiki.infrastructure.embedding.ollama_adapter import OllamaEmbeddingAdapter
-from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter
-from llm_wiki.infrastructure.persistence.postgres.database import async_session_factory
-from llm_wiki.infrastructure.persistence.redis.cache_adapter import RedisCacheAdapter
-from llm_wiki.infrastructure.search.pgvector_adapter import PgVectorSearchAdapter
-from llm_wiki.infrastructure.search.tsvector_adapter import TsVectorSearchAdapter
-from llm_wiki.infrastructure.telemetry import create_telemetry_adapter
+from llm_wiki.application.dto.query_dto import QueryInput  # noqa: E402
+from llm_wiki.application.use_cases.query.pipeline import QueryPipeline  # noqa: E402
+from llm_wiki.config import settings  # noqa: E402
+from llm_wiki.infrastructure.embedding.ollama_adapter import (  # noqa: E402
+    OllamaEmbeddingAdapter,
+)
+from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter  # noqa: E402
+from llm_wiki.infrastructure.persistence.postgres.database import (  # noqa: E402
+    async_session_factory,
+)
+from llm_wiki.infrastructure.persistence.redis.cache_adapter import (  # noqa: E402
+    RedisCacheAdapter,
+)
+from llm_wiki.infrastructure.search.pgvector_adapter import PgVectorSearchAdapter  # noqa: E402
+from llm_wiki.infrastructure.search.tsvector_adapter import TsVectorSearchAdapter  # noqa: E402
+from llm_wiki.infrastructure.telemetry import create_telemetry_adapter  # noqa: E402
 
 
 def load_questions(path: Path) -> list[str]:

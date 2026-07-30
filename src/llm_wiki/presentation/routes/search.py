@@ -1,3 +1,5 @@
+import contextlib
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,10 +26,8 @@ async def search(
 
         uuids = []
         for rid in result_ids:
-            try:
+            with contextlib.suppress(ValueError):
                 uuids.append(UUID(rid))
-            except ValueError:
-                pass
         if uuids:
             sections_q = (
                 select(orm.PageSection, orm.Page, orm.Source)

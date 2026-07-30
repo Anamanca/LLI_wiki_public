@@ -7,6 +7,7 @@ is still alive for a given job before resetting.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from sqlalchemy import bindparam, text, update
@@ -171,7 +172,7 @@ async def _recover_classified_items() -> tuple[int, int]:
     are permanently failed instead of being re-queued.
     Returns (classified_count, requeued_count).
     """
-    MAX_RECOVERY_RETRIES = 10
+    MAX_RECOVERY_RETRIES = 10  # noqa: N806
     classified_count = 0
     requeued_count = 0
 
@@ -189,17 +190,15 @@ async def _recover_classified_items() -> tuple[int, int]:
             requeued_count = await _requeue_classified(classified_ids)
             # Increment retry_count for recovered items so they don't cycle forever
             async with async_session_factory() as db:
-                from uuid import UUID as UuidType
+                from uuid import UUID
 
                 for item_id in classified_ids:
-                    try:
+                    with contextlib.suppress(Exception):
                         await db.execute(
                             update(SourceItem)
-                            .where(SourceItem.id == UuidType(item_id))
+                            .where(SourceItem.id == UUID(item_id))
                             .values(retry_count=SourceItem.retry_count + 1)
                         )
-                    except Exception:
-                        pass
                 await db.commit()
         except Exception as exc:
             logger.error("Stale recovery (classified re-queue) failed: %s", exc)
@@ -219,7 +218,10 @@ async def _recover_classified_items() -> tuple[int, int]:
                 .where(SourceItem.retry_count >= MAX_RECOVERY_RETRIES)
                 .values(
                     status="failed",
-                    error_message=f"Wiki integration permanently failed after {MAX_RECOVERY_RETRIES} recovery re-queues — embedding likely hangs or page has issues",
+                    error_message=(
+                        f"Wiki integration permanently failed after {MAX_RECOVERY_RETRIES} "
+                        "recovery re-queues — embedding likely hangs or page has issues"
+                    ),
                     started_at=None,
                 )
             )
@@ -239,7 +241,10 @@ async def _recover_classified_items() -> tuple[int, int]:
 
 async def _sweep_once() -> tuple[int, int, int, int, int, int]:
     """Recover stuck processing/wiki_processing/transcribing/classified items.
-    Returns (cpu, wiki, transcribing, pending_transcribe, classified_recovered, classified_requeued)."""
+
+    Returns (cpu, wiki, transcribing, pending_transcribe,
+    classified_recovered, classified_requeued).
+    """
     cpu_count = 0
     wiki_count = 0
     transcribing_count = 0
@@ -304,7 +309,8 @@ async def _sweep_once() -> tuple[int, int, int, int, int, int]:
         ]
     ):
         logger.warning(
-            "Stale recovery: %d processing + %d wiki_processing + %d transcribing + %d pending_transcribe + %d classified reset, %d requeued",
+            "Stale recovery: %d processing + %d wiki_processing + %d transcribing + "
+            "%d pending_transcribe + %d classified reset, %d requeued",
             cpu_count,
             wiki_count,
             transcribing_count,
@@ -325,7 +331,8 @@ async def _sweep_once() -> tuple[int, int, int, int, int, int]:
 async def run_sweeper() -> None:
     global _shutdown
     logger.info(
-        "Stale recovery sweeper started (interval=%ds, cpu/transcribing=%dmin, wiki=%dmin, classified=%dmin, worker_timeout=%ds)",
+        "Stale recovery sweeper started (interval=%ds, cpu/transcribing=%dmin, "
+        "wiki=%dmin, classified=%dmin, worker_timeout=%ds)",
         SWEEP_INTERVAL_SECONDS,
         STALE_THRESHOLD_MINUTES,
         STALE_WIKI_THRESHOLD_MINUTES,

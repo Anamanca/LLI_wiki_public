@@ -82,7 +82,9 @@ class ExtractEventsUseCase:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You extract structured events from text. Return only valid JSON.",
+                        "content": (
+                            "You extract structured events from text. Return only valid JSON."
+                        ),
                     },
                     {"role": "user", "content": prompt},
                 ],

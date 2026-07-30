@@ -84,7 +84,8 @@ def test_chat_flow_question_to_answer():
             'data: {"type": "status", "status": "retrieving"}',
             'data: {"type": "status", "status": "thinking"}',
             'data: {"type": "status", "status": "summarizing"}',
-            'data: {"type": "complete", "answer": "RAG stands for retrieval-augmented generation.", "citations": [{"page_title": "RAG", "page_slug": "rag"}], "sources_used": []}',
+            'data: {"type": "complete", "answer": "RAG stands for retrieval-augmented generation.",'
+            ' "citations": [{"page_title": "RAG", "page_slug": "rag"}], "sources_used": []}',
             "data: [DONE]",
         ]
     )

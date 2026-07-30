@@ -96,7 +96,6 @@ class IntegrateWikiUseCase:
     def _split_sections(self, content: str) -> list[tuple[str, str]]:
         sections = re.split(r"\n(?=#{1,3}\s)", content)
         result = []
-        current_title = ""
         for sec in sections:
             sec = sec.strip()
             if not sec:

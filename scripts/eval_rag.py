@@ -5,10 +5,12 @@ Usage:
     python scripts/eval_rag.py --dataset eval/rag_eval_dataset.jsonl --dry-run
 
     # Run against LangSmith
-    LANGSMITH_TRACING=true python scripts/eval_rag.py --dataset eval/rag_eval_dataset.jsonl --run
+    LANGSMITH_TRACING=true python scripts/eval_rag.py \
+        --dataset eval/rag_eval_dataset.jsonl --run
 
     # Use a custom evaluator model
-    LANGSMITH_EVALUATOR_MODEL=deepseek-v4-flash python scripts/eval_rag.py --dataset eval/rag_eval_dataset.jsonl --run
+    LANGSMITH_EVALUATOR_MODEL=deepseek-v4-flash python scripts/eval_rag.py \
+        --dataset eval/rag_eval_dataset.jsonl --run
 """
 
 from __future__ import annotations
@@ -25,17 +27,24 @@ import sqlalchemy.ext.asyncio
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from llm_wiki.application.dto.query_dto import QueryInput
-from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
-from llm_wiki.config import settings
-from llm_wiki.infrastructure.embedding.ollama_adapter import OllamaEmbeddingAdapter
-from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter
-from llm_wiki.infrastructure.persistence.postgres.database import async_session_factory
-from llm_wiki.infrastructure.persistence.redis.cache_adapter import RedisCacheAdapter
-from llm_wiki.infrastructure.search.pgvector_adapter import PgVectorSearchAdapter
-from llm_wiki.infrastructure.search.tsvector_adapter import TsVectorSearchAdapter
-from llm_wiki.infrastructure.telemetry import create_telemetry_adapter
-from llm_wiki.infrastructure.telemetry.langsmith_eval_adapter import (
+# fmt: off
+from llm_wiki.application.dto.query_dto import QueryInput  # noqa: E402
+from llm_wiki.application.use_cases.query.pipeline import QueryPipeline  # noqa: E402
+from llm_wiki.config import settings  # noqa: E402
+from llm_wiki.infrastructure.embedding.ollama_adapter import (  # noqa: E402
+    OllamaEmbeddingAdapter,
+)
+from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter  # noqa: E402
+from llm_wiki.infrastructure.persistence.postgres.database import (  # noqa: E402
+    async_session_factory,
+)
+from llm_wiki.infrastructure.persistence.redis.cache_adapter import (  # noqa: E402
+    RedisCacheAdapter,
+)
+from llm_wiki.infrastructure.search.pgvector_adapter import PgVectorSearchAdapter  # noqa: E402
+from llm_wiki.infrastructure.search.tsvector_adapter import TsVectorSearchAdapter  # noqa: E402
+from llm_wiki.infrastructure.telemetry import create_telemetry_adapter  # noqa: E402
+from llm_wiki.infrastructure.telemetry.langsmith_eval_adapter import (  # noqa: E402
     LangSmithEvalAdapter,
     correctness_evaluator,
     faithfulness_evaluator,

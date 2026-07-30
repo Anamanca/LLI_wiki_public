@@ -1,6 +1,13 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Optional
+from uuid import UUID
+
+from llm_wiki.domain.value_objects.identifiers import EventId
+
+EntityId = UUID
+EventEntityLinkId = UUID
+EntityRelationId = UUID
 
 
 @dataclass

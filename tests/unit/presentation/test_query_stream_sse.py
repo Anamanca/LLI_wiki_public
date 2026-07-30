@@ -24,7 +24,8 @@ def test_sse_status_sequence_and_complete():
             'data: {"type": "status", "status": "retrieving"}',
             'data: {"type": "status", "status": "thinking"}',
             'data: {"type": "status", "status": "summarizing"}',
-            'data: {"type": "complete", "answer": "answer text", "citations": [{"page_title": "T", "page_slug": "t"}], "sources_used": []}',
+            'data: {"type": "complete", "answer": "answer text",'
+            ' "citations": [{"page_title": "T", "page_slug": "t"}], "sources_used": []}',
             "data: [DONE]",
         ]
     )

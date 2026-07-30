@@ -131,21 +131,22 @@ class ApiTester:
         for item in items:
             if not isinstance(item, dict):
                 raise AssertionError(f"{path}: expected dict, got {type(item).__name__}: {item}")
-            for field in required:
-                assert field in item, (
-                    f"{path}: missing required field '{field}'. Got keys: {list(item.keys())}"
+            for field_name in required:
+                assert field_name in item, (
+                    f"{path}: missing required field '{field_name}'. Got keys: {list(item.keys())}"
                 )
 
     def check_field_types(self, data: dict, field_types: dict, path: str):
         """Assert fields have expected Python types."""
-        for field, expected_type in field_types.items():
-            if field not in data:
+        for field_name, expected_type in field_types.items():
+            if field_name not in data:
                 continue
-            actual = data[field]
+            actual = data[field_name]
             if actual is None:
                 continue
             assert isinstance(actual, expected_type), (
-                f"{path}: field '{field}' expected {expected_type.__name__}, got {type(actual).__name__}: {actual}"
+                f"{path}: field '{field_name}' expected {expected_type.__name__}, "
+                f"got {type(actual).__name__}: {actual}"
             )
 
 
@@ -181,7 +182,7 @@ class TestHealth:
         assert data["status"] == "ok"
 
     async def test_health_frontend_shape(self, api_tester: ApiTester):
-        """BUG: Frontend expects {status: string, db: string} but backend returns {status, version}."""
+        """BUG: Frontend expects {status, db} but backend returns {status, version}."""
         r = await api_tester.get("/health")
         data = r.json()
         missing = [f for f in ["db"] if f not in data]
@@ -212,8 +213,8 @@ class TestQuery:
         )
         data = r.json()
         # Check required fields exist (backend returns frontend-compatible shape now)
-        for field in ["answer", "citations", "sources_used", "tokens_used", "latency_ms"]:
-            assert field in data, f"Missing field '{field}' in query response"
+        for field_name in ["answer", "citations", "sources_used", "tokens_used", "latency_ms"]:
+            assert field_name in data, f"Missing field '{field_name}' in query response"
 
     async def test_query_frontend_shape(self, api_tester: ApiTester):
         """Check POST /api/query returns frontend-compatible shape."""
@@ -230,7 +231,8 @@ class TestQuery:
         missing = [f for f in frontend_required if f not in data]
         if missing:
             pytest.fail(
-                f"FRONTEND MISMATCH: POST /api/query missing fields: {missing}\n  Got: {list(data.keys())}"
+                f"FRONTEND MISMATCH: POST /api/query missing fields: {missing}\n"
+                f"  Got: {list(data.keys())}"
             )
 
     async def test_query_with_source_filter(self, api_tester: ApiTester):
@@ -270,7 +272,11 @@ class TestQuery:
             },
         )
         body = r.text
-        lines = [l for l in body.split("\n") if l.startswith("data: ") and l != "data: [DONE]"]
+        lines = [
+            line
+            for line in body.split("\n")
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
 
         type_values = set()
         for line in lines:
@@ -290,7 +296,8 @@ class TestQuery:
                 f"  Backend sends: {sorted(backend_types & type_values)}\n"
                 f"  Frontend expects: {sorted(frontend_types)}\n"
                 f"  Found in stream: {sorted(type_values)}\n"
-                f"  Fix: useQueryStream.ts line 83 expects type==='token' but backend sends type==='chunk'"
+                f"  Fix: useQueryStream.ts line 83 expects type==='token' but "
+                f"backend sends type==='chunk'"
             )
 
 
@@ -356,7 +363,8 @@ class TestSources:
                 "  SourceListResponse = {sources: Source[], total: number}\n"
                 "  This causes: Cannot read properties of undefined (reading 'sources') or "
                 "frontend renders empty because it tries data.sources but gets an array.\n"
-                '  Fix: In sources.py list_sources(), wrap result in {"sources": [...], "total": len}'
+                "  Fix: In sources.py list_sources(), wrap result in "
+                '{"sources": [...], "total": len}'
             )
 
         if isinstance(data, dict):
@@ -452,9 +460,10 @@ class TestSources:
         r = await api_tester.post(f"/sources/{created_source_id}/scan")
         data = r.json()
         assert "status" in data
-        # Frontend expects: {status, message, new_items_found, restarted_rate_limited, restarted_failed}
-        for field in ["message", "new_items_found"]:
-            assert field in data, f"Missing '{field}' in scan response"
+        # Frontend expects: {status, message, new_items_found,
+        # restarted_rate_limited, restarted_failed}
+        for field_name in ["message", "new_items_found"]:
+            assert field_name in data, f"Missing '{field_name}' in scan response"
 
 
 # ===================================================================
@@ -494,17 +503,17 @@ class TestSourceItems:
     async def test_skip_item_404(self, api_tester: ApiTester):
         """Skip non-existent item → 404."""
         fake_id = "00000000-0000-0000-0000-000000000000"
-        r = await api_tester.post(f"/sources/items/{fake_id}/skip", expected_status=404)
+        await api_tester.post(f"/sources/items/{fake_id}/skip", expected_status=404)
 
     async def test_retry_item_404(self, api_tester: ApiTester):
         """Retry non-existent item → 404."""
         fake_id = "00000000-0000-0000-0000-000000000000"
-        r = await api_tester.post(f"/sources/items/{fake_id}/retry", expected_status=404)
+        await api_tester.post(f"/sources/items/{fake_id}/retry", expected_status=404)
 
     async def test_transcript_stub(self, api_tester: ApiTester):
         """POST /api/sources/items/{id}/transcript — stub acknowledges."""
         fake_id = "00000000-0000-0000-0000-000000000000"
-        r = await api_tester.post(f"/sources/items/{fake_id}/transcript", expected_status=404)
+        await api_tester.post(f"/sources/items/{fake_id}/transcript", expected_status=404)
 
 
 # ===================================================================
@@ -514,7 +523,8 @@ class TestSourceItems:
 
 class TestPages:
     async def test_list_pages_response_shape(self, api_tester: ApiTester):
-        """BUG: Backend returns {items, total} but frontend expects {items, total, page, per_page}."""
+        """BUG: Backend returns {items, total} but frontend expects
+        {items, total, page, per_page}."""
         r = await api_tester.get("/pages")
         data = r.json()
         assert "items" in data
@@ -530,7 +540,8 @@ class TestPages:
             )
 
     async def test_list_pages_with_source_filter(self, api_tester: ApiTester):
-        r = await api_tester.get("/pages?source_id=00000000-0000-0000-0000-000000000000")
+        fake_id = "00000000-0000-0000-0000-000000000000"
+        r = await api_tester.get(f"/pages?source_id={fake_id}")
         data = r.json()
         assert "items" in data
 
@@ -538,8 +549,8 @@ class TestPages:
         await api_tester.get("/pages/nonexistent-slug-12345", expected_status=404)
 
     async def test_get_page_frontend_shape(self, api_tester: ApiTester):
-        """BUG: pages.py GET /pages/{slug} lacks sections/media_assets/linked_pages/source_*
-        that frontend PageDetail type expects. The richer version is in stubs.py but gets shadowed."""
+        """BUG: pages.py GET /pages/{slug} lacks sections/media_assets/linked_pages
+        that frontend PageDetail type expects. The richer version in stubs.py gets shadowed."""
         # Create a source first, then a page, then test
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
             # Create source
@@ -576,13 +587,15 @@ class TestPages:
                 missing = [f for f in frontend_fields if f not in detail_data]
                 if missing:
                     pytest.fail(
-                        f"FRONTEND MISMATCH: GET /api/pages/{{slug}} (from pages.py, registered first)\n"
+                        f"FRONTEND MISMATCH: GET /api/pages/{{slug}}\n"
+                        f"  (from pages.py, registered first)\n"
                         f"  Missing fields for PageDetail type: {missing}\n"
                         f"  Backend returned: {list(detail_data.keys())}\n"
-                        f"  NOTE: stubs.py has a richer version with sections/media_assets/linked_pages\n"
+                        f"  NOTE: stubs.py has a richer version with\n"
+                        f"  sections/media_assets/linked_pages\n"
                         f"  but it's shadowed by pages.py which registers first in main.py.\n"
-                        f"  Fix: Either swap router registration order, merge into one, or ensure\n"
-                        f"  ENABLE_STUB_ROUTES version has different paths."
+                        f"  Fix: Either swap router registration order, merge into one,\n"
+                        f"  or ensure ENABLE_STUB_ROUTES version has different paths."
                     )
 
             # Cleanup
@@ -602,7 +615,8 @@ class TestSearch:
 
     async def test_search_frontend_shape(self, api_tester: ApiTester):
         """BUG: Backend returns {results: [{id, title, content, score}]}
-        but frontend expects {results: [{id, title, slug, summary, source_name, published_at}], total}."""
+        but frontend expects {results: [{id, title, slug, summary,
+        source_name, published_at}], total}."""
         r = await api_tester.get("/search?q=test")
         data = r.json()
 
@@ -624,18 +638,20 @@ class TestSearch:
 
             if has_backend_shape and not has_frontend_shape:
                 pytest.fail(
-                    f"CRITICAL BUG: GET /api/search result items don't match frontend SearchResult type.\n"
+                    "CRITICAL BUG: GET /api/search result items don't match"
+                    " frontend SearchResult type.\n"
                     f"  Backend sends: {sorted(backend_fields)}\n"
                     f"  Frontend expects: {sorted(frontend_fields)}\n"
                     f"  Actual: {sorted(item.keys())}\n"
-                    f"  The frontend renders search results using 'slug', 'summary', 'source_name',\n"
-                    f"  'published_at' — but backend sends 'content' and 'score' instead.\n"
-                    f"  This means the search UI displays nothing or crashes."
+                    "  The frontend renders search results using 'slug', 'summary',"
+                    " 'source_name',\n"
+                    "  'published_at' — but backend sends 'content' and 'score' instead.\n"
+                    "  This means the search UI displays nothing or crashes."
                 )
 
     async def test_search_empty_query(self, api_tester: ApiTester):
         """Search with no query param → 422 validation error."""
-        r = await api_tester.get("/search", expected_status=422)
+        await api_tester.get("/search", expected_status=422)
 
 
 # ===================================================================
@@ -648,8 +664,8 @@ class TestProgress:
         """GET /api/progress — stub routes only if ENABLE_STUB_ROUTES=true."""
         r = await api_tester.get("/progress")
         data = r.json()
-        for field in ["global", "per_source", "alerts", "processing_items"]:
-            assert field in data, f"Missing '{field}' in progress response"
+        for field_name in ["global", "per_source", "alerts", "processing_items"]:
+            assert field_name in data, f"Missing '{field_name}' in progress response"
 
     async def test_progress_frontend_shape(self, api_tester: ApiTester):
         """Check frontend Progress type shape."""
@@ -674,14 +690,14 @@ class TestProgress:
     async def test_system_stats(self, api_tester: ApiTester):
         r = await api_tester.get("/system-stats")
         data = r.json()
-        for field in [
+        for field_name in [
             "cpu_percent",
             "ram_used_gb",
             "ram_total_gb",
             "disk_used_gb",
             "disk_total_gb",
         ]:
-            assert field in data, f"Missing '{field}' in system-stats"
+            assert field_name in data, f"Missing '{field_name}' in system-stats"
 
 
 # ===================================================================
@@ -849,7 +865,7 @@ class TestApiKeys:
 
     async def test_create_api_key_501(self, api_tester: ApiTester):
         """POST /api/admin/api-keys returns 501 Not Implemented."""
-        r = await api_tester.post(
+        await api_tester.post(
             "/admin/api-keys",
             {
                 "provider": "opencode",
@@ -861,7 +877,7 @@ class TestApiKeys:
 
     async def test_update_api_key_501(self, api_tester: ApiTester):
         fake_id = "00000000-0000-0000-0000-000000000000"
-        r = await api_tester.put(
+        await api_tester.put(
             f"/admin/api-keys/{fake_id}", {"status": "active"}, expected_status=501
         )
 
@@ -1070,7 +1086,8 @@ class TestFrontendBackendContract:
         data = r.json()
         if "page" not in data or "per_page" not in data:
             pytest.fail(
-                "fetchPages() expects 'page' and 'per_page' in response — frontend pagination broken"
+                "fetchPages() expects 'page' and 'per_page' in response\n"
+                "  — frontend pagination broken"
             )
 
     async def test_frontend_search_flow(self, api_tester: ApiTester):
@@ -1105,7 +1122,11 @@ class TestFrontendBackendContract:
         """Simulate useQueryStream() → fetch('/api/query/stream') on chat."""
         r = await api_tester.post("/query/stream", {"question": "test", "top_k": 3})
         body = r.text
-        lines = [l for l in body.split("\n") if l.startswith("data: ") and l != "data: [DONE]"]
+        lines = [
+            line
+            for line in body.split("\n")
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
 
         has_token = False
         has_complete = False
@@ -1152,9 +1173,14 @@ class TestFrontendBackendContract:
         r = await api_tester.get(f"/pages/{slug}")
         detail = r.json()
 
-        # ENABLE_STUB_ROUTES version (stubs.py) has: sections, media_assets, linked_pages, source_name, source_url
-        # Non-stub version (pages.py) has: id, title, slug, content_markdown, summary, domain, key_entities, status, created_at, updated_at
-        # Frontend PageDetail expects: sections, media_assets, linked_pages, source_name, source_url, source_video_url
+        # ENABLE_STUB_ROUTES version (stubs.py) has:
+        # sections, media_assets, linked_pages, source_name, source_url
+        # Non-stub version (pages.py) has:
+        # id, title, slug, content_markdown, summary, domain, key_entities,
+        # status, created_at, updated_at
+        # Frontend PageDetail expects:
+        # sections, media_assets, linked_pages, source_name, source_url,
+        # source_video_url
 
         has_enriched = "sections" in detail
 

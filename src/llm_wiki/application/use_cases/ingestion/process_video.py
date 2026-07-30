@@ -56,7 +56,7 @@ class RetryableIngestion:
                     str(item.id.value),
                     reason=str(e),
                     retryable=attempt < max_retries - 1,
-                )
+                ) from e
         return item
 
 
@@ -89,7 +89,7 @@ class ProcessVideoUseCase:
 
             page_title = item.title or f"Video {item.external_id[:16]}"
 
-            page = await self._wiki_integrator.execute(
+            _ = await self._wiki_integrator.execute(
                 page_title=page_title,
                 content_markdown=transcript,
                 source_item=item,

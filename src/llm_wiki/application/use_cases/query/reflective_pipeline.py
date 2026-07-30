@@ -20,6 +20,7 @@ Strategies attempted in order:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -502,10 +503,8 @@ class SelfReflectiveRAGPipeline:
                         )
                         # Re-embed the refined query
                         if self._embedder:
-                            try:
+                            with contextlib.suppress(Exception):
                                 state["embedding"] = await self._embedder.embed(refined)
-                            except Exception:
-                                pass
                     # After refinement, cycle to next in order (don't stay on refine_query)
                     next_strategy = self._next_strategy(state["strategy"])
                 elif next_strategy == state["strategy"]:
@@ -617,10 +616,8 @@ class SelfReflectiveRAGPipeline:
 
         # Embedding (used by default and expand strategies)
         if self._embedder:
-            try:
+            with contextlib.suppress(Exception):
                 state["embedding"] = await self._embedder.embed(state["rewritten_question"])
-            except Exception:
-                pass
 
         return state
 
@@ -944,7 +941,7 @@ class SelfReflectiveRAGPipeline:
         )
 
         result_sets: dict[str, list[SearchResult]] = {}
-        for name, raw in zip(names, results_raw):
+        for name, raw in zip(names, results_raw, strict=True):
             if isinstance(raw, Exception):
                 logger.warning("Stream '%s' failed: %s", name, raw)
                 result_sets[name] = []
@@ -972,7 +969,7 @@ class SelfReflectiveRAGPipeline:
 
         # Intent-specific system prompt per language
         if lang == "en":
-            _INTENT_EN_PROMPTS = {
+            _intent_en_prompts = {
                 "timeline": (
                     "You are an expert in chronological timeline analysis. "
                     "Answer the question based ON THE PROVIDED CONTEXT. "
@@ -1011,7 +1008,7 @@ class SelfReflectiveRAGPipeline:
                     "(4) an overall conclusion at the end.\n\n"
                 ),
             }
-            system_prompt = _INTENT_EN_PROMPTS.get(intent, _INTENT_EN_PROMPTS["general"])
+            system_prompt = _intent_en_prompts.get(intent, _intent_en_prompts["general"])
             system_prompt += (
                 "Cite sources using [N]. "
                 "If the context is insufficient, clearly state which parts "
@@ -1324,10 +1321,8 @@ class SelfReflectiveRAGPipeline:
                 if refined and refined != state["rewritten_question"]:
                     state["rewritten_question"] = refined
                     if self._embedder:
-                        try:
+                        with contextlib.suppress(Exception):
                             state["embedding"] = await self._embedder.embed(refined)
-                        except Exception:
-                            pass
                 next_strategy = self._next_strategy(state["strategy"])
             elif next_strategy == state["strategy"]:
                 next_strategy = self._next_strategy(state["strategy"])
@@ -1349,13 +1344,17 @@ class SelfReflectiveRAGPipeline:
                 results_changed = current_content_ids != state.get("prev_content_ids", [])
                 state["prev_content_ids"] = current_content_ids
 
-                if self._re_ranker and state["top_results"] and len(state["top_results"]) > 5:
-                    if results_changed or state["attempt"] == 2:
-                        state["top_results"] = await self._re_ranker.rerank(
-                            state["rewritten_question"],
-                            state["top_results"],
-                            top_n=20,
-                        )
+                if (
+                    self._re_ranker
+                    and state["top_results"]
+                    and len(state["top_results"]) > 5
+                    and (results_changed or state["attempt"] == 2)
+                ):
+                    state["top_results"] = await self._re_ranker.rerank(
+                        state["rewritten_question"],
+                        state["top_results"],
+                        top_n=20,
+                    )
 
                 state["context"] = self._pipeline._build_context(state["top_results"])
                 context_changed = state["context"] != state.get("prev_context", "")
@@ -1380,10 +1379,8 @@ class SelfReflectiveRAGPipeline:
                     if refined and refined != state["rewritten_question"]:
                         state["rewritten_question"] = refined
                         if self._embedder:
-                            try:
+                            with contextlib.suppress(Exception):
                                 state["embedding"] = await self._embedder.embed(refined)
-                            except Exception:
-                                pass
                     next_strategy = self._next_strategy(state["strategy"])
                 elif next_strategy == state["strategy"]:
                     next_strategy = self._next_strategy(state["strategy"])
