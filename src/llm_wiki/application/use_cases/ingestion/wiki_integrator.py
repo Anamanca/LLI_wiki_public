@@ -152,6 +152,25 @@ def _repair_truncated_json(json_str: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+def _strip_section_header(content_markdown: str, title: str | None = None) -> str:
+    """Strip the leading ``## Title\\n\\n`` from section content, if present.
+
+    The LLM sometimes includes the section header inside ``content_markdown``
+    (following the markdown structure shown in the few-shot example).  We strip
+    it so that ``_create_page`` / ``_update_page`` do not produce double
+    headers when they regenerate ``page.content_markdown`` from all sections.
+    """
+    text = content_markdown.lstrip()
+    m = re.match(r"^##\s+([^\n]+)\n\n", text)
+    if not m:
+        return text
+    stripped_title = m.group(1).strip()
+    # If we know the expected title, verify it matches to avoid false positives.
+    if title is not None and stripped_title != title.strip():
+        return text
+    return text[m.end():]
+
+
 def _slugify(title: str) -> str:
     """Create a URL-friendly slug from a title."""
     slug = title.lower().strip()
@@ -1106,11 +1125,14 @@ async def _create_page(
     valid_sections = []
     for idx, sec in enumerate(data.get("sections", [])):
         sec_content = sec.get("content_markdown", "")
+        sec_title = sec.get("title", "")
+        # Strip leading ## Title header if LLM included it in content.
+        sec_content = _strip_section_header(sec_content, sec_title)
         # Guard: reject thin/non-substantive section content (< 200 chars).
         if not sec_content or len(sec_content.strip()) < 200:
             logger.warning(
                 "Skipping section '%s' in new page: content too short (%d chars, min 200)",
-                sec.get("title", ""),
+                sec_title,
                 len(sec_content.strip()),
             )
             continue
@@ -1118,7 +1140,7 @@ async def _create_page(
             page_id=page.id,
             source_id=source_id,
             section_order=sec.get("order", idx),
-            title=sec.get("title", ""),
+            title=sec_title,
             content_markdown=sec_content,
             source_ref=sec.get("source_ref", f"yt:{source_item_id}"),
         )
@@ -1178,6 +1200,9 @@ async def _update_page(
 
     for _idx, sec in enumerate(data.get("sections", [])):
         sec_content = sec.get("content_markdown", "")
+        sec_title = sec.get("title", "")
+        # Strip leading ## Title header if LLM included it in content.
+        sec_content = _strip_section_header(sec_content, sec_title)
         # Guard: reject thin/non-substantive section content (< 200 chars).
         # The WRITE prompt requires "TỐI THIỂU 200 từ" per section. Content below
         # this threshold is either truncated, a thin duplicate of an existing
@@ -1185,7 +1210,7 @@ async def _update_page(
         if not sec_content or len(sec_content.strip()) < 200:
             logger.warning(
                 "Skipping section '%s': content too short (%d chars, min 200)",
-                sec.get("title", ""),
+                sec_title,
                 len(sec_content.strip()),
             )
             continue
@@ -1193,7 +1218,7 @@ async def _update_page(
             page_id=page.id,
             source_id=source_id,
             section_order=max_order + 1,
-            title=sec.get("title", ""),
+            title=sec_title,
             content_markdown=sec_content,
             source_ref=sec.get("source_ref", f"yt:{source_item_id}"),
         )

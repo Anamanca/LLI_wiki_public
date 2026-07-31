@@ -18,11 +18,41 @@ class OpenAIAdapter(LLMClientPort):
         api_key: str = "",
         base_url: str = "",
         model: str = "",
+        key_id: str | None = None,
     ):
         self._api_key = api_key or settings.opencode_api_key
         self._base_url = (base_url or settings.opencode_base_url).rstrip("/")
         self._model = model or settings.opencode_primary_model
+        self._key_id = key_id
         self.last_usage: dict[str, Any] | None = None
+
+    async def _record_usage(self) -> None:
+        """Increment the usage counter for this API key in the DB.
+
+        Resolves ``_key_id`` lazily from the ApiKeyManager cache on first
+        call so that existing code that constructs OpenAIAdapter directly
+        from settings (without a key_id) also benefits from usage tracking.
+        """
+        if self._key_id is None:
+            try:
+                from llm_wiki.infrastructure.llm.api_key_manager import get_key_manager
+
+                manager = get_key_manager()
+                await manager._ensure_cache()
+                for k in manager._keys:
+                    if k["api_key"] == self._api_key:
+                        self._key_id = k["id"]
+                        break
+            except Exception:
+                pass
+        if not self._key_id:
+            return
+        try:
+            from llm_wiki.infrastructure.llm.api_key_manager import get_key_manager
+
+            await get_key_manager().increment_usage(self._key_id)
+        except Exception:
+            llm_logger.debug("Failed to record API key usage for %s", self._key_id[-8:])
 
     def _headers(self) -> dict:
         return {
@@ -77,6 +107,7 @@ class OpenAIAdapter(LLMClientPort):
             resp.raise_for_status()
             data = resp.json()
             self.last_usage = self._extract_usage(data)
+            await self._record_usage()
             message = (data.get("choices") or [{}])[0].get("message") or {}
             content = message.get("content", "")
             # Fallback for reasoning models that return reasoning_content
@@ -107,6 +138,7 @@ class OpenAIAdapter(LLMClientPort):
             resp.raise_for_status()
             data = resp.json()
             self.last_usage = self._extract_usage(data)
+            await self._record_usage()
             return data
 
     async def chat_completion_reasoning(
@@ -196,6 +228,7 @@ class OpenAIAdapter(LLMClientPort):
                                     }
                             except (json.JSONDecodeError, KeyError, IndexError):
                                 continue
+                    await self._record_usage()
                     logger.warning(
                         "LLM stream finished: chunks=%d, content_chunks=%d",
                         chunk_count,

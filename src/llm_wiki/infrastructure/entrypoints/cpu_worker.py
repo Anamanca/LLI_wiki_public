@@ -68,11 +68,24 @@ def _on_sigterm(signum: int, frame: Any) -> None:
 async def claim_job(db: AsyncSession) -> SourceItem | None:
     """Claim the next pending job using SELECT ... FOR UPDATE SKIP LOCKED.
 
+    Also reclaims orphan jobs stuck in 'processing' state (e.g. worker killed
+    during scale-down, node crash). An orphan is defined as status='processing'
+    with started_at older than 30 minutes — the original worker is long dead
+    by then (liveness probe kills unresponsive pods within 5 min).
+
     Returns the SourceItem or None if no jobs are available.
     """
+    _ORPHAN_TIMEOUT = timedelta(minutes=30)
+    _ORPHAN_CUTOFF = now() - _ORPHAN_TIMEOUT
+
     stmt = (
         select(SourceItem)
-        .where(SourceItem.status == "pending")
+        .where(
+            # Normal pending jobs
+            (SourceItem.status == "pending")
+            # Or orphan: processing but timed out
+            | ((SourceItem.status == "processing") & (SourceItem.started_at < _ORPHAN_CUTOFF))
+        )
         .where(
             # Skip items that are rate-limited (retry_after in the future)
             (SourceItem.retry_after.is_(None)) | (SourceItem.retry_after <= now())
@@ -86,13 +99,23 @@ async def claim_job(db: AsyncSession) -> SourceItem | None:
     if item is None:
         return None
 
-    # Mark as processing with heartbeat timestamp
+    # Mark as processing with heartbeat timestamp.
+    # Distinguish orphan reclaim (status was already 'processing') from normal claim.
+    was_orphan = item.status == "processing"
     item.status = "processing"
     item.started_at = now()
     item.error_message = None  # Clear stale error from previous attempt
     await db.commit()
     await db.refresh(item)
-    logger.debug("Worker %d: Claimed job %s (title=%s)", WORKER_ID, item.id, item.title)
+    if was_orphan:
+        logger.warning(
+            "Worker %d: Reclaimed orphan job %s (was stuck processing since %s)",
+            WORKER_ID,
+            item.id,
+            _ORPHAN_CUTOFF.isoformat(),
+        )
+    else:
+        logger.debug("Worker %d: Claimed job %s (title=%s)", WORKER_ID, item.id, item.title)
     return item
 
 
