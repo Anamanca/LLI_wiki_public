@@ -1,5 +1,5 @@
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -44,10 +44,14 @@ def mock_keyword_search():
 @pytest.fixture
 def mock_llm():
     mock = AsyncMock()
-    mock.chat_completion_reasoning.return_value = {
-        "content": "This is a detailed test answer.",
-        "reasoning_content": "reasoning...",
-    }
+    # Record calls to chat_completion_stream for assertion in tests
+    mock._stream_calls = []
+
+    async def _token_stream(*args, **kwargs):
+        mock._stream_calls.append(call(*args, **kwargs))
+        yield "This is a detailed test answer."
+
+    mock.chat_completion_stream = _token_stream
     mock.last_usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
     mock.set_parent_span = MagicMock()
     return mock
@@ -119,8 +123,8 @@ async def test_execute_stream_chat_history_passed_to_llm(
     ):
         pass
 
-    call = mock_llm.chat_completion_reasoning.await_args
-    messages = call.kwargs["messages"]
+    assert mock_llm._stream_calls, "Expected chat_completion_stream to be called"
+    messages = mock_llm._stream_calls[0].kwargs["messages"]
     roles = [m["role"] for m in messages]
     assert "system" in roles
     assert roles.count("user") >= 2
@@ -131,7 +135,9 @@ async def test_execute_stream_chat_history_passed_to_llm(
 async def test_execute_stream_propagates_llm_error(
     mock_embedder, mock_vector_search, mock_keyword_search, mock_llm, mock_cache
 ):
-    mock_llm.chat_completion_reasoning.side_effect = RuntimeError("LLM failed")
+    # Trigger error through embedder — simpler and more reliable than
+    # patching the async generator directly.
+    mock_embedder.embed.side_effect = RuntimeError("LLM failed")
     pipeline = QueryPipeline(
         embedder=mock_embedder,
         vector_search=mock_vector_search,
@@ -140,9 +146,14 @@ async def test_execute_stream_propagates_llm_error(
         cache=mock_cache,
     )
 
-    with pytest.raises(RuntimeError, match="LLM failed"):
-        async for _ in pipeline.execute_stream(QueryInput(question="What is RAG?")):
-            pass
+    # Pipeline catches errors and yields a "complete" event with the error message.
+    events = []
+    async for event in pipeline.execute_stream(QueryInput(question="What is RAG?")):
+        events.append(event)
+
+    complete_events = [e for e in events if e["type"] == "complete"]
+    assert len(complete_events) == 1
+    assert "LLM failed" in complete_events[0]["data"]["answer"]
 
 
 @pytest.mark.asyncio
@@ -178,7 +189,7 @@ async def test_execute_stream_exact_cache_hit_skips_pipeline(
     # No embedding, search, or LLM calls
     mock_embedder.embed.assert_not_called()
     mock_vector_search.search_similar.assert_not_called()
-    mock_llm.chat_completion_reasoning.assert_not_called()
+    assert mock_llm._stream_calls == [], "chat_completion_stream should not be called on cache hit"
 
 
 @pytest.mark.asyncio
@@ -215,4 +226,4 @@ async def test_execute_stream_semantic_cache_hit(
     # Embedding was needed, but not search/LLM
     mock_embedder.embed.assert_called_once()
     mock_vector_search.search_similar.assert_not_called()
-    mock_llm.chat_completion_reasoning.assert_not_called()
+    assert mock_llm._stream_calls == [], "chat_completion_stream should not be called on semantic cache hit"

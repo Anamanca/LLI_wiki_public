@@ -25,8 +25,8 @@ class FakeTelemetry(TelemetryPort):
         self.events.append({"action": "start", "span": span, "inputs": inputs, "parent": parent})
         return span
 
-    async def end_span(self, span, outputs=None, error=None):
-        self.events.append({"action": "end", "span": span, "outputs": outputs, "error": error})
+    async def end_span(self, span, outputs=None, error=None, metadata=None):
+        self.events.append({"action": "end", "span": span, "outputs": outputs, "error": error, "metadata": metadata})
 
     async def add_metadata(self, span, metadata):
         self.events.append({"action": "metadata", "span": span, "metadata": metadata})
@@ -138,7 +138,7 @@ async def test_execute_cache_hit_short_circuits(
     result = await pipeline.execute(QueryInput(question="Cached question?"))
     assert result["cache_hit"] is True
 
-    metadata_events = [e for e in fake_telemetry.events if e["action"] == "metadata"]
+    metadata_events = [e for e in fake_telemetry.events if e["action"] == "end"]
     root_metadata = [e for e in metadata_events if e["span"].name == "rag_query"]
     assert root_metadata
     assert root_metadata[-1]["metadata"]["cache_hit"] is True

@@ -24,8 +24,8 @@ class FakeTelemetry(TelemetryPort):
         self.events.append({"action": "start", "span": span, "inputs": inputs})
         return span
 
-    async def end_span(self, span, outputs=None, error=None):
-        self.events.append({"action": "end", "span": span, "outputs": outputs, "error": error})
+    async def end_span(self, span, outputs=None, error=None, metadata=None):
+        self.events.append({"action": "end", "span": span, "outputs": outputs, "error": error, "metadata": metadata})
 
     async def add_metadata(self, span, metadata):
         self.events.append({"action": "metadata", "span": span, "metadata": metadata})
@@ -76,8 +76,8 @@ class TestTracedLLMWrapper:
         assert len(starts) == 1
         assert len(ends) == 1
         assert starts[0]["span"].name == "llm_chat_completion_raw"
-        metadata = [e for e in fake_telemetry.events if e["action"] == "metadata"]
-        assert metadata[0]["metadata"]["tokens_used"] == 15
+        ends = [e for e in fake_telemetry.events if e["action"] == "end"]
+        assert ends[0]["metadata"]["tokens_used"] == 15
 
 
 class TestTracedVectorSearchWrapper:
