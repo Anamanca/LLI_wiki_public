@@ -21,18 +21,18 @@ spec:
             - sh
             - -c
             - |
-              URL="http://cpu-worker.llm-wiki.svc.cluster.local:8100/api/admin/cron-jobs/youtube-daily-scan/start"
+              URL="http://backend-v2.llm-wiki.svc.cluster.local:8000/api/admin/cron-jobs/youtube-daily-scan/start"
               echo "[$(date)] Triggering daily YouTube scan: $URL"
-              for i in 1 2 3 4 5; do
-                echo "[$(date)] Attempt $i/5: $URL"
-                RC=$(wget -q -O - --timeout=30 --tries=1 --post-data="" "$URL" > /tmp/resp 2>&1; echo $?)
+              for i in 1 2 3; do
+                echo "[$(date)] Attempt $i/3: $URL"
+                RC=$(wget -q -O - --timeout=120 --tries=1 --post-data="" "$URL" > /tmp/resp 2>&1; echo $?)
                 if [ "$RC" -eq 0 ]; then
                   echo "[$(date)] Scan triggered successfully"
                   cat /tmp/resp
                   exit 0
                 fi
-                echo "[$(date)] Attempt $i failed (rc=$RC), retrying in 30s"
-                sleep 30
+                echo "[$(date)] Attempt $i failed (rc=$RC), retrying in 10s"
+                sleep 10
               done
               echo "[$(date)] All attempts failed"
               cat /tmp/resp 2>/dev/null || true

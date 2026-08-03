@@ -11,7 +11,7 @@ Namespace: llm-wiki
   ollama         (Deployment)   — LLM inference, models at /data/ollama
 
   backend-v2     (Deployment)   — FastAPI backend, uvicorn --reload via /code/backend-src hostPath
-  cpu-worker     (Deployment)   — CPU-bound worker, source via /code/backend-src hostPath
+  cpu-worker     (StatefulSet)  — CPU-bound worker, auto WORKER_ID from hostname ordinal, independent scale
   wiki-consumer  (StatefulSet)  — Wiki ingestion consumer, source via /code/backend-src hostPath
   telegram-bot   (Deployment)   — Telegram bot, source via /code/telegram-bot hostPath
 
@@ -20,6 +20,56 @@ Namespace: llm-wiki
 Ingress (nginx): llm-wiki.local → /api → backend-v2:8000, / → frontend:3000
 NodePort: frontend exposed on host:30080
 ```
+
+## Scaling cpu-worker
+
+cpu-worker chạy dưới dạng **StatefulSet** với `replicas: 1` mặc định. Muốn tăng/giảm số worker:
+
+```bash
+# Scale lên 2 worker
+kubectl scale statefulset cpu-worker -n llm-wiki --replicas=2
+
+# Scale về 1 worker
+kubectl scale statefulset cpu-worker -n llm-wiki --replicas=1
+```
+
+### Cơ chế tự động
+
+| Vấn đề | Cách xử lý |
+|--------|-----------|
+| **WORKER_ID trùng** | StatefulSet pod name: `cpu-worker-0`, `cpu-worker-1` → WORKER_ID = 1 + ordinal (từ hostname) → ID duy nhất |
+| **Xung đột claim job** | PostgreSQL `SELECT ... FOR UPDATE SKIP LOCKED` — mỗi worker claim job khác nhau, không race |
+| **Orphan job (scale down)** | `claim_job()` reclaim job stuck `processing` > 30 phút — worker cũ đã bị kill, job được claim lại |
+| **Prometheus scrape** | Annotation-based pod discovery — pod mới tự xuất hiện trong Prometheus targets, không cần sửa config |
+| **Grafana dashboard** | Metric có label `worker_id` — panel tự hiện thêm line cho worker mới |
+| **Giao tiếp service** | Tất cả qua DNS nội bộ `*.llm-wiki.svc.cluster.local` — không phụ thuộc pod IP |
+
+### Kiến trúc job queue
+
+```
+backend-v2 (API, :8000)
+  │  POST /admin/cron-jobs/{id}/start
+  │  → poll_channel() → INSERT SourceItem(status='pending')
+  ▼
+PostgreSQL (bảng source_items)
+  │  ┌─── SKIP LOCKED claim (cpu-worker-0, WORKER_ID=1)
+  │  └─── SKIP LOCKED claim (cpu-worker-1, WORKER_ID=2)
+  ▼
+cpu-worker-0 / cpu-worker-1
+  │  extract → classify → embed
+  │  → push_wiki_job() vào Redis
+  ▼
+Redis (queue wiki)
+  ▼
+wiki-consumer (StatefulSet, replicas:2)
+  │  wiki integration
+```
+
+### Tách API khỏi worker
+
+Trước đây cpu-worker deployment cũ chứa cả container `api` (uvicorn :8100) và `cpu-worker`. Container `api` này không hề "điều khiển" worker — nó chỉ là 1 instance FastAPI dư thừa, vì backend-v2 đã chạy API riêng trên port 8000.
+
+Khi refactor sang StatefulSet, container `api` đã được loại bỏ. API vẫn chạy bình thường qua `backend-v2` deployment — scale API và scale worker độc lập với nhau.
 
 ## Prerequisites
 

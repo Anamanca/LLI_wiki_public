@@ -25,7 +25,6 @@ from llm_wiki.shared.datetime_utils import now
 
 router = APIRouter(prefix="/admin")
 
-_CPU_WORKER_URL = "http://cpu-worker.llm-wiki.svc.cluster.local:8100"
 _K8S_API_HOST = os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
 _K8S_API_PORT = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
 _K8S_NAMESPACE = os.environ.get("KUBERNETES_NAMESPACE", "llm-wiki")
@@ -51,7 +50,6 @@ async def _prune_scan_logs(db: AsyncSession, retention_days: int = 10) -> int:
 async def _run_youtube_scan(
     db: AsyncSession,
     backfill: bool = False,
-    backfill_since: date | None = None,
 ) -> dict:
     """Poll every active YouTube source and record the scan lock.
 
@@ -407,7 +405,7 @@ async def start_cron_job(job_id: str, db: AsyncSession = Depends(get_db)):
         missed_dates = status.get("missed_dates", [])
         if missed_dates:
             return await _run_youtube_scan(
-                db, backfill=True, backfill_since=date.fromisoformat(min(missed_dates))
+                db, backfill=True
             )
         return await _run_youtube_scan(db)
 
@@ -421,15 +419,6 @@ async def stop_cron_job(job_id: str, db: AsyncSession = Depends(get_db)):
     if job:
         job.enabled = False
         await db.commit()
-
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
-            resp = await client.post(f"{_CPU_WORKER_URL}/api/admin/cron-jobs/{job_id}/stop")
-            if resp.status_code == 200:
-                return resp.json()
-    except Exception:
-        pass
-
     return {"success": True, "message": f"Cron job {job_id} stopped"}
 
 
