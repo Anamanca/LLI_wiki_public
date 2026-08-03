@@ -42,7 +42,7 @@ data:
         annotations:
           summary: "Worker {{ $labels.worker_id }} not heartbeating"
           description: "Worker heartbeat missing for > 2 min"
-          runbook: "Check worker pod: kubectl logs -n llm-wiki deploy/cpu-worker -c cpu-worker"
+          runbook: "Check worker pod: kubectl logs -n llm-wiki sts/cpu-worker -c cpu-worker"
 
       - alert: QueueBacklogHigh
         expr: ingestion_queue_depth{queue="cpu"} > 100
