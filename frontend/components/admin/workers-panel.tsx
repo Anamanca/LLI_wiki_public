@@ -7,21 +7,23 @@ import { useWorkers } from "@/hooks/use-workers";
 import { Cpu, Activity, CheckCircle, XCircle, Clock, AlertTriangle } from "lucide-react";
 import type { WorkerInfo } from "@/types";
 
-const CPU_WORKERS = [1, 2, 3, 4, 5, 6, 7, 8];
+// Worker ID convention (matching StatefulSet ordinal logic):
+//   1..98   — CPU workers    (cpu-worker-N  → WORKER_ID = 1 + N)
+//   99      — GPU worker
+//   101..   — Wiki consumers (wiki-consumer-N → CONSUMER_ID = 101 + N)
 const GPU_WORKER = 99;
-const WIKI_CONSUMERS = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110];
 
 function workerLabel(id: number): string {
-  if (CPU_WORKERS.includes(id)) return `CPU-${id}`;
+  if (id >= 101) return `Wiki-${id - 100}`;
   if (id === GPU_WORKER) return "GPU";
-  if (WIKI_CONSUMERS.includes(id)) return `Wiki-${id - 100}`;
+  if (id >= 1 && id < GPU_WORKER) return `CPU-${id}`;
   return `W${id}`;
 }
 
 function workerGroup(id: number): string {
-  if (CPU_WORKERS.includes(id)) return "cpu";
+  if (id >= 101) return "wiki";
   if (id === GPU_WORKER) return "gpu";
-  if (WIKI_CONSUMERS.includes(id)) return "wiki";
+  if (id >= 1 && id < GPU_WORKER) return "cpu";
   return "unknown";
 }
 
