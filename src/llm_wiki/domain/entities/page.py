@@ -30,6 +30,7 @@ class PageSection:
     source_id: SourceId | None = None
     title: str | None = None
     content_markdown: str | None = None
+    keywords: list[str] = field(default_factory=list)
     section_vector: list[float] | None = None
     fts_vector: str | None = None
     source_ref: str | None = None

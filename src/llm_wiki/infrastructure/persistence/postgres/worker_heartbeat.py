@@ -23,7 +23,8 @@ HEARTBEAT_INTERVAL = 15  # seconds
 
 
 async def write_heartbeat(
-    worker_id: int,
+    worker_id: str,
+    worker_type: str = "",
     status: str = "idle",
     current_job_id: UUID | None = None,
     current_stage: str | None = None,
@@ -36,10 +37,11 @@ async def write_heartbeat(
             await db.execute(
                 text(
                     """
-                    INSERT INTO worker_heartbeats (worker_id, status, current_job_id,
+                    INSERT INTO worker_heartbeats (worker_id, worker_type, status, current_job_id,
                         current_stage, stage_started_at, last_heartbeat, cpu_percent, error_message)
-                    VALUES (:worker_id, :status, :job_id, :stage, :now, :now, :cpu, :error)
+                    VALUES (:worker_id, :worker_type, :status, :job_id, :stage, :now, :now, :cpu, :error)
                     ON CONFLICT (worker_id) DO UPDATE SET
+                        worker_type = EXCLUDED.worker_type,
                         status = EXCLUDED.status,
                         current_job_id = EXCLUDED.current_job_id,
                         current_stage = EXCLUDED.current_stage,
@@ -56,6 +58,7 @@ async def write_heartbeat(
                 ),
                 {
                     "worker_id": worker_id,
+                    "worker_type": worker_type,
                     "status": status,
                     "job_id": str(current_job_id) if current_job_id else None,
                     "stage": current_stage,
@@ -66,15 +69,15 @@ async def write_heartbeat(
             )
             await db.commit()
     except Exception as exc:
-        logger.warning("Heartbeat write failed for worker-%d: %s", worker_id, exc)
+        logger.warning("Heartbeat write failed for worker-%s: %s", worker_id, exc)
 
 
 # Module-level state updated by worker_loop for the heartbeat task to read.
-_worker_state: dict[int, dict] = {}
+_worker_state: dict[str, dict] = {}
 
 
 def set_worker_state(
-    worker_id: int,
+    worker_id: str,
     status: str,
     job_id: UUID | None = None,
     stage: str | None = None,
@@ -91,6 +94,6 @@ def set_worker_state(
     }
 
 
-def get_worker_state(worker_id: int) -> dict:
+def get_worker_state(worker_id: str) -> dict:
     """Read current worker state for the heartbeat task."""
     return _worker_state.get(worker_id, {})

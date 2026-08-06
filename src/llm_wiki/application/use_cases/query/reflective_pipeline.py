@@ -33,12 +33,12 @@ from llm_wiki.application.ports.search.answer_evaluator_port import (
 )
 from llm_wiki.application.ports.search.event_search_port import EventSearchPort
 from llm_wiki.application.ports.search.graph_rag_port import GraphRAGPort
-from llm_wiki.application.ports.search.query_analyzer_port import (
-    QueryAnalysis,
-    QueryAnalyzerPort,
+from llm_wiki.application.ports.search.guardrail_analyzer_port import (
+    GuardrailAnalysis,
+    GuardrailAnalyzerPort,
 )
 from llm_wiki.application.ports.search.query_expander_port import QueryExpanderPort
-from llm_wiki.application.ports.search.query_rewriter_port import QueryRewriterPort
+from llm_wiki.application.ports.search.query_rewriter_port import QueryRewriterPort  # noqa: F401
 from llm_wiki.application.ports.search.reranker_port import RerankerPort
 from llm_wiki.application.ports.search.vector_search import (
     CacheServicePort,
@@ -126,6 +126,46 @@ _INTENT_SYSTEM_PROMPTS: dict[str, str] = {
     ),
 }
 
+_INTENT_EN_PROMPTS: dict[str, str] = {
+    "timeline": (
+        "You are an expert in chronological timeline analysis. "
+        "Answer the question based ON THE PROVIDED CONTEXT. "
+        "SORT your answer CHRONOLOGICALLY. "
+        "Each event milestone MUST have a specific date (day-month-year). "
+        "Use format: **Date:** Event → Development → Impact.\n\n"
+    ),
+    "comparative": (
+        "You are an expert in COMPARATIVE analysis. "
+        "Answer the question based ON THE PROVIDED CONTEXT. "
+        "Present a clear SIDE-BY-SIDE COMPARISON. "
+        "Structure: (1) Similarities, (2) Differences, (3) Pros/cons of each. "
+        "Include specific DATES for each data point compared.\n\n"
+    ),
+    "current_state": (
+        "You are an expert in CURRENT STATE analysis. "
+        "Answer the question based ON THE PROVIDED CONTEXT. "
+        "PRIORITIZE the MOST RECENT information. "
+        "Include specific DATES for all information. "
+        "Cite exact figures when available.\n\n"
+    ),
+    "historical": (
+        "You are an expert in HISTORICAL EVENT analysis. "
+        "Answer the question based ON THE PROVIDED CONTEXT. "
+        "Include SPECIFIC DATES for all information. "
+        "Analyze CAUSE → DEVELOPMENT → IMPACT.\n\n"
+    ),
+    "general": (
+        "You are a deep-research assistant. "
+        "Answer the question based ON THE PROVIDED CONTEXT. "
+        "Your answer MUST include: "
+        "(1) a concise summary at the beginning; "
+        "(2) detailed analysis of each relevant aspect, "
+        "with specific examples from the context; "
+        "(3) explanation of connections between ideas; "
+        "(4) an overall conclusion at the end.\n\n"
+    ),
+}
+
 
 class SelfReflectiveRAGPipeline:
     """RAG pipeline with self-evaluation and strategy-based retry loops.
@@ -168,7 +208,7 @@ class SelfReflectiveRAGPipeline:
         cache: CacheServicePort | None = None,
         telemetry: TelemetryPort | None = None,
         rewriter: QueryRewriterPort | None = None,
-        analyzer: QueryAnalyzerPort | None = None,
+        analyzer: GuardrailAnalyzerPort | None = None,
         max_attempts: int = _MAX_ATTEMPTS,
     ):
         self._pipeline = base_pipeline
@@ -183,7 +223,7 @@ class SelfReflectiveRAGPipeline:
         self._event_search = event_search
         self._cache = cache
         self._telemetry = telemetry
-        self._rewriter = rewriter
+        self._rewriter = rewriter  # no longer active — kept for backward compat
         self._analyzer = analyzer
         self._max_attempts = max_attempts
 
@@ -366,8 +406,10 @@ class SelfReflectiveRAGPipeline:
 
         state: dict[str, Any] = {
             "question": input.question,
-            "rewritten_question": input.question,
+            "rewritten_question": input.question,  # kept for backward compat
             "intent": "general",
+            "allowed": True,
+            "rejection_reason": "",
             "attempt": 0,
             "strategy": "default",
             "context": "",
@@ -375,7 +417,7 @@ class SelfReflectiveRAGPipeline:
             "answer": "",
             "evaluation": None,
             "sources": [],
-            "analysis": QueryAnalysis(),
+            "analysis": GuardrailAnalysis(),
             "time_range": None,
             "embedding": None,
             "hyde_embedding": None,
@@ -408,6 +450,35 @@ class SelfReflectiveRAGPipeline:
 
             # ── Pre-processing (shared across attempts) ─────────────────
             state = await self._pre_process(input, state)
+
+            # Guardrail: reject immediately
+            if not state.get("allowed", True):
+                reject_answer = (
+                    state.get("rejection_reason", "")
+                    or "Xin lỗi, tôi chỉ có thể trả lời các câu hỏi về "
+                    "kinh tế, tài chính, chứng khoán, và đầu tư."
+                )
+                inc_counter("query_total", {"status": "rejected", "cache": "n/a"})
+                if telemetry and root_span:
+                    await telemetry.end_span(
+                        span=root_span,
+                        outputs={
+                            "answer_length": len(reject_answer),
+                            "answer": reject_answer,
+                        },
+                        metadata={
+                            "allowed": False,
+                            "reason": state.get("rejection_reason", ""),
+                        },
+                    )
+                return {
+                    "answer": reject_answer,
+                    "sources": [],
+                    "tokens_used": 0,
+                    "cache_hit": False,
+                    "pipeline_steps": {},
+                    "rejected": True,
+                }
 
             # ── Adaptive recency decay: rebuild adapters for intent ─────
             self._rebuild_search_adapters(state["intent"])
@@ -587,37 +658,42 @@ class SelfReflectiveRAGPipeline:
     # ── Pre-processing (shared across attempts) ─────────────────────────
 
     async def _pre_process(self, input: QueryInput, state: dict) -> dict:
-        """Run query rewriting and analysis once before the reflection loop."""
-        # Query rewrite
-        if self._rewriter and input.chat_history:
-            try:
-                rewritten = await self._rewriter.rewrite(input.question, input.chat_history)
-                if rewritten != input.question:
-                    state["rewritten_question"] = rewritten
-                    logger.debug(
-                        "Reflective: rewritten %r → %r", input.question[:80], rewritten[:80]
-                    )
-            except Exception:
-                pass
+        """Run guardrail + intent analysis once before the reflection loop.
 
-        # Query analysis
+        No query rewrite — each question is treated independently.
+        Embedding uses the analyser-optimised ``embedding_text`` when available.
+        """
+        # Guardrail + intent analysis (single LLM call)
         if self._analyzer:
             try:
-                analysis = await self._analyzer.analyze(state["rewritten_question"])
+                analysis = await self._analyzer.analyze(state["question"])
                 state["analysis"] = analysis
+
+                if not analysis.allowed:
+                    state["allowed"] = False
+                    state["rejection_reason"] = analysis.reason
+                    return state
+
                 state["intent"] = analysis.intent
+                state["allowed"] = True
             except Exception:
                 pass
 
-        # Time range
+        # Time range — analyser takes precedence over regex
         state["time_range"] = self._pipeline._resolve_time_range(input)
         if not state["time_range"] and state["analysis"].time_range:
             state["time_range"] = state["analysis"].time_range
 
-        # Embedding (used by default and expand strategies)
+        # Embedding with optimised text (dense keywords VI+EN)
         if self._embedder:
+            analysis = state.get("analysis")
+            embed_text = (
+                analysis.embedding_text
+                if analysis and analysis.embedding_text
+                else state["question"]
+            )
             with contextlib.suppress(Exception):
-                state["embedding"] = await self._embedder.embed(state["rewritten_question"])
+                state["embedding"] = await self._embedder.embed(embed_text)
 
         return state
 
@@ -630,10 +706,14 @@ class SelfReflectiveRAGPipeline:
         time_range = state["time_range"]
         intent = state["intent"]
 
-        from llm_wiki.application.use_cases.query.pipeline import _build_keyword_query
+        from llm_wiki.application.use_cases.query.pipeline import (
+            _build_event_kw_query,
+            _build_keyword_query,
+        )
 
         analysis = state.get("analysis")
-        kw_query = _build_keyword_query(state["rewritten_question"], analysis)
+        kw_query = _build_keyword_query(state["question"], analysis)
+        event_kw_query = _build_event_kw_query(state["question"], analysis)
 
         if strategy == "hyde":
             # Reuse cached HyDE doc if available (skip re-generation)
@@ -672,7 +752,7 @@ class SelfReflectiveRAGPipeline:
                         stream_names.append("events")
                         tasks.append(
                             self._event_search.search_events_keyword(
-                                kw_query,
+                                event_kw_query,
                                 top_k=input.top_k,
                                 time_range=time_range,
                             )
@@ -845,10 +925,14 @@ class SelfReflectiveRAGPipeline:
         if not query_embedding or not self._vector_search or not self._keyword_search:
             return []
 
-        from llm_wiki.application.use_cases.query.pipeline import _build_keyword_query
+        from llm_wiki.application.use_cases.query.pipeline import (
+            _build_event_kw_query,
+            _build_keyword_query,
+        )
 
         analysis = state.get("analysis")
-        kw_query = _build_keyword_query(state["rewritten_question"], analysis)
+        kw_query = _build_keyword_query(state["question"], analysis)
+        event_kw_query = _build_event_kw_query(state["question"], analysis)
 
         tasks = []
         task_names = []
@@ -885,7 +969,7 @@ class SelfReflectiveRAGPipeline:
             task_names.append("events")
             tasks.append(
                 self._event_search.search_events_keyword(
-                    kw_query,
+                    event_kw_query,
                     top_k=input.top_k,
                     time_range=time_range,
                 )
@@ -932,10 +1016,9 @@ class SelfReflectiveRAGPipeline:
         top_k: int,
         time_range: TimeRange | None = None,
     ) -> tuple[dict[str, list[SearchResult]], list[SearchResult]]:
-        """Merge multiple retrieval streams via RRF + diversity + time filter."""
+        """Merge multiple retrieval streams via RRF + time filter."""
         from llm_wiki.application.use_cases.query.pipeline import (
             _build_rrf_weights,
-            _diversify,
             _enforce_time_boundary,
             _weighted_rrf_fusion,
         )
@@ -954,92 +1037,34 @@ class SelfReflectiveRAGPipeline:
             weights["graph"] = 0.6
 
         merged = _weighted_rrf_fusion(result_sets, weights)
-        diversified = _diversify(merged, max_per_source=5, max_per_page=2)
-        in_range = _enforce_time_boundary(diversified, time_range)
+        in_range = _enforce_time_boundary(merged, time_range)
         return result_sets, in_range[:top_k]
 
     # ── Stream helpers ──────────────────────────────────────────────────
 
     def _build_messages(self, input: QueryInput, state: dict) -> list[dict]:
         """Build LLM messages from state (shared by _generate and execute_stream)."""
+        from llm_wiki.application.use_cases.query.pipeline import (
+            SYNTHESIS_BOILERPLATE_EN,
+            SYNTHESIS_BOILERPLATE_VI,
+            _temporal_addendum,
+        )
+
         today_str = now().strftime("%Y-%m-%d")
         intent = state["intent"]
         analysis = state.get("analysis")
         lang = analysis.language if analysis and analysis.language else "vi"
 
-        # Intent-specific system prompt per language
         if lang == "en":
-            _intent_en_prompts = {
-                "timeline": (
-                    "You are an expert in chronological timeline analysis. "
-                    "Answer the question based ON THE PROVIDED CONTEXT. "
-                    "SORT your answer CHRONOLOGICALLY. "
-                    "Each event milestone MUST have a specific date (day-month-year). "
-                    "Use format: **Date:** Event → Development → Impact.\n\n"
-                ),
-                "comparative": (
-                    "You are an expert in COMPARATIVE analysis. "
-                    "Answer the question based ON THE PROVIDED CONTEXT. "
-                    "Present a clear SIDE-BY-SIDE COMPARISON. "
-                    "Structure: (1) Similarities, (2) Differences, (3) Pros/cons of each. "
-                    "Include specific DATES for each data point compared.\n\n"
-                ),
-                "current_state": (
-                    "You are an expert in CURRENT STATE analysis. "
-                    "Answer the question based ON THE PROVIDED CONTEXT. "
-                    "PRIORITIZE the MOST RECENT information. "
-                    "Include specific DATES for all information. "
-                    "Cite exact figures when available.\n\n"
-                ),
-                "historical": (
-                    "You are an expert in HISTORICAL EVENT analysis. "
-                    "Answer the question based ON THE PROVIDED CONTEXT. "
-                    "Include SPECIFIC DATES for all information. "
-                    "Analyze CAUSE → DEVELOPMENT → IMPACT.\n\n"
-                ),
-                "general": (
-                    "You are a deep-research assistant. "
-                    "Answer the question based ON THE PROVIDED CONTEXT. "
-                    "Your answer MUST include: "
-                    "(1) a concise summary at the beginning; "
-                    "(2) detailed analysis of each relevant aspect, "
-                    "with specific examples from the context; "
-                    "(3) explanation of connections between ideas; "
-                    "(4) an overall conclusion at the end.\n\n"
-                ),
-            }
-            system_prompt = _intent_en_prompts.get(intent, _intent_en_prompts["general"])
-            system_prompt += (
-                "Cite sources using [N]. "
-                "If the context is insufficient, clearly state which parts "
-                "are missing rather than fabricating. "
-                "Be thorough and concise, not superficial.\n\n"
-                f"IMPORTANT: Today is {today_str}. "
-                "When answering, you MUST include specific dates (day-month-year) "
-                "for all information. "
-                "DO NOT use relative terms like 'recently', 'a few months ago'. "
-                "Always cite exact dates from the provided context."
-            )
+            persona = _INTENT_EN_PROMPTS.get(intent, _INTENT_EN_PROMPTS["general"])
+            boilerplate = SYNTHESIS_BOILERPLATE_EN.format(today=today_str)
         else:
-            system_prompt = _INTENT_SYSTEM_PROMPTS.get(intent, _INTENT_SYSTEM_PROMPTS["general"])
-            system_prompt += (
-                "Trích dẫn nguồn bằng [N]. "
-                "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
-                "thay vì bịa đặt. "
-                "Hãy trả lời đầy đủ, súc tích nhưng không sơ xài.\n\n"
-                f"LƯU Ý QUAN TRỌNG: Hôm nay là {today_str}. "
-                "Khi trả lời, PHẢI ghi rõ ngày tháng năm cụ thể cho mọi thông tin. "
-                "KHÔNG được dùng từ tương đối như 'gần đây', 'mới đây'. "
-                "Luôn trích dẫn ngày tháng chính xác từ ngữ cảnh được cung cấp."
-            )
+            persona = _INTENT_SYSTEM_PROMPTS.get(intent, _INTENT_SYSTEM_PROMPTS["general"])
+            boilerplate = SYNTHESIS_BOILERPLATE_VI.format(today=today_str)
 
-        from llm_wiki.application.use_cases.query.pipeline import _temporal_addendum
-
-        system_prompt += _temporal_addendum(intent, language=lang)
+        system_prompt = persona + boilerplate + _temporal_addendum(intent, language=lang)
 
         messages = [{"role": "system", "content": system_prompt}]
-        for h in (input.chat_history or [])[-6:]:
-            messages.append({"role": h["role"], "content": h["content"]})
         messages.append(
             {
                 "role": "user",
@@ -1149,6 +1174,8 @@ class SelfReflectiveRAGPipeline:
                 "question": input.question,
                 "rewritten_question": input.question,
                 "intent": "general",
+                "allowed": True,
+                "rejection_reason": "",
                 "attempt": 0,
                 "strategy": "default",
                 "context": "",
@@ -1156,7 +1183,7 @@ class SelfReflectiveRAGPipeline:
                 "answer": "",
                 "evaluation": None,
                 "sources": [],
-                "analysis": QueryAnalysis(),
+                "analysis": GuardrailAnalysis(),
                 "time_range": None,
                 "embedding": None,
                 "hyde_embedding": None,

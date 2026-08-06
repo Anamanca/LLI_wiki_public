@@ -5,13 +5,16 @@ Uses ports (LLMClientPort, EmbeddingServicePort, VectorSearchPort) instead of
 raw provider functions, and repository abstractions for persistence.
 
 Flow:
-  1. Pass 1: Chunked extraction of structured facts from transcript
+  1. Pass 1: Single-pass extraction of structured facts from full transcript.
+     DeepSeek v4 Flash (1M token context) handles even the longest transcripts
+     (~800K chars / ~500K tokens) in one pass — no chunking needed.
   2. Vector search existing pages (cosine >= COSINE_THRESHOLD -> update; else -> create)
   3. BEFORE modifying: save page_snapshot
-  4. Pass 2: Analyze cause-effect chains and investment implications
-  5. Pass 3: Compose final wiki page from extracted facts + analysis
-  6. Event extraction, entity linking, stance capture (non-fatal)
-  7. Page links, media_asset linking
+  4. Pass 2: Analyze+Write combined — composes final wiki page from extracted facts
+     (cause-effect chains, investment implications, speaker stance are analyzed
+     and embedded in the ### subsections by the LLM with reasoning ON)
+  5. Event extraction, entity linking (non-fatal)
+  6. Page links
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,7 +49,6 @@ from llm_wiki.application.use_cases.ingestion.event_linker import (
     link_cause_effect_chains,
 )
 from llm_wiki.application.use_cases.ingestion.wiki_prompts import (
-    ANALYZE_SYSTEM_PROMPT,
     EXTRACT_SYSTEM_PROMPT,
     WRITE_SYSTEM_PROMPT,
 )
@@ -62,8 +64,97 @@ logger = logging.getLogger(__name__)
 COSINE_THRESHOLD = 0.82
 MAX_MERGE_AGE_DAYS = 30
 MIN_ENTITY_JACCARD = 0.3
-CHUNK_SIZE = 80_000  # chars per chunk for parallel extraction
-OVERLAP = 10_000  # char overlap (12.5% of chunk) to avoid boundary cuts
+REQUIRED_SUBSECTIONS = [
+    "### Ý chính",
+    "### Mốc thời gian & Số liệu",
+    "### Tóm tắt chi tiết",
+    "### Keywords",
+]
+
+
+def validate_section_structure(content_markdown: str) -> dict:
+    """Check a section's content_markdown for required ### subsections.
+
+    Returns:
+        {"compliant": bool, "missing": [...], "found": [...], "warnings": [...]}
+    """
+    found = []
+    missing = []
+    for sub in REQUIRED_SUBSECTIONS:
+        if sub in content_markdown:
+            found.append(sub)
+        else:
+            missing.append(sub)
+
+    warnings = []
+    if "### Ý chính" not in content_markdown:
+        warnings.append("CRITICAL: missing ### Ý chính (minimum viable subsection)")
+
+    return {
+        "compliant": len(missing) == 0,
+        "found": found,
+        "missing": missing,
+        "warnings": warnings,
+    }
+
+
+def _validate_wiki_output(data: dict[str, Any]) -> None:
+    """Validate structural compliance of all sections post-WRITE.
+
+    In warn-only mode (default): logs warnings and emits Prometheus metrics.
+    In strict mode (WIKI_STRICT_VALIDATION=true): removes non-compliant sections.
+    """
+    import os
+
+    strict_mode = os.getenv("WIKI_STRICT_VALIDATION", "false").lower() == "true"
+    sections = data.get("sections", [])
+    if not sections:
+        return
+
+    compliant_count = 0
+    total = 0
+    for sec in sections:
+        content = sec.get("content_markdown", "")
+        if not content:
+            continue
+        total += 1
+        result = validate_section_structure(content)
+        if result["compliant"]:
+            compliant_count += 1
+        else:
+            logger.warning(
+                "Section '%s' missing subsections: %s (found: %s, warnings: %s)",
+                sec.get("title"),
+                result["missing"],
+                result["found"],
+                result["warnings"],
+            )
+            if strict_mode:
+                logger.error(
+                    "WIKI_STRICT_VALIDATION: rejecting section '%s' — missing %s",
+                    sec.get("title"),
+                    result["missing"],
+                )
+                # Mark for removal (handled by caller filtering non-compliant sections)
+                sec["_non_compliant"] = True
+
+    if total > 0:
+        ratio = compliant_count / total
+        logger.info(
+            "Section structure compliance: %d/%d (%.0f%%)",
+            compliant_count, total, ratio * 100,
+        )
+        try:
+            from llm_wiki.infrastructure.telemetry.business_metrics import set_gauge
+            set_gauge("wiki_section_structure_compliance_ratio", ratio, {"source": "write_pass"})
+        except Exception:
+            pass  # metrics are best-effort
+
+    if strict_mode:
+        data["sections"] = [s for s in sections if not s.get("_non_compliant", False)]
+        removed = total - len(data["sections"])
+        if removed:
+            logger.warning("Strict mode: removed %d non-compliant section(s)", removed)
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +243,9 @@ def _repair_truncated_json(json_str: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+_SUBSECTION_PATTERN = re.compile(r"^###\s+.+?\n\n", re.MULTILINE)
+
+
 def _strip_section_header(content_markdown: str, title: str | None = None) -> str:
     """Strip the leading ``## Title\\n\\n`` from section content, if present.
 
@@ -159,6 +253,9 @@ def _strip_section_header(content_markdown: str, title: str | None = None) -> st
     (following the markdown structure shown in the few-shot example).  We strip
     it so that ``_create_page`` / ``_update_page`` do not produce double
     headers when they regenerate ``page.content_markdown`` from all sections.
+
+    Also strips ALL ``### `` subsection headers after the ``## `` header,
+    so the 200-char gate counts only prose content.
     """
     text = content_markdown.lstrip()
     m = re.match(r"^##\s+([^\n]+)\n\n", text)
@@ -168,7 +265,10 @@ def _strip_section_header(content_markdown: str, title: str | None = None) -> st
     # If we know the expected title, verify it matches to avoid false positives.
     if title is not None and stripped_title != title.strip():
         return text
-    return text[m.end():]
+    text = text[m.end():]
+    # Strip ALL ### subsection header lines — remaining text = prose only for 200-char gate
+    text = _SUBSECTION_PATTERN.sub("", text)
+    return text
 
 
 def _slugify(title: str) -> str:
@@ -291,188 +391,6 @@ def _char_overlap(a: str, b: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Chunking & Merging Helpers
-# ---------------------------------------------------------------------------
-
-
-def _chunk_transcript(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = OVERLAP) -> list[str]:
-    """Split transcript into overlapping chunks for parallel processing."""
-    if len(text) <= chunk_size:
-        return [text]
-    chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        chunks.append(text[start:end])
-        start += chunk_size - overlap
-    return chunks
-
-
-def _merge_extracted_facts(facts_list: list[dict[str, Any]]) -> dict[str, Any]:
-    """Merge extracted facts from multiple chunks, deduplicating entities and events.
-
-    Returns a single facts dict with merged entities, numbers, events, relationships,
-    concatenated market_context + chunk_summaries, and best classification from all chunks.
-    """
-    if not facts_list:
-        return {}
-    if len(facts_list) == 1:
-        return facts_list[0]
-
-    # Classification merging (pick best from first chunk, union key_entities/subtopics)
-    merged_classification: dict[str, Any] | None = None
-    all_key_entities: set[str] = set()
-    all_subtopics: set[str] = set()
-    all_existing_pages: set[str] = set()
-    domain_votes: dict[str, int] = {}
-    lang_votes: dict[str, int] = {}
-
-    for facts in facts_list:
-        if not facts:
-            continue
-        cls = facts.get("classification", {})
-        if cls and isinstance(cls, dict):
-            if merged_classification is None:
-                merged_classification = cls
-            for ke in cls.get("key_entities", []) or []:
-                if isinstance(ke, dict):
-                    name = (ke.get("name") or "").strip()
-                    etype = (ke.get("type") or "other").strip()
-                    if name:
-                        all_key_entities.add(f"{name}::{etype}")
-                elif isinstance(ke, str) and ke.strip():
-                    all_key_entities.add(f"{ke.strip()}::other")
-            for st in cls.get("subtopics", []) or []:
-                if st and isinstance(st, str):
-                    all_subtopics.add(st.strip())
-            for ep in cls.get("existing_pages_to_update", []) or []:
-                if ep and isinstance(ep, str):
-                    all_existing_pages.add(ep.strip())
-            dom = (cls.get("domain") or "").strip()
-            if dom:
-                domain_votes[dom] = domain_votes.get(dom, 0) + 1
-            lang = (cls.get("language") or "").strip()
-            if lang:
-                lang_votes[lang] = lang_votes.get(lang, 0) + 1
-
-    if merged_classification:
-        merged_classification["key_entities"] = [
-            {"name": k.split("::")[0], "type": k.split("::")[1] if "::" in k else "other"}
-            for k in sorted(all_key_entities)
-        ]
-        merged_classification["subtopics"] = sorted(all_subtopics)
-        merged_classification["existing_pages_to_update"] = sorted(all_existing_pages)
-        if domain_votes:
-            merged_classification["domain"] = max(domain_votes, key=domain_votes.get)
-        if lang_votes:
-            merged_classification["language"] = max(lang_votes, key=lang_votes.get)
-
-    merged_entities: dict[str, list[dict]] = {
-        "companies": [],
-        "people": [],
-        "indices": [],
-        "policies": [],
-    }
-    merged_numbers: list[dict] = []
-    merged_events: list[dict] = []
-    merged_relationships: list[dict] = []
-    merged_claims: list[dict] = []
-    merged_entity_relations: list[dict] = []
-    market_contexts: list[str] = []
-    chunk_summaries: list[str] = []
-    seen_entity_relation_keys: set[str] = set()
-    seen_tickers: set[str] = set()
-    seen_people: set[str] = set()
-    seen_index_names: set[str] = set()
-    seen_policy_names: set[str] = set()
-    seen_event_keys: set[tuple] = set()
-    seen_relationships: set[str] = set()
-
-    for facts in facts_list:
-        if not facts:
-            continue
-        entities = facts.get("entities", {})
-        for c in entities.get("companies", []):
-            ticker = ((c.get("ticker") or "").upper() or "").strip()
-            name = _canonicalize((c.get("name") or "").lower())
-            key = ticker if ticker else name
-            if key and key not in seen_tickers:
-                seen_tickers.add(key)
-                if ticker and not c.get("sector"):
-                    for existing in merged_entities["companies"]:
-                        if (existing.get("ticker") or "").upper() == ticker and existing.get(
-                            "sector"
-                        ):
-                            c["sector"] = existing["sector"]
-                            break
-                merged_entities["companies"].append(c)
-        for p in entities.get("people", []):
-            name = _canonicalize(p.get("name", "").lower())
-            if name and name not in seen_people:
-                seen_people.add(name)
-                merged_entities["people"].append(p)
-        for idx in entities.get("indices", []):
-            name = (idx.get("name") or "").lower()
-            if name and name not in seen_index_names:
-                seen_index_names.add(name)
-                merged_entities["indices"].append(idx)
-        for pol in entities.get("policies", []):
-            name = (pol.get("name") or "").lower()
-            if name and name not in seen_policy_names:
-                seen_policy_names.add(name)
-                merged_entities["policies"].append(pol)
-
-        merged_numbers.extend(facts.get("numbers", []))
-
-        for ev in facts.get("events", []):
-            key = (
-                ev.get("normalized_date") or "",
-                ev.get("category") or "",
-                (ev.get("description") or "")[:60].lower(),
-            )
-            if key not in seen_event_keys:
-                seen_event_keys.add(key)
-                merged_events.append(ev)
-
-        for rel in facts.get("relationships", []):
-            key = (
-                f"{rel.get('source', '')}|{rel.get('target', '')}|{rel.get('relation_type', '')}"
-            ).lower()
-            if key not in seen_relationships:
-                seen_relationships.add(key)
-                merged_relationships.append(rel)
-
-        merged_claims.extend(facts.get("key_claims", []))
-
-        for rel in facts.get("entity_relations", []) or []:
-            if not isinstance(rel, dict):
-                continue
-            key = f"{rel.get('from', '')}|{rel.get('to', '')}|{rel.get('predicate', '')}".lower()
-            if key not in seen_entity_relation_keys:
-                seen_entity_relation_keys.add(key)
-                merged_entity_relations.append(rel)
-
-        ctx = facts.get("market_context", "")
-        if ctx:
-            market_contexts.append(ctx)
-        cs = facts.get("chunk_summary", "")
-        if cs:
-            chunk_summaries.append(cs)
-
-    return {
-        "entities": merged_entities,
-        "numbers": merged_numbers,
-        "events": merged_events,
-        "relationships": merged_relationships,
-        "entity_relations": merged_entity_relations,
-        "key_claims": merged_claims,
-        "market_context": " | ".join(market_contexts) if market_contexts else "",
-        "chunk_summaries": chunk_summaries,
-        "classification": merged_classification,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Multi-Pass LLM Pipeline: Extract -> Analyze -> Write
 # ---------------------------------------------------------------------------
 
@@ -590,7 +508,7 @@ async def _pass_extract(
         f"{domain_info}{entities_info}"
         f"- Chu de phu: {', '.join(classification.get('subtopics', []))}\n"
         f"- Ngon ngu: {classification.get('language', 'vi')}\n\n"
-        f"Transcript:\n{transcript_text[:100_000]}"
+        f"Transcript:\n{transcript_text}"
     )
     logger.info("Pass 1/3: Extracting structured facts (%d chars)", len(transcript_text))
     return await _call_llm_json(
@@ -600,190 +518,6 @@ async def _pass_extract(
         timeout=timeout,
         temperature=temperature,
         pass_label="Pass1-Extract",
-    )
-
-
-async def _pass_extract_chunked(
-    llm: LLMClientPort,
-    transcript_text: str,
-    classification: dict[str, Any],
-    timeout: float,
-    published_at: datetime | None = None,
-    temperature: float = 0.0,
-) -> dict[str, Any]:
-    """Pass 1 (chunked): Split transcript, extract facts sequentially with sliding context, merge.
-
-    Splits transcript into overlapping chunks, runs Pass 1 on each chunk
-    sequentially with context from previous chunk summary, then merges results with dedup.
-    Falls back to single-pass if transcript is small.
-    """
-    chunks = _chunk_transcript(transcript_text)
-
-    if len(chunks) <= 1:
-        return await _pass_extract(
-            llm,
-            transcript_text,
-            classification,
-            timeout,
-            published_at=published_at,
-            temperature=temperature,
-        )
-
-    logger.info(
-        "Pass 1/3: Chunked extraction - %d chunks of ~%d chars each",
-        len(chunks),
-        CHUNK_SIZE,
-    )
-    per_chunk_timeout = max(timeout, timeout * len(chunks) * 0.5)
-
-    domain_info = ""
-    if classification.get("domain"):
-        domain_info = f"- Domain: {classification['domain']}\n"
-    entities_info = ""
-    if classification.get("key_entities"):
-        ke_list = classification["key_entities"]
-        if isinstance(ke_list, list):
-            names = []
-            for ke in ke_list:
-                if isinstance(ke, dict) and ke.get("name"):
-                    names.append(ke["name"])
-                elif isinstance(ke, str):
-                    names.append(ke)
-            if names:
-                entities_info = f"- Thuc the chinh: {', '.join(names)}\n"
-
-    t0_instruction = ""
-    if published_at:
-        t0_str = published_at.strftime("%Y-%m-%d")
-        t0_instruction = (
-            f"NGAY PHAT HANH VIDEO (T0): {t0_str}\n"
-            "QUY TAC TEMPORAL: Quy doi moi moc thoi gian tuong doi sang ngay tuyet doi"
-            f" (ISO YYYY-MM-DD).\n"
-            f"- 'hom nay' -> {t0_str}\n"
-            f"- 'hom qua' -> ngay truoc {t0_str}\n"
-            f"- 'tuan truoc' -> {t0_str} tru 7 ngay\n"
-            f"- 'thang nay' -> {t0_str[:7]}-01 (giu thang, ngay 01 neu khong ro)\n"
-            f"- 'quy X' -> uoc tinh tu T0\n"
-            "Neu khong the quy doi chinh xac -> de normalized_date = null.\n\n"
-        )
-
-    async def _extract_chunk(chunk: str, idx: int, prev_summary: str = "") -> dict[str, Any]:
-        context_prefix = ""
-        if prev_summary:
-            context_prefix = (
-                f"[NGU CANH TU DOAN TRUOC]\n"
-                f"Tom tat doan {idx}: {prev_summary[:500]}\n"
-                "Dung ngu canh nay de giai quyet coreference"
-                " (VD: 'ong ay', 'chi so nay' -> xac dinh tu context).\n"
-                f"[/NGU CANH]\n\n"
-            )
-
-        user_content = (
-            t0_instruction + context_prefix + f"[DOAN {idx + 1}/{len(chunks)}]\n"
-            f"Phan loai:\n- Chu de: {classification.get('main_topic', '')}\n"
-            f"{domain_info}{entities_info}"
-            f"- Chu de phu: {', '.join(classification.get('subtopics', []))}\n"
-            f"- Ngon ngu: {classification.get('language', 'vi')}\n\n"
-            f"Transcript (doan {idx + 1}):\n{chunk}"
-        )
-        try:
-            return await _call_llm_json(
-                llm,
-                EXTRACT_SYSTEM_PROMPT,
-                user_content,
-                timeout=per_chunk_timeout,
-                temperature=temperature,
-                pass_label=f"Pass1-Extract-Chunk{idx + 1}",
-            )
-        except Exception as exc:
-            logger.warning("Pass 1 chunk %d failed: %s", idx + 1, exc)
-            return {}
-
-    facts_list: list[dict[str, Any]] = []
-    prev_summary = ""
-    for i, chunk in enumerate(chunks):
-        result = await _extract_chunk(chunk, i, prev_summary)
-        if result:
-            facts_list.append(result)
-            prev_summary = result.get("chunk_summary", "")
-        else:
-            facts_list.append({})
-
-    merged = _merge_extracted_facts(facts_list)
-    logger.info(
-        "Pass 1 chunked OK: merged %d companies, %d people, %d numbers, %d events,"
-        " %d relationships, %d entity_relations from %d/%d chunks",
-        len(merged.get("entities", {}).get("companies", [])),
-        len(merged.get("entities", {}).get("people", [])),
-        len(merged.get("numbers", [])),
-        len(merged.get("events", [])),
-        len(merged.get("relationships", [])),
-        len(merged.get("entity_relations", []) or []),
-        len(facts_list),
-        len(chunks),
-    )
-    return merged
-
-
-def _build_chunk_context(facts: dict[str, Any], max_summary_chars: int = 60_000) -> str:
-    """Build a compact context string from chunk summaries for Pass 2,3."""
-    summaries = facts.get("chunk_summaries", [])
-    if not summaries:
-        return ""
-
-    parts: list[str] = []
-    total = 0
-    for i, s in enumerate(summaries):
-        if total + len(s) > max_summary_chars:
-            parts.append(f"[... con {len(summaries) - i} doan nua - da tom luoc]")
-            break
-        parts.append(f"=== DOAN {i + 1} ===\n{s}")
-        total += len(s)
-
-    return "\n\n".join(parts)
-
-
-async def _pass_analyze(
-    llm: LLMClientPort,
-    transcript_text: str,
-    facts: dict[str, Any],
-    classification: dict[str, Any],
-    timeout: float,
-    published_at: datetime | None = None,
-) -> dict[str, Any]:
-    """Pass 2: Analyze cause-effect chains and investment implications."""
-    facts_json = json.dumps(facts, ensure_ascii=False, indent=2)
-
-    chunk_context = _build_chunk_context(facts)
-    if chunk_context:
-        transcript_section = (
-            f"TOM TAT TOAN BO TRANSCRIPT (tu phan tich tung doan):\n{chunk_context}"
-        )
-    else:
-        transcript_section = (
-            f"TRANSCRIPT GOC (de tham khao them ngu canh):\n{transcript_text[:30_000]}"
-        )
-
-    t0_prefix = ""
-    if published_at:
-        t0_prefix = f"Video duoc phat hanh ngay: {published_at.strftime('%Y-%m-%d')}\n\n"
-
-    user_content = (
-        f"{t0_prefix}"
-        f"Chu de: {classification.get('main_topic', '')}\n"
-        f"Ngon ngu: {classification.get('language', 'vi')}\n\n"
-        f"DU KIEN DA TRICH XUAT TU TRANSCRIPT:\n{facts_json}\n\n"
-        f"{transcript_section}"
-    )
-    logger.info(
-        "Pass 2/3: Analyzing cause-effect & implications (context: %d chars)", len(user_content)
-    )
-    return await _call_llm_json(
-        llm,
-        ANALYZE_SYSTEM_PROMPT,
-        user_content,
-        timeout=timeout,
-        pass_label="Pass2-Analyze",
     )
 
 
@@ -831,13 +565,16 @@ async def _pass_write(
     transcript_text: str,
     classification: dict[str, Any],
     facts: dict[str, Any],
-    analysis: dict[str, Any],
     existing_page_content: str | None,
-    frame_urls: list[dict] | None,
     timeout: float,
     published_at: datetime | None = None,
 ) -> dict[str, Any]:
-    """Pass 3: Compose final wiki page from extracted facts + analysis."""
+    """Pass 2 (Analyze+Write combined): Compose final wiki page from extracted facts.
+
+    The LLM analyzes cause-effect chains, investment implications, and speaker
+    stance internally (reasoning ON), embedding them in ### subsections within
+    each ## section.
+    """
     domain_info = ""
     if classification.get("domain"):
         domain_info = f"- Domain: {classification['domain']}\n"
@@ -855,13 +592,10 @@ async def _pass_write(
                 entities_info = f"- Thuc the chinh: {', '.join(names)}\n"
 
     facts_json = json.dumps(facts, ensure_ascii=False, indent=2)
-    analysis_json = json.dumps(analysis, ensure_ascii=False, indent=2)
 
-    chunk_context = _build_chunk_context(facts)
-    if chunk_context:
-        transcript_section = f"TOM TAT TOAN BO TRANSCRIPT (day du cac doan):\n{chunk_context}"
-    else:
-        transcript_section = f"Transcript goc (de kiem tra cheo):\n{transcript_text[:30_000]}"
+    # Full transcript for cross-reference (Pass 2 gets facts + transcript to verify).
+    # DeepSeek v4 Flash 1M-token context easily fits the longest transcripts.
+    transcript_ref = f"Transcript goc (de kiem tra cheo):\n{transcript_text}"
 
     t0_prefix = ""
     if published_at:
@@ -874,22 +608,10 @@ async def _pass_write(
         f"- Ngon ngu: {classification.get('language', 'vi')}\n"
         f"- Tom tat: {classification.get('summary_3sentences', '')}",
         f"DU KIEN TRICH XUAT:\n{facts_json}",
-        f"PHAN TICH CHUYEN SAU:\n{analysis_json}",
-        transcript_section,
+        transcript_ref,
     ]
 
-    if frame_urls:
-        frame_info = "KHUNG HINH CO SAN (co the chen vao noi dung neu lien quan):\n"
-        for f in frame_urls:
-            frame_info += (
-                f"- [{f.get('second')}s] {f.get('description', '')}\n  URL: {f.get('url', '')}\n"
-            )
-        user_parts.insert(1, frame_info)
-
     if existing_page_content:
-        # Build structured overview: all section titles + first sentence of each.
-        # Raw truncation at 8000 chars makes the LLM blind to ~70% of existing content
-        # on large pages. A structured summary lets the LLM see ALL sections.
         overview = _build_page_overview(existing_page_content)
         user_parts.insert(
             0,
@@ -904,16 +626,21 @@ async def _pass_write(
         )
 
     user_content = "\n\n---\n\n".join(user_parts)
-    logger.info("Pass 3/3: Composing final wiki page (context: %d chars)", len(user_content))
-    return await _call_llm_json(
+    logger.info("Pass 2/2: Analyze+Write combined (context: %d chars)", len(user_content))
+    data = await _call_llm_json(
         llm,
         WRITE_SYSTEM_PROMPT,
         user_content,
         temperature=0.3,
         timeout=timeout,
-        pass_label="Pass3-Write",
-        max_tokens=32768,
+        pass_label="Pass2-AnalyzeWrite",
+        max_tokens=65536,
     )
+
+    # Structural validation: check ### subsections in each section
+    _validate_wiki_output(data)
+
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -1061,12 +788,19 @@ async def _save_snapshot(
             orm.PageSection.content_markdown,
             orm.PageSection.section_order,
             orm.PageSection.source_ref,
+            orm.PageSection.keywords,
         )
         .where(orm.PageSection.page_id == page.id)
         .order_by(orm.PageSection.section_order)
     )
     sections_data = [
-        {"title": r[0], "content_markdown": r[1], "section_order": r[2], "source_ref": r[3]}
+        {
+            "title": r[0],
+            "content_markdown": r[1],
+            "section_order": r[2],
+            "source_ref": r[3],
+            "keywords": r[4] or [],
+        }
         for r in sections_result.all()
     ]
 
@@ -1142,6 +876,7 @@ async def _create_page(
             section_order=sec.get("order", idx),
             title=sec_title,
             content_markdown=sec_content,
+            keywords=sec.get("keywords", []),
             source_ref=sec.get("source_ref", f"yt:{source_item_id}"),
         )
         db.add(section)
@@ -1220,6 +955,7 @@ async def _update_page(
             section_order=max_order + 1,
             title=sec_title,
             content_markdown=sec_content,
+            keywords=sec.get("keywords", []),
             source_ref=sec.get("source_ref", f"yt:{source_item_id}"),
         )
         db.add(section)
@@ -1260,14 +996,10 @@ async def _run_extraction_pass(
     published_at: datetime | None = None,
     timeout: float = 300.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Run Pass 1 only: chunked extraction -> facts + merged classification.
+    """Run Pass 1: structured fact extraction from full transcript.
 
-    Args:
-        llm: LLM client port.
-        transcript_text: Raw transcript text.
-        classification_hint: Optional classification dict to guide extraction.
-            If None, creates empty hint for Pass 1 to self-classify.
-        timeout: Timeout per chunk API call.
+    DeepSeek v4 Flash (1M token context) handles even the longest transcripts
+    (~800K chars / ~500K tokens) in a single pass — no chunking needed.
 
     Returns:
         Tuple of (facts_dict, merged_classification).
@@ -1286,7 +1018,7 @@ async def _run_extraction_pass(
     lang = classification_hint.get("language")
     cleaned = _preprocess_transcript(transcript_text, lang=lang)
 
-    facts = await _pass_extract_chunked(
+    facts = await _pass_extract(
         llm,
         cleaned,
         classification_hint,
@@ -1295,14 +1027,13 @@ async def _run_extraction_pass(
     )
     logger.info(
         "Pass 1 OK: %d companies, %d people, %d numbers, %d events, %d relationships,"
-        " %d entity_relations, %d chunk summaries",
+        " %d entity_relations",
         len(facts.get("entities", {}).get("companies", [])),
         len(facts.get("entities", {}).get("people", [])),
         len(facts.get("numbers", [])),
         len(facts.get("events", [])),
         len(facts.get("relationships", [])),
         len(facts.get("entity_relations", []) or []),
-        len(facts.get("chunk_summaries", [])),
     )
 
     merged_classification = dict(classification_hint)
@@ -1341,41 +1072,19 @@ async def _run_synthesis_passes(
     classification: dict[str, Any],
     facts: dict[str, Any],
     existing_page_content: str | None = None,
-    frame_urls: list[dict] | None = None,
     timeout: float = 450.0,
     published_at: datetime | None = None,
 ) -> dict[str, Any]:
-    """Run Pass 2 (Analyze) + Pass 3 (Write) with existing page context.
+    """Run Pass 2 (Analyze+Write combined) with existing page context.
+
+    Analysis (cause-effect, investment implications, speaker stance) is
+    performed by the LLM internally with reasoning ON — no separate analyze pass.
 
     Returns:
-        Dict with keys: "wiki", "facts", "analysis", "classification"
+        Dict with keys: "wiki", "facts", "classification"
     """
     lang = classification.get("language")
     cleaned = _preprocess_transcript(transcript_text, lang=lang)
-
-    pass_timeout = timeout * 0.4
-
-    analysis: dict[str, Any] = {}
-
-    if facts:
-        try:
-            analysis = await _pass_analyze(
-                llm,
-                cleaned,
-                facts,
-                classification,
-                pass_timeout,
-                published_at=published_at,
-            )
-            logger.info(
-                "Pass 2 OK: %d cause-effect chains, %d investment implications",
-                len(analysis.get("cause_effect_chains", [])),
-                len(analysis.get("investment_implications", [])),
-            )
-        except Exception as exc:
-            logger.warning("Pass 2 (Analyze) failed: %s - continuing without analysis", exc)
-    else:
-        logger.info("Pass 2 skipped: no facts from Pass 1")
 
     try:
         data = await _pass_write(
@@ -1383,22 +1092,20 @@ async def _run_synthesis_passes(
             cleaned,
             classification,
             facts,
-            analysis,
             existing_page_content,
-            frame_urls,
-            timeout=pass_timeout * 2.5,
+            timeout=timeout * 0.6,
             published_at=published_at,
         )
         logger.info(
-            "Pass 3 OK: wiki page '%s' (%d sections)",
+            "Pass 2 OK: wiki page '%s' (%d sections)",
             data.get("page_title", "?"),
             len(data.get("sections", [])),
         )
     except Exception as exc:
-        logger.error("Pass 3 (Write) failed: %s", exc)
-        raise RuntimeError("Wiki page generation failed: all passes exhausted") from exc
+        logger.error("Pass 2 (Analyze+Write) failed: %s", exc)
+        raise RuntimeError("Wiki page generation failed") from exc
 
-    return {"wiki": data, "facts": facts, "analysis": analysis, "classification": classification}
+    return {"wiki": data, "facts": facts, "classification": classification}
 
 
 # ---------------------------------------------------------------------------
@@ -1517,25 +1224,8 @@ class WikiIntegrator:
         # Step 3: Vector search for existing matching pages
         matches = await _vector_search_existing_pages(summary_vector, db)
 
-        # Step 4: Collect frame URLs from media_assets for LLM image embedding
-        assets_result = await db.execute(
-            select(orm.MediaAsset).where(orm.MediaAsset.source_item_id == source_item_id_val)
-        )
-        media_assets = assets_result.scalars().all()
-        frame_urls: list[dict] = []
-        for asset in media_assets:
-            if asset.minio_path and asset.file_size_bytes and asset.file_size_bytes > 0:
-                # NOTE: Presigned URL generation requires minio_client which is not
-                # yet ported to clean architecture. Build a path-based URL as fallback.
-                frame_urls.append(
-                    {
-                        "second": asset.filename.replace("s.jpg", "").replace("s_error.jpg", ""),
-                        "url": f"/api/media/{asset.minio_path}",
-                        "description": asset.description or "",
-                    }
-                )
-
-        # Step 5: Pass 2 + Pass 3 (with existing page context if match passes multi-criteria gates)
+        # Step 4: Pass 2 (Analyze+Write combined)
+        # Use existing page context if a match passes multi-criteria gates
         # Extract entity names from classification for gate 3 (entity Jaccard)
         new_entity_names: list[str] = []
         if effective_classification.get("key_entities"):
@@ -1594,11 +1284,9 @@ class WikiIntegrator:
                 effective_classification,
                 facts,
                 existing_page_content=existing_page_content,
-                frame_urls=frame_urls if frame_urls else None,
                 published_at=published_at_val,
             )
             llm_data = llm_result["wiki"]
-            analysis = llm_result.get("analysis", {})
             page = await _update_page(best_match, llm_data, source_id_val, source_item_id_val, db)
 
             if effective_classification.get("domain"):
@@ -1615,11 +1303,9 @@ class WikiIntegrator:
                 transcript_text,
                 effective_classification,
                 facts,
-                frame_urls=frame_urls if frame_urls else None,
                 published_at=published_at_val,
             )
             llm_data = llm_result["wiki"]
-            analysis = llm_result.get("analysis", {})
             page = await _create_page(
                 llm_data,
                 source_id_val,
@@ -1650,11 +1336,10 @@ class WikiIntegrator:
             action = "created"
             page_id = str(page.id)
 
-        # Step 6: Event extraction + entity linking + stance (non-fatal)
+        # Step 5: Event extraction + entity linking (non-fatal)
         try:
             await self._handle_event_extraction(
                 facts=facts,
-                analysis=analysis,
                 source_id_val=source_id_val,
                 page_id_val=UUID(page_id),
                 published_at_val=published_at_val,
@@ -1689,14 +1374,6 @@ class WikiIntegrator:
             )
             await db.execute(stmt)
 
-        # Step 8: Link media_assets to the page
-        if media_assets:
-            for asset in media_assets:
-                if asset.page_id is None:
-                    asset.page_id = page.id
-            await db.flush()
-            logger.info("Linked %d media_assets to page %s", len(media_assets), page.title)
-
         return {
             "action": action,
             "page_id": page_id,
@@ -1706,7 +1383,6 @@ class WikiIntegrator:
     async def _handle_event_extraction(
         self,
         facts: dict[str, Any],
-        analysis: dict[str, Any],
         source_id_val: UUID,
         page_id_val: UUID,
         published_at_val: datetime | None,
@@ -1715,6 +1391,8 @@ class WikiIntegrator:
         """Extract, deduplicate, and store events; link entities and cause-effect chains.
 
         Uses the ported legacy event_extractor and event_linker logic.
+        Cause-effect chains are extracted from facts.entity_relations (Pass 1 entity
+        relations) instead of a separate analysis pass.
         """
         events_data = facts.get("events", [])
         entities_data = facts.get("entities", {})
@@ -1732,39 +1410,15 @@ class WikiIntegrator:
             entity_relations_data=entity_relations_data,
         )
 
-        # Link Pass 2 cause-effect chains
-        cause_effect_chains = (
-            analysis.get("cause_effect_chains", []) if isinstance(analysis, dict) else []
-        )
+        # Link cause-effect chains from facts entity_relations (Pass 1)
+        cause_effect_relationships = facts.get("entity_relations", []) or []
         await link_cause_effect_chains(
             llm=self._llm,
             embedder=self._embedder,
-            cause_effect_chains=cause_effect_chains,
+            cause_effect_chains=cause_effect_relationships,
             page_id=page_id_val,
             db=db,
         )
 
         # Detect contradictions against other sources
         await detect_contradictions(page_id=page_id_val, db=db)
-
-        # Stance capture from analysis
-        if analysis and analysis.get("speaker_stance"):
-            stance = analysis["speaker_stance"].get("overall_bias")
-            if stance:
-                sentiment_map = {
-                    "bullish": 0.7,
-                    "bearish": -0.7,
-                    "cautious": -0.1,
-                    "neutral": 0.0,
-                }
-                await db.execute(
-                    update(orm.EventObservation)
-                    .where(
-                        orm.EventObservation.page_id == page_id_val,
-                        orm.EventObservation.stance.is_(None),
-                    )
-                    .values(stance=stance, sentiment_score=sentiment_map.get(stance, 0.0))
-                )
-                logger.debug(
-                    "Captured stance '%s' for observations on page %s", stance, page_id_val
-                )

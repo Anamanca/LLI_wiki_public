@@ -10,7 +10,7 @@ from llm_wiki.application.ports.search.query_analyzer_port import (
 )
 from llm_wiki.application.ports.search.vector_search import LLMClientPort
 from llm_wiki.domain.value_objects.time_range import TimeRange
-from llm_wiki.shared.datetime_utils import now
+from llm_wiki.shared.datetime_utils import get_system_tz, now
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +129,9 @@ class LLMQueryAnalyzerAdapter(QueryAnalyzerPort):
         if not start_str:
             return None
         try:
-            start = datetime.fromisoformat(start_str)
-            end = datetime.fromisoformat(end_str) if end_str else now()
+            tz = get_system_tz()
+            start = datetime.fromisoformat(start_str).replace(tzinfo=tz)
+            end = datetime.fromisoformat(end_str).replace(tzinfo=tz) if end_str else now()
             return TimeRange(start=start, end=end)
         except (ValueError, TypeError):
             return None

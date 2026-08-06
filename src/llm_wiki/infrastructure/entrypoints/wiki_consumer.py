@@ -53,7 +53,7 @@ from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
 from llm_wiki.presentation.dependencies import traced_embedder, traced_llm
 from llm_wiki.shared.datetime_utils import now
 
-CONSUMER_ID = int(os.getenv("CONSUMER_ID", str(settings.consumer_id)))
+CONSUMER_ID = os.getenv("CONSUMER_ID", settings.consumer_id)
 logger = logging.getLogger(f"wiki-consumer-{CONSUMER_ID}")
 
 # One telemetry adapter per consumer process — reused across all jobs.
@@ -65,7 +65,7 @@ _shutdown_requested = False
 
 def _on_terminate(signum: int, frame: object) -> None:
     global _shutdown_requested
-    logger.info("Wiki consumer %d received signal %d — shutting down", CONSUMER_ID, signum)
+    logger.info("Wiki consumer %s received signal %d — shutting down", CONSUMER_ID, signum)
     _shutdown_requested = True
 
 
@@ -165,7 +165,7 @@ async def _save_section_vectors(page_id_str: str | None, db: AsyncSession) -> in
         section.section_vector = vector
     await db.commit()
     logger.info(
-        "Wiki consumer %d: embedded %d section vectors for page %s",
+        "Wiki consumer %s: embedded %d section vectors for page %s",
         CONSUMER_ID,
         len(page_sections),
         page_id_str,
@@ -181,7 +181,7 @@ async def process_wiki_job(item_id: UUID) -> None:
     async with async_session_factory() as db:
         item = await db.get(SourceItem, item_id)
         if item is None:
-            logger.warning("Wiki consumer %d: item %s not found in DB", CONSUMER_ID, item_id)
+            logger.warning("Wiki consumer %s: item %s not found in DB", CONSUMER_ID, item_id)
             return
 
         # Mark as wiki-processing with heartbeat
@@ -204,14 +204,14 @@ async def process_wiki_job(item_id: UUID) -> None:
         use_merged_path = not classification.get("main_topic")
         if use_merged_path:
             logger.info(
-                "Wiki consumer %d: MERGE_CLASSIFY path — Pass 1 will self-classify", CONSUMER_ID
+                "Wiki consumer %s: MERGE_CLASSIFY path — Pass 1 will self-classify", CONSUMER_ID
             )
 
         source = await db.get(Source, item.source_id)
         source_name = source.name if source else "unknown"
 
         logger.info(
-            "Wiki consumer %d: integrating %s (%s) — %s",
+            "Wiki consumer %s: integrating %s (%s) — %s",
             CONSUMER_ID,
             item.external_id,
             (item.title or "")[:60],
@@ -241,7 +241,7 @@ async def process_wiki_job(item_id: UUID) -> None:
 
         if cached_page_id:
             logger.info(
-                "Wiki consumer %d: skipping wiki integration for %s — "
+                "Wiki consumer %s: skipping wiki integration for %s — "
                 "page %s already created, retrying embedding only",
                 CONSUMER_ID,
                 item.external_id,
@@ -298,7 +298,7 @@ async def process_wiki_job(item_id: UUID) -> None:
                     span=root_span, error="Wiki integration timed out after 30 min"
                 )
                 logger.error(
-                    "Wiki consumer %d: wiki integrate timed out for %s", CONSUMER_ID, item.id
+                    "Wiki consumer %s: wiki integrate timed out for %s", CONSUMER_ID, item.id
                 )
                 await db.rollback()
                 item.retry_count = (item.retry_count or 0) + 1
@@ -315,13 +315,17 @@ async def process_wiki_job(item_id: UUID) -> None:
                         {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
                     )
                     logger.warning(
-                        "Wiki consumer %d: %s permanently failed after %d wiki attempts",
+                        "Wiki consumer %s: %s permanently failed after %d wiki attempts",
                         CONSUMER_ID,
                         item.external_id,
                         item.retry_count,
                     )
                 else:
                     item.status = "classified"
+                    inc_counter(
+                        "ingestion_jobs_total",
+                        {"status": "retry", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
+                    )
                 await db.commit()
                 await _log_event(
                     db,
@@ -336,7 +340,7 @@ async def process_wiki_job(item_id: UUID) -> None:
                 await _telemetry.end_span(span=root_span, error=str(exc)[:500])
                 error_str = str(exc)
                 logger.error(
-                    "Wiki consumer %d: wiki integrate failed for %s: %s", CONSUMER_ID, item.id, exc
+                    "Wiki consumer %s: wiki integrate failed for %s: %s", CONSUMER_ID, item.id, exc
                 )
                 await db.rollback()
                 item.retry_count = (item.retry_count or 0) + 1
@@ -353,13 +357,17 @@ async def process_wiki_job(item_id: UUID) -> None:
                         {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
                     )
                     logger.warning(
-                        "Wiki consumer %d: %s permanently failed after %d wiki attempts",
+                        "Wiki consumer %s: %s permanently failed after %d wiki attempts",
                         CONSUMER_ID,
                         item.external_id,
                         item.retry_count,
                     )
                 else:
                     item.status = "classified"
+                    inc_counter(
+                        "ingestion_jobs_total",
+                        {"status": "retry", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
+                    )
                 await db.commit()
                 await _log_event(
                     db,
@@ -406,7 +414,7 @@ async def process_wiki_job(item_id: UUID) -> None:
         except TimeoutError:
             await _telemetry.end_span(span=embed_span, error="section embedding timeout")
             logger.error(
-                "Wiki consumer %d: section embedding timed out for %s", CONSUMER_ID, item.id
+                "Wiki consumer %s: section embedding timed out for %s", CONSUMER_ID, item.id
             )
             await db.rollback()
             item.retry_count = (item.retry_count or 0) + 1
@@ -423,13 +431,17 @@ async def process_wiki_job(item_id: UUID) -> None:
                     {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)},
                 )
                 logger.warning(
-                    "Wiki consumer %d: %s permanently failed after %d embed attempts",
+                    "Wiki consumer %s: %s permanently failed after %d embed attempts",
                     CONSUMER_ID,
                     item.external_id,
                     item.retry_count,
                 )
             else:
                 item.status = "classified"
+                inc_counter(
+                    "ingestion_jobs_total",
+                    {"status": "retry", "stage": "embed", "worker_id": str(CONSUMER_ID)},
+                )
             await db.commit()
             await _log_event(
                 db,
@@ -443,7 +455,7 @@ async def process_wiki_job(item_id: UUID) -> None:
         except Exception as exc:
             await _telemetry.end_span(span=embed_span, error=str(exc)[:500])
             logger.error(
-                "Wiki consumer %d: section embedding failed for %s: %s", CONSUMER_ID, item.id, exc
+                "Wiki consumer %s: section embedding failed for %s: %s", CONSUMER_ID, item.id, exc
             )
             await db.rollback()
             item.retry_count = (item.retry_count or 0) + 1
@@ -460,13 +472,17 @@ async def process_wiki_job(item_id: UUID) -> None:
                     {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)},
                 )
                 logger.warning(
-                    "Wiki consumer %d: %s permanently failed after %d embed attempts",
+                    "Wiki consumer %s: %s permanently failed after %d embed attempts",
                     CONSUMER_ID,
                     item.external_id,
                     item.retry_count,
                 )
             else:
                 item.status = "classified"
+                inc_counter(
+                    "ingestion_jobs_total",
+                    {"status": "retry", "stage": "embed", "worker_id": str(CONSUMER_ID)},
+                )
             await db.commit()
             await _log_event(
                 db,
@@ -505,7 +521,7 @@ async def process_wiki_job(item_id: UUID) -> None:
 
         set_worker_state(CONSUMER_ID, "idle")
         logger.info(
-            "Wiki consumer %d: completed job %s → %s",
+            "Wiki consumer %s: completed job %s → %s",
             CONSUMER_ID,
             item.external_id,
             wiki_result["action"],
@@ -523,7 +539,7 @@ async def process_wiki_job(item_id: UUID) -> None:
         )
 
 
-async def _heartbeat_loop(consumer_id: int) -> None:
+async def _heartbeat_loop(consumer_id: str) -> None:
     """Periodic heartbeat to worker_heartbeats — reads from shared state."""
     while not _shutdown_requested:
         try:
@@ -532,6 +548,7 @@ async def _heartbeat_loop(consumer_id: int) -> None:
             set_gauge("worker_cpu_percent", float(cpu_val), {"worker_id": str(consumer_id)})
             await write_heartbeat(
                 consumer_id,
+                worker_type="wiki",
                 status=state.get("status", "idle"),
                 current_job_id=state.get("job_id"),
                 current_stage=state.get("stage"),
@@ -561,7 +578,7 @@ async def main() -> None:
             signal.signal(sig, _on_terminate)
 
     logger.info(
-        "Wiki consumer %d starting (redis=%s:%d)",
+        "Wiki consumer %s starting (redis=%s:%d)",
         CONSUMER_ID,
         settings.redis_host,
         settings.redis_port,
@@ -592,12 +609,12 @@ async def main() -> None:
                     or "connection" in error_str
                 ):
                     logger.critical(
-                        "Wiki consumer %d: DB offline or in recovery. Sleeping for 60s.",
+                        "Wiki consumer %s: DB offline or in recovery. Sleeping for 60s.",
                         CONSUMER_ID,
                     )
                     await asyncio.sleep(60)
                 else:
-                    logger.error("Wiki consumer %d error: %s", CONSUMER_ID, exc)
+                    logger.error("Wiki consumer %s error: %s", CONSUMER_ID, exc)
                     await asyncio.sleep(2)
 
     except asyncio.CancelledError:
@@ -611,7 +628,7 @@ async def main() -> None:
                 await task
         await close_redis()
 
-    logger.info("Wiki consumer %d stopped", CONSUMER_ID)
+    logger.info("Wiki consumer %s stopped", CONSUMER_ID)
 
 
 if __name__ == "__main__":

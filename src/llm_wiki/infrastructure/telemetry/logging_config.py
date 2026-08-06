@@ -116,7 +116,7 @@ class WorkerIdFilter(logging.Filter):
     not depend on environment variable lookups on every log line.
     """
 
-    def __init__(self, worker_id: int | None = None):
+    def __init__(self, worker_id: int | str | None = None):
         super().__init__()
         self._worker_id = worker_id
 
@@ -130,7 +130,7 @@ def setup_logging(
     service_name: str = "backend",
     log_format: str = "text",
     log_level: str = "INFO",
-    worker_id: int | None = None,
+    worker_id: int | str | None = None,
 ) -> None:
     """Configure the root logger for the service.
 

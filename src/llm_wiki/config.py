@@ -81,12 +81,13 @@ class Settings(BaseSettings):
         default="youtube-transcriptor.p.rapidapi.com", validation_alias="RAPIDAPI_HOST"
     )
     telegram_alert_chat_id: str = Field(default="", validation_alias="TELEGRAM_ALERT_CHAT_ID")
-    worker_id: int = Field(default=1, validation_alias="WORKER_ID")
-    consumer_id: int = Field(default=101, validation_alias="CONSUMER_ID")
+    worker_id: str = Field(default="", validation_alias="WORKER_ID")
+    consumer_id: str = Field(default="", validation_alias="CONSUMER_ID")
     minio_bucket: str = Field(default="llm-wiki-media", validation_alias="MINIO_BUCKET")
 
     # Monitoring
     enable_metrics: bool = Field(default=False, validation_alias="ENABLE_METRICS")
+    wiki_strict_validation: bool = Field(default=False, validation_alias="WIKI_STRICT_VALIDATION")
     log_format: str = Field(default="text", validation_alias="LOG_FORMAT")
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
 

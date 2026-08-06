@@ -10,7 +10,9 @@ from uuid import UUID
 
 import psutil
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import case, func, select, text
+from datetime import timedelta
+
+from sqlalchemy import case, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.infrastructure.persistence.postgres import models as orm
@@ -852,16 +854,26 @@ async def attention_items(page: int = 1, per_page: int = 100, db: AsyncSession =
 
 @router.get("/workers")
 async def list_workers(db: AsyncSession = Depends(get_db)):
+    cutoff = now() - timedelta(minutes=5)
+
+    # Delete stale rows (pod no longer exists or crashed > 5 min ago).
+    # Only live workers remain after this point.
+    await db.execute(
+        delete(orm.WorkerHeartbeat).where(
+            orm.WorkerHeartbeat.last_heartbeat < cutoff
+        )
+    )
+    await db.commit()
+
     q = select(orm.WorkerHeartbeat).order_by(orm.WorkerHeartbeat.worker_id)
     result = await db.execute(q)
     workers = []
     for w in result.scalars():
-        ago = 999
-        if w.last_heartbeat:
-            ago = (now() - w.last_heartbeat).total_seconds()
+        ago = (now() - w.last_heartbeat).total_seconds() if w.last_heartbeat else 999
         workers.append(
             {
                 "worker_id": w.worker_id,
+                "worker_type": w.worker_type,
                 "status": w.status or "idle",
                 "alive": ago < 120,
                 "heartbeat_ago_secs": int(ago),

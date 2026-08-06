@@ -38,6 +38,7 @@ async def get_page(slug: str, db: AsyncSession = Depends(get_db)):
             "section_order": s.section_order or 0,
             "title": s.title,
             "content_markdown": s.content_markdown,
+            "keywords": s.keywords or [],
             "source_ref": s.source_ref,
         }
         for s in sections_result.scalars()

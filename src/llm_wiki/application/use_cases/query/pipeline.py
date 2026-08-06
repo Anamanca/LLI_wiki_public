@@ -10,11 +10,13 @@ from typing import Any
 from llm_wiki.application.dto.query_dto import QueryInput
 from llm_wiki.application.ports.search.event_search_port import EventSearchPort
 from llm_wiki.application.ports.search.graph_rag_port import GraphRAGPort
-from llm_wiki.application.ports.search.query_analyzer_port import (
-    QueryAnalysis,
-    QueryAnalyzerPort,
+from llm_wiki.application.ports.search.guardrail_analyzer_port import (
+    GuardrailAnalysis,
+    GuardrailAnalyzerPort,
 )
-from llm_wiki.application.ports.search.query_rewriter_port import QueryRewriterPort
+from llm_wiki.application.ports.search.query_rewriter_port import (
+    QueryRewriterPort,  # noqa: F401 — kept for backward compat, no longer wired
+)
 from llm_wiki.application.ports.search.vector_search import (
     CacheServicePort,
     EmbeddingServicePort,
@@ -27,7 +29,7 @@ from llm_wiki.domain.value_objects.embedding import Embedding, SearchResult
 from llm_wiki.domain.value_objects.time_range import TimeRange
 from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter
 from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
-from llm_wiki.shared.datetime_utils import now
+from llm_wiki.shared.datetime_utils import get_system_tz, now
 
 root_logger = logging.getLogger()
 logger = logging.getLogger(__name__)
@@ -46,25 +48,41 @@ _RECENCY_LAMBDA_MAP: dict[str, float] = {
 }
 
 
-def _build_keyword_query(question: str, analysis: QueryAnalysis | None = None) -> str:
+def _build_keyword_query(question: str, analysis: GuardrailAnalysis | None = None) -> str:
     """Build an effective keyword-search query from the question + analysis.
 
-    When the analyzer provides ``keywords`` and ``search_query``, we use the
-    ``search_query`` (OR-delimited, bilingual) for the primary keyword search
-    and fall back to the OR-joined keywords if ``search_query`` is empty.
+    When the analyzer provides ``page_search_query``, use it directly (it is
+    already an OR-delimited, bilingual string optimised for page section search).
 
-    Without analyzer output, returns the raw question as-is — the adapter's
-    ``plainto_tsquery`` will handle the AND logic.
+    Falls back to ``event_search_query``, then raw question.
+
+    Note: callers should prefer using ``analysis.page_search_query`` for
+    ``keyword_search`` and ``analysis.event_search_query`` for
+    ``event_keyword_search`` directly.  This function is a convenience
+    for the common case where both streams share the same keyword input.
     """
-    if analysis and analysis.search_query:
-        # Analyzer-provided OR query — use directly for to_tsquery
-        return analysis.search_query
+    if analysis and analysis.page_search_query:
+        return analysis.page_search_query
 
-    if analysis and analysis.keywords:
-        # Join keywords with OR for better recall than raw question
-        return " | ".join(analysis.keywords)
+    if analysis and analysis.event_search_query:
+        return analysis.event_search_query
 
     # Fallback: raw question (existing behavior)
+    return question
+
+
+def _build_event_kw_query(question: str, analysis: GuardrailAnalysis | None = None) -> str:
+    """Build the keyword query for event_keyword_search.
+
+    Uses ``analysis.event_search_query`` when available; falls back to
+    ``page_search_query``, then raw question.
+    """
+    if analysis and analysis.event_search_query:
+        return analysis.event_search_query
+
+    if analysis and analysis.page_search_query:
+        return analysis.page_search_query
+
     return question
 
 
@@ -196,10 +214,10 @@ def _month_year_delta(m: re.Match) -> timedelta | None:
 
 def _year_delta(m: re.Match) -> timedelta | None:
     year = int(m.group(1))
-    if year < 2000 or year > now.year:
+    if year < 2000 or year > now().year:
         return None
     start = datetime(year, 1, 1)
-    return timedelta(days=(now - start).days + 1)
+    return timedelta(days=(now() - start).days + 1)
 
 
 _TIME_KEYWORDS = re.compile(
@@ -218,7 +236,7 @@ def _extract_time_range(question: str) -> TimeRange | None:
         try:
             delta = delta_fn(m)
             if delta is not None:
-                return TimeRange(start=now - delta, end=now)
+                return TimeRange(start=now() - delta, end=now())
         except Exception:
             continue
     return None
@@ -286,29 +304,6 @@ def _weighted_rrf_fusion(
     return [item[0] for item in sorted_items]
 
 
-def _diversify(
-    docs: list[SearchResult],
-    max_per_source: int = 5,
-    max_per_page: int = 2,
-) -> list[SearchResult]:
-    """Cap documents per source and per page to avoid dominance by a single source."""
-    seen_sources: dict[str, int] = {}
-    seen_pages: dict[str, int] = {}
-    result: list[SearchResult] = []
-    for doc in docs:
-        src = doc.metadata.get("source_name", "") if doc.metadata else ""
-        page = doc.metadata.get("page_slug", "") if doc.metadata else ""
-        if seen_sources.get(src, 0) >= max_per_source:
-            continue
-        if page and seen_pages.get(page, 0) >= max_per_page:
-            continue
-        seen_sources[src] = seen_sources.get(src, 0) + 1
-        if page:
-            seen_pages[page] = seen_pages.get(page, 0) + 1
-        result.append(doc)
-    return result
-
-
 def _get_relevant_timestamp(r: SearchResult) -> datetime | None:
     """Extract the most semantically relevant timestamp from a SearchResult.
 
@@ -329,7 +324,7 @@ def _get_relevant_timestamp(r: SearchResult) -> datetime | None:
 
     try:
         date_str_clean = str(date_str)[:10]
-        return datetime.strptime(date_str_clean, "%Y-%m-%d")
+        return datetime.strptime(date_str_clean, "%Y-%m-%d").replace(tzinfo=get_system_tz())
     except (ValueError, TypeError):
         return None
 
@@ -432,6 +427,75 @@ def _temporal_addendum(intent: str, language: str = "vi") -> str:
     return _VI_TEMPORAL_ADDENDUM.get(intent, "")
 
 
+# ── Shared synthesis prompt builder (used by QueryPipeline + SelfReflectiveRAGPipeline) ──
+
+# Persona + structure (general intent fallback; intent-specific pipelines override the persona)
+_SYNTHESIS_PERSONA_EN = (
+    "You are a deep-research assistant. "
+    "Answer the question based ON THE PROVIDED CONTEXT. "
+    "Your answer MUST include: "
+    "(1) a concise summary at the beginning; "
+    "(2) detailed analysis of each relevant aspect, "
+    "with specific examples from the context; "
+    "(3) explanation of connections between ideas; "
+    "(4) an overall conclusion at the end. "
+)
+
+_SYNTHESIS_PERSONA_VI = (
+    "Bạn là một trợ lý nghiên cứu chuyên sâu. "
+    "Hãy trả lời câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
+    "Câu trả lời phải bao gồm: "
+    "(1) một câu tóm tắt ngắn gọn ở đầu; "
+    "(2) phân tích chi tiết từng khía cạnh liên quan, "
+    "kèm ví dụ cụ thể từ ngữ cảnh; "
+    "(3) giải thích mối liên hệ giữa các ý; "
+    "(4) kết luận tổng thể ở cuối. "
+)
+
+# Shared boilerplate — citation rules + today's date + temporal precision constraints.
+# Used by general QueryPipeline (prepended with persona above) and by
+# SelfReflectiveRAGPipeline (prepended with intent-specific persona).
+SYNTHESIS_BOILERPLATE_EN = (
+    "Cite sources using [N]. "
+    "If the context is insufficient, clearly state which parts "
+    "are missing rather than fabricating. "
+    "Be thorough and concise, not superficial.\n\n"
+    "IMPORTANT: Today is {today}. "
+    "When answering, you MUST include specific dates (day-month-year) "
+    "for all information. "
+    "DO NOT use relative terms like 'recently', 'a few months ago'. "
+    "Always cite exact dates from the provided context."
+)
+
+SYNTHESIS_BOILERPLATE_VI = (
+    "Trích dẫn nguồn bằng [N]. "
+    "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
+    "thay vì bịa đặt. "
+    "Hãy trả lời đầy đủ, súc tích nhưng không sơ xài.\n\n"
+    "LƯU Ý QUAN TRỌNG: Hôm nay là {today}. "
+    "Khi trả lời, PHẢI ghi rõ ngày tháng năm cụ thể cho mọi thông tin. "
+    "KHÔNG được dùng từ tương đối như 'gần đây', 'mới đây', "
+    "'cách đây vài tháng', 'trong thời gian gần đây'. "
+    "Luôn trích dẫn ngày tháng chính xác từ ngữ cảnh được cung cấp."
+)
+
+# Full base prompts (persona + boilerplate) for the general QueryPipeline path.
+_SYNTHESIS_BASE_EN = _SYNTHESIS_PERSONA_EN + SYNTHESIS_BOILERPLATE_EN
+_SYNTHESIS_BASE_VI = _SYNTHESIS_PERSONA_VI + SYNTHESIS_BOILERPLATE_VI
+
+
+def _build_synthesis_prompt(language: str, today_str: str, intent: str = "general") -> str:
+    """Build the synthesis system prompt for the given language and today's date.
+
+    Shared by QueryPipeline (execute + execute_stream) and
+    SelfReflectiveRAGPipeline (_build_messages).
+    """
+    base = _SYNTHESIS_BASE_EN if language == "en" else _SYNTHESIS_BASE_VI
+    prompt = base.format(today=today_str)
+    prompt += _temporal_addendum(intent, language=language)
+    return prompt
+
+
 def _set_parent_on_wrappers(
     embedder: EmbeddingServicePort,
     vector_search: VectorSearchPort,
@@ -440,7 +504,7 @@ def _set_parent_on_wrappers(
     cache: CacheServicePort,
     parent: TelemetrySpan,
     rewriter: QueryRewriterPort | None = None,
-    analyzer: QueryAnalyzerPort | None = None,
+    analyzer: GuardrailAnalyzerPort | None = None,
     event_search: EventSearchPort | None = None,
 ) -> None:
     """Wire the pipeline root span as parent for all traced wrappers.
@@ -493,7 +557,7 @@ class QueryPipeline:
         cache: CacheServicePort,
         telemetry: TelemetryPort | None = None,
         rewriter: QueryRewriterPort | None = None,
-        analyzer: QueryAnalyzerPort | None = None,
+        analyzer: GuardrailAnalyzerPort | None = None,
         event_search: EventSearchPort | None = None,
         graph_rag: GraphRAGPort | None = None,
     ):
@@ -503,7 +567,7 @@ class QueryPipeline:
         self._llm = llm
         self._cache = cache
         self._telemetry = telemetry
-        self._rewriter = rewriter
+        self._rewriter = rewriter  # no longer active — kept for backward compat
         self._analyzer = analyzer
         self._event_search = event_search
         self._graph_rag = graph_rag
@@ -599,7 +663,7 @@ class QueryPipeline:
             'Return ONLY a JSON object: {"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"} '
             'or {"start_date": null, "end_date": null} if no time range is implied. '
             'Use "now" as end_date for relative times like "past month" or "recent". '
-            f"Today is {now.strftime('%Y-%m-%d')}. "
+            f"Today is {now().strftime('%Y-%m-%d')}. "
             f"Question: {question}"
         )
         try:
@@ -610,9 +674,13 @@ class QueryPipeline:
             )
             data = json.loads(raw.strip())
             if data.get("start_date"):
-                start = datetime.fromisoformat(data["start_date"])
+                tz = get_system_tz()
+                start = datetime.fromisoformat(data["start_date"]).replace(tzinfo=tz)
                 end_str = data.get("end_date", "now")
-                end = now() if end_str == "now" else datetime.fromisoformat(end_str)
+                end = (
+                    now() if end_str == "now"
+                    else datetime.fromisoformat(end_str).replace(tzinfo=tz)
+                )
                 return TimeRange(start=start, end=end)
         except Exception:
             logger.debug("LLM time extraction failed")
@@ -620,7 +688,8 @@ class QueryPipeline:
 
     def _resolve_time_range(self, input: QueryInput) -> TimeRange | None:
         if input.from_date or input.to_date:
-            return TimeRange(start=input.from_date or datetime.min, end=input.to_date)
+            min_dt = datetime.min.replace(tzinfo=get_system_tz())
+            return TimeRange(start=input.from_date or min_dt, end=input.to_date)
         tr = _extract_time_range(input.question)
         if tr:
             return tr
@@ -699,7 +768,7 @@ class QueryPipeline:
             prefix = f"[{i}]{heading} (nguồn: {source}{date_str}){quality_str}"
             if page_title:
                 prefix += f" (trang: {page_title})"
-            context_parts.append(f"{prefix}\n{result.content[:2000]}")
+            context_parts.append(f"{prefix}\n{result.content}")
         return "\n\n".join(context_parts)
 
     async def _retrieve_and_merge(
@@ -710,20 +779,22 @@ class QueryPipeline:
         intent: str = "general",
         rewritten_question: str | None = None,
         entities: list[dict] | None = None,
-        analysis: QueryAnalysis | None = None,
+        analysis: GuardrailAnalysis | None = None,
     ) -> tuple[dict[str, list[SearchResult]], list[SearchResult], dict[str, float]]:
         """Run parallel multi-retrieval + weighted RRF fusion + diversity.
 
         Returns (all_result_sets, top_results_after_diversity, step_times).
 
-        When *analysis* provides keyword extraction, it is used for keyword
-        and event-keyword streams instead of the raw question string.
+        When *analysis* provides per-tool search queries, they are used
+        separately: ``page_search_query`` for keyword_search and
+        ``event_search_query`` for event_keyword_search.
         """
         step_times: dict[str, float] = {}
         search_query = rewritten_question or input.question
 
-        # Build keyword-search-ready queries from analysis (when available)
+        # Build keyword-search queries — separate for page vs event when available
         kw_query = _build_keyword_query(search_query, analysis)
+        event_kw_query = _build_event_kw_query(search_query, analysis)
 
         # Build parallel tasks — always at least vector + keyword sections
         async def _vec_sections():
@@ -757,7 +828,7 @@ class QueryPipeline:
 
             async def _kw_events():
                 return await self._event_search.search_events_keyword(
-                    kw_query,
+                    event_kw_query,
                     top_k=input.top_k,
                     time_range=time_range,
                 )
@@ -796,12 +867,9 @@ class QueryPipeline:
             weights["graph"] = 0.6
         merged = _weighted_rrf_fusion(result_sets, weights)
 
-        # Diversity cap
-        diversified = _diversify(merged, max_per_source=5, max_per_page=2)
-
         # Hard time-boundary enforcement: when the user asks about a specific
         # time range, exclude results whose date falls outside it.
-        in_range = _enforce_time_boundary(diversified, time_range)
+        in_range = _enforce_time_boundary(merged, time_range)
         top_results = in_range[: input.top_k]
 
         return result_sets, top_results, step_times
@@ -864,19 +932,61 @@ class QueryPipeline:
                 )
             return cached_data
 
-        # ── Query rewrite (resolve pronouns from chat history) ─────
-        rewritten = input.question
-        if self._rewriter and input.chat_history:
-            rewritten, step_times["rewrite"] = await _timed(
-                lambda: self._rewriter.rewrite(input.question, input.chat_history)
+        # ── Guardrail + Intent analysis (single LLM call, no rewrite) ──
+        analysis = GuardrailAnalysis()
+        if self._analyzer:
+            analysis, step_times["analyze"] = await _timed(
+                lambda: self._analyzer.analyze(input.question)
             )
-            if rewritten != input.question:
-                logger.debug("Question rewritten: %r → %r", input.question[:80], rewritten[:80])
 
-        # ── Attempt embedding (uses rewritten question) ─────────────
+            # Guardrail rejection: deny immediately, no search
+            if not analysis.allowed:
+                reject_answer = (
+                    analysis.reason
+                    or "Xin lỗi, tôi chỉ có thể trả lời các câu hỏi về "
+                    "kinh tế, tài chính, chứng khoán, và đầu tư."
+                )
+                inc_counter("query_total", {"status": "rejected", "cache": "n/a"})
+                if telemetry and root_span:
+                    await telemetry.end_span(
+                        span=root_span,
+                        outputs={"answer_length": len(reject_answer), "answer": reject_answer},
+                        metadata={
+                            "allowed": False,
+                            "reason": analysis.reason,
+                            "question": input.question,
+                            "total_latency_ms": round(sum(step_times.values()) * 1000, 2),
+                        },
+                    )
+                return {
+                    "answer": reject_answer,
+                    "sources": [],
+                    "tokens_used": 0,
+                    "cache_hit": False,
+                    "pipeline_steps": step_times,
+                    "rejected": True,
+                }
+
+            intent = analysis.intent
+            logger.debug(
+                "Guardrail analysis: allowed=%s intent=%s time_range=%s entities=%d "
+                "emb_text_len=%d page_q=%s event_q=%s",
+                analysis.allowed,
+                intent,
+                analysis.time_range.start if analysis.time_range else None,
+                len(analysis.entities),
+                len(analysis.embedding_text),
+                analysis.page_search_query[:80] if analysis.page_search_query else "(empty)",
+                analysis.event_search_query[:80] if analysis.event_search_query else "(empty)",
+            )
+
+        # ── Embedding with analyzer-optimised text ────────────────────
+        # Use embedding_text when available (dense keywords VI+EN); fall back to
+        # raw question so the system still works without the analyzer.
+        embed_text = analysis.embedding_text or input.question
         try:
             query_embedding, step_times["embed"] = await _timed(
-                lambda: self._embedder.embed(rewritten),
+                lambda: self._embedder.embed(embed_text),
             )
         except Exception as exc:
             inc_counter("query_total", {"status": "error", "cache": "n/a"})
@@ -914,24 +1024,10 @@ class QueryPipeline:
                 )
             return sem_data
 
-        # ── Query analysis (intent + time_range + entities) ─────────
-        analysis = QueryAnalysis()
-        if self._analyzer:
-            analysis, step_times["analyze"] = await _timed(
-                lambda: self._analyzer.analyze(rewritten)
-            )
-            intent = analysis.intent
-            logger.debug(
-                "Query analysis: intent=%s time_range=%s entities=%d",
-                intent,
-                analysis.time_range.start if analysis.time_range else None,
-                len(analysis.entities),
-            )
-
-        # ── Resolve time_range (regex → LLM analysis → user-provided) ───
-        time_range = self._resolve_time_range(input)
-        if not time_range and analysis.time_range:
-            time_range = analysis.time_range
+        # ── Resolve time_range (analyzer → regex → user-provided) ────
+        # Analyzer-provided time_range takes precedence (LLM understands
+        # temporal intent better than regexes).
+        time_range = analysis.time_range or self._resolve_time_range(input)
         if time_range:
             logger.debug("Time range: %s → %s", time_range.start, time_range.end)
 
@@ -941,7 +1037,7 @@ class QueryPipeline:
             query_embedding,
             time_range,
             intent=intent,
-            rewritten_question=rewritten,
+            rewritten_question=input.question,
             entities=analysis.entities if analysis.entities else None,
             analysis=analysis,
         )
@@ -953,51 +1049,9 @@ class QueryPipeline:
         # ── System prompt with language + temporal addendum + today's date ─
         lang = analysis.language or _detect_language(input.question)
         today_str = now().strftime("%Y-%m-%d")
-        if lang == "en":
-            system_prompt = (
-                "You are a deep-research assistant. "
-                "Answer the question based ON THE PROVIDED CONTEXT. "
-                "Your answer MUST include: "
-                "(1) a concise summary at the beginning; "
-                "(2) detailed analysis of each relevant aspect, "
-                "with specific examples from the context; "
-                "(3) explanation of connections between ideas; "
-                "(4) an overall conclusion at the end. "
-                "Cite sources using [N]. "
-                "If the context is insufficient, clearly state which parts "
-                "are missing rather than fabricating. "
-                "Be thorough and concise, not superficial.\n\n"
-                f"IMPORTANT: Today is {today_str}. "
-                "When answering, you MUST include specific dates (day-month-year) "
-                "for all information. "
-                "DO NOT use relative terms like 'recently', 'a few months ago'. "
-                "Always cite exact dates from the provided context."
-            )
-        else:
-            system_prompt = (
-                "Bạn là một trợ lý nghiên cứu chuyên sâu. "
-                "Hãy trả lời câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
-                "Câu trả lời phải bao gồm: "
-                "(1) một câu tóm tắt ngắn gọn ở đầu; "
-                "(2) phân tích chi tiết từng khía cạnh liên quan, "
-                "kèm ví dụ cụ thể từ ngữ cảnh; "
-                "(3) giải thích mối liên hệ giữa các ý; "
-                "(4) kết luận tổng thể ở cuối. "
-                "Trích dẫn nguồn bằng [N]. "
-                "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
-                "thay vì bịa đặt. "
-                "Hãy trả lời đầy đủ, súc tích nhưng không sơ xài.\n\n"
-                f"LƯU Ý QUAN TRỌNG: Hôm nay là {today_str}. "
-                "Khi trả lời, PHẢI ghi rõ ngày tháng năm cụ thể cho mọi thông tin. "
-                "KHÔNG được dùng từ tương đối như 'gần đây', 'mới đây', "
-                "'cách đây vài tháng', 'trong thời gian gần đây'. "
-                "Luôn trích dẫn ngày tháng chính xác từ ngữ cảnh được cung cấp."
-            )
-        system_prompt += _temporal_addendum(intent, language=lang)
+        system_prompt = _build_synthesis_prompt(lang, today_str, intent)
 
         messages = [{"role": "system", "content": system_prompt}]
-        for h in (input.chat_history or [])[-6:]:
-            messages.append({"role": h["role"], "content": h["content"]})
         messages.append(
             {
                 "role": "user",
@@ -1132,19 +1186,63 @@ class QueryPipeline:
             return
 
         try:
-            # ── Query rewrite (resolve pronouns from chat history) ──
-            rewritten = input.question
-            if self._rewriter and input.chat_history:
-                rewritten, step_times["rewrite"] = await _timed(
-                    lambda: self._rewriter.rewrite(input.question, input.chat_history)
+            # ── Guardrail + Intent analysis (single LLM call) ──────────
+            analysis = GuardrailAnalysis()
+            if self._analyzer:
+                analysis, step_times["analyze"] = await _timed(
+                    lambda: self._analyzer.analyze(input.question)
                 )
-                if rewritten != input.question:
-                    logger.debug(
-                        "Stream: question rewritten: %r → %r", input.question[:80], rewritten[:80]
-                    )
 
+                # Guardrail rejection
+                if not analysis.allowed:
+                    reject_answer = (
+                        analysis.reason
+                        or "Xin lỗi, tôi chỉ có thể trả lời các câu hỏi về "
+                        "kinh tế, tài chính, chứng khoán, và đầu tư."
+                    )
+                    yield {
+                        "type": "complete",
+                        "data": {
+                            "answer": reject_answer,
+                            "citations": [],
+                            "sources_used": [],
+                            "tokens_used": 0,
+                            "cache_hit": False,
+                            "rejected": True,
+                        },
+                    }
+                    inc_counter("query_total", {"status": "rejected", "cache": "n/a"})
+                    if telemetry and root_span:
+                        await telemetry.end_span(
+                            span=root_span,
+                            outputs={
+                                "answer_length": len(reject_answer),
+                                "answer": reject_answer,
+                            },
+                            metadata={
+                                "allowed": False,
+                                "reason": analysis.reason,
+                                "question": input.question,
+                                "total_latency_ms": round(
+                                    sum(step_times.values()) * 1000, 2
+                                ),
+                            },
+                        )
+                    return
+
+                intent = analysis.intent
+                logger.debug(
+                    "Stream guardrail: allowed=%s intent=%s time_range=%s emb_text_len=%d",
+                    analysis.allowed,
+                    intent,
+                    analysis.time_range.start if analysis.time_range else None,
+                    len(analysis.embedding_text),
+                )
+
+            # Embedding with analyzer-optimised text
+            embed_text = analysis.embedding_text or input.question
             query_embedding, step_times["embed"] = await _timed(
-                lambda: self._embedder.embed(rewritten),
+                lambda: self._embedder.embed(embed_text),
             )
 
             # ── P2: semantic cache for stream endpoint ──────────────────
@@ -1169,26 +1267,10 @@ class QueryPipeline:
                     )
                 return
 
-            # ── Query analysis (intent + time_range + entities) ──────
-            analysis = QueryAnalysis()
-            if self._analyzer:
-                analysis, step_times["analyze"] = await _timed(
-                    lambda: self._analyzer.analyze(rewritten)
-                )
-                intent = analysis.intent
-                logger.debug(
-                    "Stream: query analysis: intent=%s time_range=%s",
-                    intent,
-                    analysis.time_range.start if analysis.time_range else None,
-                )
-
-            # ── Resolve time_range ──────────────────────────────────
-            async def _resolve_time():
-                return await self._resolve_time_range_async(input)
-
-            time_range, step_times["time_resolution"] = await _timed(_resolve_time)
-            if not time_range and analysis.time_range:
-                time_range = analysis.time_range
+            # ── Resolve time_range (analyzer → regex → user-provided) ────
+            # Analyzer-provided time_range takes precedence (LLM understands
+            # temporal intent better than regexes).
+            time_range = analysis.time_range or self._resolve_time_range(input)
             if time_range:
                 logger.debug("Extracted time_range: %s → %s", time_range.start, time_range.end)
 
@@ -1198,7 +1280,7 @@ class QueryPipeline:
                 query_embedding,
                 time_range,
                 intent=intent,
-                rewritten_question=rewritten,
+                rewritten_question=input.question,
                 entities=analysis.entities if analysis.entities else None,
                 analysis=analysis,
             )
@@ -1210,51 +1292,9 @@ class QueryPipeline:
 
             lang_stream = analysis.language or _detect_language(input.question)
             today_str_stream = now().strftime("%Y-%m-%d")
-            if lang_stream == "en":
-                system_prompt = (
-                    "You are a deep-research assistant. "
-                    "Answer the question based ON THE PROVIDED CONTEXT. "
-                    "Your answer MUST include: "
-                    "(1) a concise summary at the beginning; "
-                    "(2) detailed analysis of each relevant aspect, "
-                    "with specific examples from the context; "
-                    "(3) explanation of connections between ideas; "
-                    "(4) an overall conclusion at the end. "
-                    "Cite sources using [N]. "
-                    "If the context is insufficient, clearly state which parts "
-                    "are missing rather than fabricating. "
-                    "Be thorough and concise, not superficial.\n\n"
-                    f"IMPORTANT: Today is {today_str_stream}. "
-                    "When answering, you MUST include specific dates (day-month-year) "
-                    "for all information. "
-                    "DO NOT use relative terms like 'recently', 'a few months ago'. "
-                    "Always cite exact dates from the provided context."
-                )
-            else:
-                system_prompt = (
-                    "Bạn là một trợ lý nghiên cứu chuyên sâu. "
-                    "Hãy trả lời câu hỏi dựa TRÊN NGỮ CẢNH được cung cấp. "
-                    "Câu trả lời phải bao gồm: "
-                    "(1) một câu tóm tắt ngắn gọn ở đầu; "
-                    "(2) phân tích chi tiết từng khía cạnh liên quan, "
-                    "kèm ví dụ cụ thể từ ngữ cảnh; "
-                    "(3) giải thích mối liên hệ giữa các ý; "
-                    "(4) kết luận tổng thể ở cuối. "
-                    "Trích dẫn nguồn bằng [N]. "
-                    "Nếu ngữ cảnh không đủ, hãy nêu rõ phần nào chưa có thông tin "
-                    "thay vì bịa đặt. "
-                    "Hãy trả lời đầy đủ, súc tích nhưng không sơ xài.\n\n"
-                    f"LƯU Ý QUAN TRỌNG: Hôm nay là {today_str_stream}. "
-                    "Khi trả lời, PHẢI ghi rõ ngày tháng năm cụ thể cho mọi thông tin. "
-                    "KHÔNG được dùng từ tương đối như 'gần đây', 'mới đây', "
-                    "'cách đây vài tháng', 'trong thời gian gần đây'. "
-                    "Luôn trích dẫn ngày tháng chính xác từ ngữ cảnh được cung cấp."
-                )
-            system_prompt += _temporal_addendum(intent, language=lang_stream)
+            system_prompt = _build_synthesis_prompt(lang_stream, today_str_stream, intent)
 
             stream_messages = [{"role": "system", "content": system_prompt}]
-            for h in (input.chat_history or [])[-6:]:
-                stream_messages.append({"role": h["role"], "content": h["content"]})
             stream_messages.append(
                 {
                     "role": "user",

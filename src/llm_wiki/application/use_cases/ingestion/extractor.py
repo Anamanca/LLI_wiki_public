@@ -96,10 +96,23 @@ def _parse_vtt_seconds(h: str, m: str, s: str, ms: str) -> float:
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
 
 
+# Regex to strip inline VTT formatting tags: <00:00:01.234><c>text</c>
+_VTT_INLINE_TAG_RE = re.compile(r"<\d{2}:\d{2}:\d{2}\.\d{3}>")
+_VTT_C_TAG_RE = re.compile(r"</?c>")
+
+
+def _clean_vtt_text_line(line: str) -> str:
+    """Strip inline VTT timestamp markers and <c> tags from a text line."""
+    line = _VTT_INLINE_TAG_RE.sub("", line)
+    line = _VTT_C_TAG_RE.sub("", line)
+    return line.strip()
+
+
 def parse_vtt(content: str) -> list[TranscriptSegment]:
     """Parse VTT subtitle content into a list of timed segments.
 
     Handles WebVTT header lines, style blocks, and timestamped cues.
+    Strips inline VTT formatting tags (<c>, timestamps) from text lines.
     """
     segments: list[TranscriptSegment] = []
     lines = content.splitlines()
@@ -129,13 +142,16 @@ def parse_vtt(content: str) -> list[TranscriptSegment]:
         if match:
             # Save previous cue
             if in_cue and current_text_lines:
-                segments.append(
-                    TranscriptSegment(
-                        start=current_start,
-                        end=current_end,
-                        text=" ".join(current_text_lines).strip(),
+                text = " ".join(current_text_lines).strip()
+                text = _clean_vtt_text_line(text)
+                if text:
+                    segments.append(
+                        TranscriptSegment(
+                            start=current_start,
+                            end=current_end,
+                            text=text,
+                        )
                     )
-                )
             current_start = _parse_vtt_seconds(*match.groups()[:4])
             current_end = _parse_vtt_seconds(*match.groups()[4:])
             current_text_lines = []
@@ -145,13 +161,16 @@ def parse_vtt(content: str) -> list[TranscriptSegment]:
 
         if line == "":
             if in_cue and current_text_lines:
-                segments.append(
-                    TranscriptSegment(
-                        start=current_start,
-                        end=current_end,
-                        text=" ".join(current_text_lines).strip(),
+                text = " ".join(current_text_lines).strip()
+                text = _clean_vtt_text_line(text)
+                if text:
+                    segments.append(
+                        TranscriptSegment(
+                            start=current_start,
+                            end=current_end,
+                            text=text,
+                        )
                     )
-                )
             in_cue = False
             current_text_lines = []
             i += 1
@@ -163,13 +182,16 @@ def parse_vtt(content: str) -> list[TranscriptSegment]:
 
     # Don't miss the final cue
     if in_cue and current_text_lines:
-        segments.append(
-            TranscriptSegment(
-                start=current_start,
-                end=current_end,
-                text=" ".join(current_text_lines).strip(),
+        text = " ".join(current_text_lines).strip()
+        text = _clean_vtt_text_line(text)
+        if text:
+            segments.append(
+                TranscriptSegment(
+                    start=current_start,
+                    end=current_end,
+                    text=text,
+                )
             )
-        )
 
     return segments
 
@@ -180,12 +202,13 @@ def parse_vtt(content: str) -> list[TranscriptSegment]:
 
 
 def _build_ytdlp_base_args() -> list[str]:
-    """yt-dlp base args with anti-bot flags + cookies (shared by all calls)."""
-    base = [
-        "yt-dlp",
-        "--impersonate", "chrome:windows-10",
-        "--remote-components", "ejs:github",
-    ]
+    """yt-dlp base args with cookies + impersonation (shared by all calls)."""
+    base = ["yt-dlp"]
+
+    # TLS fingerprint impersonation — pretend to be Chrome on Android.
+    # curl_cffi 0.15.0 is REQUIRED (0.16.0 API is incompatible with yt-dlp 2026.07.04).
+    base = base + ["--impersonate", "chrome-131:android-14"]
+
     cookie_file = _find_cookie_file()
     if cookie_file:
         base = base + ["--cookies", cookie_file]
@@ -201,8 +224,6 @@ async def _run_ytdlp(args: list[str], timeout: float = 300.0) -> str:
 
     # NOTE: yt-dlp enables deno by default. Do NOT pass --js-runtimes "deno,node"
     #       (that is treated as one runtime named "deno,node" and silently ignored).
-    # --impersonate chrome:windows-10 + curl_cffi bypass YouTube anti-bot detection.
-    # --remote-components ejs:github downloads the JS challenge solver script.
     full_args = _build_ytdlp_base_args() + args
 
     proc = await asyncio.create_subprocess_exec(
@@ -223,31 +244,59 @@ async def _run_ytdlp(args: list[str], timeout: float = 300.0) -> str:
             _set_yt_cooldown()
         raise RuntimeError(f"yt-dlp exited {proc.returncode}: {err_text}")
 
+    # Successful call — reset adaptive backoff counter
+    _clear_yt_cooldown()
     return stdout.decode("utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------
 # YouTube rate-limit cooldown — shared across workers via file on volume
 # ---------------------------------------------------------------------------
+# Uses adaptive exponential backoff: first hit = short cooldown (2 min),
+# consecutive hits scale up to 10 min max.  A successful request resets the
+# backoff counter.  Random jitter prevents thundering-herd between workers.
 
 _COOLDOWN_FILE = Path(os.environ.get("DATA_DIR", "/app/data")) / "transcripts" / ".yt_cooldown"
 
+# Adaptive backoff: [2, 4, 8, 10, 10, ...] minutes
+_BACKOFF_SEQUENCE = (2 * 60, 4 * 60, 8 * 60, 10 * 60)
+_COOLDOWN_JITTER_MAX = 120  # seconds (0-2 min, reduced from 5 min — impersonation helps)
+
 
 def _set_yt_cooldown() -> None:
-    """Mark YouTube as rate-limited. All workers will pause before next yt-dlp call."""
-    cooldown_until = time.time() + 600  # 10 minutes
+    """Mark YouTube as rate-limited with adaptive backoff.
+
+    Reads the current backoff level from the cooldown file (if any),
+    increments it, and writes the new cooldown.
+    Successful requests reset the counter (see _clear_yt_cooldown).
+    """
+    level = 0
+    if _COOLDOWN_FILE.exists():
+        try:
+            raw = _COOLDOWN_FILE.read_text().strip()
+            # format: "<cooldown_until_unix> <backoff_level>"
+            parts = raw.split()
+            if len(parts) == 2:
+                level = min(int(parts[1]) + 1, len(_BACKOFF_SEQUENCE) - 1)
+        except (ValueError, OSError):
+            pass
+
+    duration = _BACKOFF_SEQUENCE[level]
+    cooldown_until = time.time() + duration
     _COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _COOLDOWN_FILE.write_text(str(int(cooldown_until)))
+    _COOLDOWN_FILE.write_text(f"{int(cooldown_until)} {level}")
     logger.warning(
-        "YouTube rate-limited — cooldown until %s (10 min)",
-        datetime.fromtimestamp(cooldown_until),
+        "YouTube rate-limited — cooldown until %s (level %d, %ds)",
+        datetime.fromtimestamp(cooldown_until), level, duration,
     )
 
 
-# Per-worker random jitter after cooldown expires — prevents thundering herd:
-# if both workers wake simultaneously they hit YouTube at the same instant
-# and trigger another 429, creating a never-ending lockstep loop.
-_COOLDOWN_JITTER_MAX = 300  # seconds (0-5 min extra delay per worker)
+def _clear_yt_cooldown() -> None:
+    """Reset cooldown after a successful request (backoff counter → 0)."""
+    try:
+        _COOLDOWN_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 async def _wait_yt_cooldown() -> None:
@@ -260,7 +309,8 @@ async def _wait_yt_cooldown() -> None:
         if _COOLDOWN_FILE.exists():
             content = _COOLDOWN_FILE.read_text().strip()
             if content:
-                cooldown_until = float(content)
+                parts = content.split()
+                cooldown_until = float(parts[0])
                 remaining = cooldown_until - time.time()
                 if remaining > 0:
                     jitter = random.randint(0, _COOLDOWN_JITTER_MAX)
@@ -571,20 +621,8 @@ async def _transcribe_audio_whisper(
         language=language,
         duration_seconds=duration,
         segments=segments,
-        raw_text=raw_text[:100_000],
+        raw_text=raw_text,
     )
-
-
-async def transcribe_via_gpu(
-    video_id: str,
-    video_url: str,
-) -> Transcript:
-    """GPU-accelerated faster-whisper transcription (CUDA, float16)."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        return await _transcribe_audio_whisper(
-            video_id, video_url, tmpdir,
-            device="cuda", compute_type="float16",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -721,7 +759,7 @@ async def extract_transcript(
             language=language,
             duration_seconds=transcript_duration,
             segments=segments,
-            raw_text=raw_text[:100_000],
+            raw_text=raw_text,
         )
         _save_transcript_json(transcript)
 

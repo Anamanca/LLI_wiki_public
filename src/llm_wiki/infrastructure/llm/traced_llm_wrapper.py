@@ -12,8 +12,19 @@ from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter
 
 
 def _redacted_messages(messages: list[dict]) -> list[dict]:
-    """Store message roles and rough lengths; avoid logging full content."""
-    return [{"role": m.get("role"), "content_length": len(m.get("content", ""))} for m in messages]
+    """Store full message content for debugging synthesis quality in LangSmith.
+
+    Previously only stored roles + content_length, which made it impossible to
+    inspect the system prompt and retrieved context from the LangSmith UI.
+    Full content is essential for debugging RAG synthesis quality.
+    """
+    return [
+        {
+            "role": m.get("role"),
+            "content": m.get("content", ""),
+        }
+        for m in messages
+    ]
 
 
 class TracedLLMWrapper(LLMClientPort):

@@ -5,7 +5,8 @@ from uuid import UUID
 
 @dataclass
 class WorkerHeartbeat:
-    worker_id: int
+    worker_id: str
+    worker_type: str | None = None
     status: str = "idle"
     current_job_id: str | None = None
     current_stage: str | None = None

@@ -25,12 +25,14 @@ from llm_wiki.application.use_cases.query.summarize_time_range import (
 )
 from llm_wiki.infrastructure.embedding.traced_embedding_wrapper import TracedEmbeddingWrapper
 from llm_wiki.infrastructure.llm.answer_evaluator_adapter import LLMAnswerEvaluatorAdapter
-from llm_wiki.infrastructure.llm.query_analyzer_adapter import LLMQueryAnalyzerAdapter
+from llm_wiki.infrastructure.llm.guardrail_analyzer_adapter import LLMGuardrailAnalyzerAdapter
 from llm_wiki.infrastructure.llm.query_expander_adapter import LLMQueryExpanderAdapter
 from llm_wiki.infrastructure.llm.query_rewriter_adapter import LLMQueryRewriterAdapter
 from llm_wiki.infrastructure.llm.reranker_adapter import LLMRerankerAdapter
+from llm_wiki.infrastructure.llm.traced_guardrail_analyzer_wrapper import (
+    TracedGuardrailAnalyzerWrapper,
+)
 from llm_wiki.infrastructure.llm.traced_llm_wrapper import TracedLLMWrapper
-from llm_wiki.infrastructure.llm.traced_query_analyzer_wrapper import TracedQueryAnalyzerWrapper
 from llm_wiki.infrastructure.llm.traced_query_rewriter_wrapper import TracedQueryRewriterWrapper
 from llm_wiki.infrastructure.persistence.postgres.repositories.event_repository import (
     PostgresEventRepository,
@@ -83,12 +85,13 @@ def _build_adapters(db: AsyncSession):
     keyword_search = TracedKeywordSearchWrapper(TsVectorSearchAdapter(db), telemetry)
     event_search = TracedEventSearchWrapper(PgVectorEventSearchAdapter(db), telemetry)
 
-    rewriter = TracedQueryRewriterWrapper(
+    rewriter = TracedQueryRewriterWrapper(  # kept but no longer wired — backward compat
         LLMQueryRewriterAdapter(llm_raw),
         telemetry,
     )
-    analyzer = TracedQueryAnalyzerWrapper(
-        LLMQueryAnalyzerAdapter(llm_raw),
+    # New unified guardrail + intent + per-tool search input analyzer
+    guardrail_analyzer = TracedGuardrailAnalyzerWrapper(
+        LLMGuardrailAnalyzerAdapter(llm_raw),
         telemetry,
     )
 
@@ -118,7 +121,7 @@ def _build_adapters(db: AsyncSession):
         cache=cache,
         telemetry=telemetry,
         rewriter=rewriter,
-        analyzer=analyzer,
+        analyzer=guardrail_analyzer,
         event_search=event_search,
         graph_rag=graph_rag,
     )
@@ -137,7 +140,7 @@ def _build_adapters(db: AsyncSession):
         cache=cache,
         telemetry=telemetry,
         rewriter=rewriter,
-        analyzer=analyzer,
+        analyzer=guardrail_analyzer,
     )
 
     return {

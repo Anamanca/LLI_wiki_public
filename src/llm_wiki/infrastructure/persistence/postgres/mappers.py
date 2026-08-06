@@ -151,6 +151,7 @@ class PageSectionMapper:
             section_order=m.section_order or 0,
             title=m.title,
             content_markdown=m.content_markdown,
+            keywords=m.keywords or [],
             section_vector=m.section_vector,
             fts_vector=m.fts_vector if include_fts else None,
             source_ref=m.source_ref,
@@ -165,6 +166,7 @@ class PageSectionMapper:
         target.section_order = d.section_order
         target.title = d.title
         target.content_markdown = d.content_markdown
+        target.keywords = d.keywords
         target.section_vector = d.section_vector
         target.source_ref = d.source_ref
         return target

@@ -178,6 +178,9 @@ class PageSection(Base):
     title = Column(String(1024), nullable=True)
     content_markdown = Column(Text, nullable=True)
     section_vector = Column(Vector(1024), nullable=True)
+    keywords = Column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
     fts_vector = deferred(
         Column(
             TSVECTOR,
@@ -353,7 +356,8 @@ class ScanLog(Base):
 class WorkerHeartbeat(Base):
     __tablename__ = "worker_heartbeats"
 
-    worker_id = Column(Integer, primary_key=True)
+    worker_id = Column(String(255), primary_key=True)
+    worker_type = Column(String(50), nullable=True)
     status = Column(String(20), nullable=False, default="idle")
     current_job_id = Column(UUID(as_uuid=True), nullable=True)
     current_stage = Column(String(50), nullable=True)

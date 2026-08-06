@@ -35,6 +35,7 @@ class TracedEmbeddingWrapper(EmbeddingServicePort):
             kind="embedding",
             inputs={
                 "model": self._model,
+                "text": text,
                 "text_length": len(text),
             },
             parent=self._parent_span,
