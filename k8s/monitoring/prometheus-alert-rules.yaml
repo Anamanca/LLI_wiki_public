@@ -34,7 +34,7 @@ data:
           runbook: "Check LLM provider status and Ollama embedding latency"
 
       - alert: WorkerStalled
-        expr: (time() - timestamp(worker_heartbeat_age_seconds)) > 120
+        expr: (time() - worker_heartbeat_age_seconds) > 120
         for: 2m
         labels:
           severity: critical

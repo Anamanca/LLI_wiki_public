@@ -17,6 +17,7 @@ spec:
         prometheus.io/port: "8101"
         prometheus.io/path: "/metrics"
     spec:
+      terminationGracePeriodSeconds: 120
       initContainers:
       - name: wait-for-postgres
         image: busybox:1.36
@@ -28,92 +29,19 @@ spec:
           until nc -z postgres.llm-wiki.svc.cluster.local 5432; do sleep 3; done
           echo "Postgres ready"
       containers:
-      - name: api
-        image: 32_llm_wiki_clean_arch-backend:latest
-        imagePullPolicy: IfNotPresent
-        command: ["uvicorn", "llm_wiki.main:app", "--host", "0.0.0.0", "--port", "8100"]
-        env:
-        - name: TZ
-          value: Asia/Ho_Chi_Minh
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: llm-wiki-secrets
-              key: DATABASE_URL
-        - name: MINIO_ENDPOINT
-          value: minio.llm-wiki.svc.cluster.local:9000
-        - name: MINIO_ACCESS_KEY
-          valueFrom:
-            secretKeyRef:
-              name: llm-wiki-secrets
-              key: MINIO_ACCESS_KEY
-        - name: MINIO_SECRET_KEY
-          valueFrom:
-            secretKeyRef:
-              name: llm-wiki-secrets
-              key: MINIO_SECRET_KEY
-        - name: REDIS_HOST
-          value: redis.llm-wiki.svc.cluster.local
-        - name: REDIS_PORT
-          value: "6379"
-        - name: OLLAMA_HOST
-          value: http://ollama.llm-wiki.svc.cluster.local:11434
-        - name: YOUTUBE_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: llm-wiki-secrets
-              key: YOUTUBE_API_KEY
-        - name: GEMINI_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: llm-wiki-secrets
-              key: GEMINI_API_KEY
-        - name: LLM_PROVIDER
-          value: auto
-        - name: OPENCODE_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: llm-wiki-secrets
-              key: OPENCODE_API_KEY
-        - name: OPENCODE_BASE_URL
-          value: https://opencode.ai/zen/go/v1
-        - name: OPENCODE_PRIMARY_MODEL
-          value: deepseek-v4-flash
-        - name: OPENCODE_FALLBACK_MODEL
-          value: deepseek-v4-flash
-        ports:
-        - containerPort: 8100
-        readinessProbe:
-          httpGet:
-            path: /api/health
-            port: 8100
-          initialDelaySeconds: 30
-          periodSeconds: 15
-        livenessProbe:
-          httpGet:
-            path: /api/health
-            port: 8100
-          initialDelaySeconds: 60
-          periodSeconds: 30
-        volumeMounts:
-        - name: transcripts
-          mountPath: /app/data/transcripts
-        - name: whisper-cache
-          mountPath: /root/.cache/huggingface
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "250m"
       - name: cpu-worker
-        image: 32_llm_wiki_clean_arch-backend:latest
+        image: worker:latest
         imagePullPolicy: IfNotPresent
+        command: ["python3", "-m", "llm_wiki.infrastructure.entrypoints.cpu_worker"]
         env:
         - name: TZ
           value: Asia/Ho_Chi_Minh
         - name: WORKER_TYPE
           value: cpu
         - name: WORKER_ID
-          value: "1"
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         - name: SERVICE_NAME
           value: cpu-worker
         - name: HEALTH_PORT
@@ -198,11 +126,7 @@ spec:
               name: llm-wiki-config
               key: LOG_FORMAT
         - name: LOG_LEVEL
-          valueFrom:
-            configMapKeyRef:
-              name: llm-wiki-config
-              key: LOG_LEVEL
-        command: ["python3", "-m", "llm_wiki.infrastructure.entrypoints.cpu_worker"]
+          value: INFO
         ports:
         - containerPort: 8101
         startupProbe:
@@ -225,9 +149,11 @@ spec:
           mountPath: /app/data/transcripts
         - name: whisper-cache
           mountPath: /root/.cache/huggingface
+        - name: worker-src
+          mountPath: /app/src
         resources:
           requests:
-            cpu: "4"
+            cpu: "2"
             memory: 6Gi
           limits:
             cpu: "4"
@@ -241,3 +167,7 @@ spec:
         hostPath:
           path: /data/whisper-cache
           type: DirectoryOrCreate
+      - name: worker-src
+        hostPath:
+          path: /code/backend-src
+          type: Directory

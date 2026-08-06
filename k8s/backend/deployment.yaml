@@ -41,7 +41,7 @@ spec:
           echo "Redis ready"
       containers:
       - name: backend
-        image: 32_llm_wiki_clean_arch-backend:latest
+        image: backend:latest
         imagePullPolicy: IfNotPresent
         command: ["uvicorn", "llm_wiki.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
         env:
