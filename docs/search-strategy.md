@@ -2,7 +2,7 @@
 
 Tài liệu mô tả toàn bộ chiến lược tìm kiếm và sinh câu trả lời khi user đặt câu hỏi trên Chat GUI.
 
-**Ngày phân tích:** 2026-07-29
+**Ngày cập nhật:** 2026-08-05
 **Phiên bản:** LLM Wiki backend v2.2.0 / frontend v3.0.1
 
 ---
@@ -22,7 +22,7 @@ Route: `POST /api/query` và `POST /api/query/stream` → chọn pipeline dựa 
 
 ---
 
-## Toàn bộ Flow xử lý (12 bước)
+## Toàn bộ Flow xử lý (11 bước)
 
 ```
 User đặt câu hỏi trên Chat GUI
@@ -36,76 +36,82 @@ User đặt câu hỏi trên Chat GUI
                          │ MISS
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│ 2. Query Rewriting (chỉ khi có chat history)         │
-│    LLM phân tích 6 lượt chat gần nhất                │
-│    → Giải quyết đại từ, tham chiếu ngầm              │
-│    VD: "Thế còn giá vàng hôm qua thì sao?"           │
-│        → "Giá vàng ngày 28/07/2026"                  │
+│ 2. Embed câu hỏi → vector                           │
 └────────────────────────┬─────────────────────────────┘
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│ 3. Embed câu hỏi → vector                           │
-└────────────────────────┬─────────────────────────────┘
-                         ▼
-┌──────────────────────────────────────────────────────┐
-│ 4. Semantic Cache Check                              │
+│ 3. Semantic Cache Check                              │
 │    Cosine similarity ≥ 0.80 vs stored embeddings     │
 └────────────────────────┬─────────────────────────────┘
                          │ MISS
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│ 5. Query Analysis (LLMQueryAnalyzerAdapter)          │
-│    1 lightweight LLM call → tận dụng triệt để:        │
+│ 4. Guardrail + Intent Analysis                       │
+│    (LLMGuardrailAnalyzerAdapter — 1 LLM call)        │
 │                                                      │
-│    Intent Detection (5 loại):                        │
+│    0. Guardrail: Domain check (kinh tế/tài chính)    │
+│       • allowed=true → tiếp tục                      │
+│       • allowed=false → trả về lý do từ chối         │
+│                                                      │
+│    1. Intent Detection (6 loại):                     │
 │    • current_state  — tình hình hiện tại             │
-│    • historical     — lịch sử                        │
-│    • timeline       — dòng thời gian                 │
+│    • historical     — mốc thời gian cụ thể           │
+│    • timeline       — diễn biến theo thời gian       │
 │    • comparative    — so sánh                        │
+│    • factual_listing — liệt kê, danh sách            │
 │    • general        — chung chung                    │
 │                                                      │
-│    Time Range Extraction:                            │
-│    • 30+ regex pattern (Vi + En)                     │
-│    • LLM fallback nếu regex miss                     │
+│    2. Time Range Extraction:                         │
+│    • LLM phân tích dựa trên ngày hôm nay             │
+│    • Prompt injects: "Hôm nay là YYYY-MM-DD"         │
+│    • Ngăn LLM hallucinate sai năm (VD: 2025 thay vì 2026) │
 │                                                      │
-│    Entity Extraction:                                │
+│    3. Entity Extraction:                             │
 │    • stock_ticker, commodity, location,              │
 │      macro_indicator, person, organization, policy   │
 │                                                      │
-│    Keyword Extraction (MỚI — dùng cho full-text):     │
-│    • keywords: 3-8 từ khóa quan trọng (đã bỏ stopwords)│
-│    • key_phrases: 1-3 cụm từ ghép cần match chính xác│
-│    • search_query: chuỗi OR-delimited bilingual       │
-│      cho PostgreSQL to_tsquery                        │
-│      VD: "vàng | gold | giá vàng | kim loại quý"     │
+│    4. Per-Tool Search Inputs (MỚI — riêng cho từng tool):│
+│    • embedding_text: structured format               │
+│      "query: <câu semantic cho bge-m3>                │
+│       keywords: <từ khóa VI> | <từ khóa EN>"         │
+│      → Dùng chung cho vector_search & event_search   │
+│    • page_search_query: OR-delimited bilingual       │
+│      → Dùng cho keyword_search trên page_sections    │
+│      Tập trung thuật ngữ chuyên ngành, phân tích     │
+│    • event_search_query: OR-delimited bilingual      │
+│      → Dùng cho event_keyword_search                 │
+│      Tập trung tên riêng, sự kiện cụ thể, số liệu    │
 │                                                      │
-│    Sub-Questions:                                    │
+│    5. Sub-Questions:                                 │
 │    • Nếu câu hỏi phức tạp → 2-4 câu hỏi con          │
 │    • Dùng trong decompose strategy (Reflective)       │
 │                                                      │
-│    Language Detection:                               │
+│    6. Language Detection:                            │
 │    • "vi" hoặc "en" — quyết định ngôn ngữ system prompt│
 │    • Regex fallback: Vietnamese diacritics → "vi"     │
-│      (zero-token, chạy ngay cả khi analyzer lỗi)     │
 └────────────────────────┬─────────────────────────────┘
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│ 6. Multi-Stream Retrieval (5 nguồn, song song)      │
+│ 5. Multi-Stream Retrieval (4 nguồn, song song)      │
 │                                                      │
 │   ┌────────────────┐ ┌────────────────┐              │
 │   │ PgVector       │ │ TsVector       │              │
 │   │ (dense vector) │ │ (sparse keyword)│              │
 │   │ cosine distance│ │ ts_rank         │              │
 │   │ on page_sections│ │ on page_sections│              │
-│   │                │ │ Input: search_query│            │
-│   │                │ │ (từ analyzer)    │            │
+│   │                │ │ Input: page_    │              │
+│   │ Input:         │ │ search_query    │              │
+│   │ embedding_text │ │ (từ analyzer)   │              │
+│   │ (từ analyzer)  │ │                │              │
 │   └───────┬────────┘ └───────┬────────┘              │
 │           │                  │                        │
 │   ┌───────┴──────────────────┴────────┐              │
 │   │        Event Search                │              │
 │   │  • Dense (pgvector on observations)│              │
+│   │    Input: embedding_text           │              │
+│   │    (dùng chung với vector search)  │              │
 │   │  • Sparse (tsvector on observations)│            │
-│   │    Input: search_query (từ analyzer)│            │
+│   │    Input: event_search_query       │              │
 │   └───────┬────────────────────────────┘              │
 │           │                                           │
 │   ┌───────┴────────────┐                              │
@@ -115,35 +121,19 @@ User đặt câu hỏi trên Chat GUI
 └────────────────────────┬─────────────────────────────┘
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│ 7. Weighted RRF (Reciprocal Rank Fusion)             │
-│                                                      │
-│    Trọng số thay đổi theo INTENT:                    │
-│                                                      │
-│    Intent         Events  Sections  Keyword  Graph   │
-│    ─────────      ──────  ────────  ───────  ─────   │
-│    current_state  1.0     0.7       0.5/0.3  0.6     │
-│    historical     0.8     0.5       0.5/0.3  0.6     │
-│    timeline       1.0     0.3       0.5/0.3  0.6     │
-│    comparative    0.5     0.8       0.5/0.3  0.6     │
-│    general        0.4     1.0       0.5/0.3  0.6     │
-│                                                      │
-│    Adaptive Recency Decay trong SQL:                 │
-│    EXP(-λ * days_old)                                │
-│    • current_state: λ=0.05  (~14 ngày half-life)    │
-│    • general:       λ=0.01  (~69 ngày)              │
-│    • comparative:   λ=0.005 (~138 ngày)             │
-│    • historical/timeline: λ=0.0 (không decay)       │
+│ 6. Weighted RRF (Reciprocal Rank Fusion)             │
+│    ... (weights by intent, same as before)           │
 └────────────────────────┬─────────────────────────────┘
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│ 8. Diversity Capping                                 │
+│ 7. Diversity Capping                                 │
 │    • Max 5 results / source                          │
 │    • Max 2 results / page                            │
 │    • Chọn top 20 đưa vào context                     │
 └────────────────────────┬─────────────────────────────┘
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│ 9. LLM Reranking ⚠️ Chỉ trong Reflective Pipeline    │
+│ 8. LLM Reranking ⚠️ Chỉ trong Reflective Pipeline    │
 │    • LLM chấm điểm từng doc 0-10                     │
 │    • Xử lý theo batch 15 docs                        │
 │    • Chọn top-K docs tốt nhất                       │
@@ -151,44 +141,24 @@ User đặt câu hỏi trên Chat GUI
 └────────────────────────┬─────────────────────────────┘
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│ 10. LLM Synthesis (generate answer)                  │
+│ 9. LLM Synthesis (generate answer)                  │
 │     • Bilingual system prompt (VI/EN switch theo      │
 │       analysis.language)                              │
 │     • Current date injection                         │
 │     • Intent-specific temporal addendum (VI/EN)       │
 │     • Strict date citation rules                     │
 │     • Streaming SSE: status → token → complete       │
+│     • Full input/output visible in LangSmith          │
+│       (_redacted_messages now stores full content)    │
 └────────────────────────┬─────────────────────────────┘
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│ 11. [Reflective ONLY] Self-Evaluation + Retry        │
-│                                                      │
-│     LLM đánh giá:                                    │
-│     • faithfulness    (0-10, threshold ≥ 7)          │
-│     • completeness    (0-10, threshold ≥ 7)          │
-│     • relevance       (0-10)                         │
-│                                                      │
-│     Nếu dưới threshold → Retry với chiến lược mới:   │
-│     ┌──────────────────────────────────────────┐    │
-│     │ hyde       → Hypothetical Document Embed  │    │
-│     │               LLM sinh đoạn văn giả định  │    │
-│     │               rồi embed để search         │    │
-│     ├──────────────────────────────────────────┤    │
-│     │ decompose  → Chia câu hỏi thành nhiều     │    │
-│     │               sub-queries, merge kết quả  │    │
-│     ├──────────────────────────────────────────┤    │
-│     │ expand     → Thêm synonyms vào keyword    │    │
-│     │               query để mở rộng tìm kiếm   │    │
-│     └──────────────────────────────────────────┘    │
-│                                                      │
-│     • Max 3 lần retry                                │
-│     • Skip rerank nếu top content IDs không đổi      │
-│     • Skip evaluate nếu context không đổi            │
-│     • Penalty nếu answer từ ≤ 1 distinct page        │
+│ 10. [Reflective ONLY] Self-Evaluation + Retry        │
+│     (same as before)                                 │
 └────────────────────────┬─────────────────────────────┘
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│ 12. Save Cache (exact + semantic)                    │
+│ 11. Save Cache (exact + semantic)                    │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -198,47 +168,50 @@ User đặt câu hỏi trên Chat GUI
 
 ### Query Rewriting
 
-- **Port:** `application/ports/search/query_rewriter_port.py`
-- **Adapter:** `infrastructure/llm/query_rewriter_adapter.py`
-- **Khi nào chạy:** Chỉ khi có chat history (≥ 1 lượt trước đó)
-- **Cơ chế:** LLM phân tích 6 lượt chat gần nhất để resolve pronouns, implicit references
-- **Ví dụ:** "Thế còn giá vàng hôm qua thì sao?" → "Giá vàng ngày 28/07/2026"
+- **⚠️ DEPRECATED — đã được merge vào Guardrail Analyzer.**
+- **Port:** `application/ports/search/query_rewriter_port.py` (legacy, kept for backward compat)
+- **Khi nào chạy:** Không còn được wired trong pipeline. Pronoun resolution trước đây chạy riêng nhưng đã được gộp vào prompt của `GuardrailAnalyzerPort`.
+- Pipeline hiện tại không dùng query rewriting — mỗi câu hỏi là độc lập, không có chat history context.
 
-### Query Analysis (Intent + Entities + Time + Keywords + Language)
+### Guardrail + Intent Analysis (Unified — 1 LLM call)
 
-- **Port:** `application/ports/search/query_analyzer_port.py`
-- **Adapter:** `infrastructure/llm/query_analyzer_adapter.py`
-- **1 lightweight LLM call** (`max_tokens=500`, `temperature=0.0`) → output được tận dụng cho nhiều nơi trong pipeline:
+- **Port:** `application/ports/search/guardrail_analyzer_port.py`
+- **Adapter:** `infrastructure/llm/guardrail_analyzer_adapter.py`
+- **1 lightweight LLM call** (`max_tokens=600`, `temperature=0.0`) thay thế old rewrite→analyze chain:
 - **Output đầy đủ:**
-  - **Intent** (5 loại): `current_state`, `historical`, `timeline`, `comparative`, `general` → dùng cho RRF weights, recency decay λ, temporal addendum
-  - **Time range**: ngày bắt đầu/kết thúc (regex pattern + LLM fallback) → SQL WHERE filter
-  - **Entities**: stock_ticker, commodity, location, macro_indicator, person, organization, policy → Graph RAG traversal
-  - **Keywords**: 3-8 từ khóa quan trọng nhất (đã loại bỏ stopwords, bilingual VI+EN) → fallback cho keyword search nếu không có search_query
-  - **Key phrases**: 1-3 cụm từ ghép cần match chính xác → dự phòng cho keyword search
-  - **Search query**: chuỗi OR-delimited bilingual (`"vàng | gold | giá vàng"`) → input chính cho tsvector `to_tsquery` keyword search và event keyword search
-  - **Sub-questions**: 2-4 câu hỏi con nếu câu hỏi phức tạp → dùng trong `decompose` strategy (Reflective), tránh gọi LLM thêm lần nữa
-  - **Language**: `"vi"` hoặc `"en"` → quyết định ngôn ngữ system prompt khi synthesize, `_temporal_addendum()`, và system prompt trong Reflective pipeline
+  - **Guardrail**: `allowed=true/false` — domain check (kinh tế/tài chính), `reason` nếu bị từ chối
+  - **Intent** (6 loại): `current_state`, `historical`, `timeline`, `comparative`, `factual_listing`, `general`
+  - **Time range**: ngày bắt đầu/kết thúc — LLM phân tích dựa trên ngày hôm nay được inject vào prompt
+  - **Entities**: stock_ticker, commodity, location, macro_indicator, person, organization, policy
+  - **embedding_text**: Structured format `"query: <câu semantic> keywords: <từ khóa VI> | <từ khóa EN>"` — dùng chung cho vector_search & event_search. bge-m3 dùng phần "query" để match meaning, phần "keywords" để tăng recall
+  - **page_search_query**: OR-delimited bilingual — input cho tsvector keyword_search trên page_sections. Tập trung thuật ngữ chuyên ngành
+  - **event_search_query**: OR-delimited bilingual — input cho tsvector event_keyword_search trên event_observations. Tập trung tên riêng, sự kiện cụ thể
+  - **Sub-questions**: 2-4 câu hỏi con nếu câu hỏi phức tạp → dùng trong `decompose` strategy
+  - **Language**: `"vi"` hoặc `"en"` → quyết định ngôn ngữ system prompt
 
-### Keyword Extraction & Language Detection
+### Keyword Extraction & Per-Tool Search Inputs
 
-**Keyword extraction** nằm trong cùng 1 LLM call của Query Analysis — không cần thêm LLM call riêng. Prompt yêu cầu LLM:
-- Loại bỏ stopwords tiếng Việt (cho, tôi, biết, những, nào, về, trong, là, có, các, và, của, được, không, để, với, sẽ, ra, này, đã, đang, từ, …)
-- Giữ lại: danh từ riêng, thuật ngữ chuyên ngành, số liệu, địa danh, tên tổ chức
-- Nếu câu hỏi tiếng Việt → thêm bản tiếng Anh của thuật ngữ để search được cả nội dung EN
-- Output `search_query` dùng `|` (OR logic) cho `to_tsquery` — khác với `plainto_tsquery` mặc định (AND logic) dễ bị 0 match khi query dài
+**Thay đổi quan trọng:** Không còn generic keyword blob nữa. Analyzer giờ tạo **3 input riêng biệt** cho 3 loại công cụ tìm kiếm:
+
+1. **embedding_text** (dùng cho vector_search + event_search):
+   - Structured format: `query: ... keywords: ...`
+   - Phần "query": câu semantic chính để bge-m3 match meaning
+   - Phần "keywords": từ khóa bổ trợ VI+EN, chỉ liệt kê, không viết thành câu
+   - Ví dụ: `"query: giá vàng hôm nay cập nhật mới nhất biến động keywords: vàng | gold price | XAU USD"`
+
+2. **page_search_query** (dùng cho keyword_search trên page_sections):
+   - OR-delimited (`|`), tập trung thuật ngữ chuyên ngành, khái niệm phân tích
+   - Ví dụ: `"ngân hàng | bank | lãi suất | tín dụng | room tín dụng | phân tích ngành"`
+
+3. **event_search_query** (dùng cho event_keyword_search trên event_observations):
+   - OR-delimited (`|`), tập trung tên riêng, sự kiện cụ thể, số liệu
+   - Ví dụ: `"VCB | BID | CTG | tăng lãi suất | room tín dụng | NHNN | tăng vốn"`
 
 **Language detection** có 2 tầng:
-1. **Primary:** Analyzer LLM output `language` field — chính xác, không tốn thêm token
-2. **Fallback:** Regex `_VI_DIACRITICS` (Vietnamese diacritics) trong `pipeline.py` — zero-token, chạy ngay cả khi analyzer lỗi fallback về `intent="general"`
-   ```python
-   _VI_DIACRITICS = re.compile(r'[àáảãạăắằẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôồốỗổộơớờởỡợùúủũụưứừửữựỳýỷỹỵ]')
-   language = analysis.language or _detect_language(question)
-   ```
+1. **Primary:** Analyzer LLM output `language` field
+2. **Fallback:** Regex `_VI_DIACRITICS` (Vietnamese diacritics) trong `pipeline.py`
 
-**Bilingual system prompt** — không tốn thêm LLM call:
-- `pipeline.py`: `_temporal_addendum(intent, language)` có EN/VI variants
-- `reflective_pipeline.py`: `_INTENT_EN_PROMPTS` dict chứa English variants cho 5 intents; fallback về Vietnamese prompts
-- Switch dựa trên `analysis.language` → zero additional tokens
+**Today's date injection:** Prompt injects `"Hôm nay là {YYYY-MM-DD}"` để ngăn LLM (đặc biệt là deepseek-v4-flash) hallucinate sai năm.
 
 ### Query Expansion
 
@@ -252,23 +225,15 @@ User đặt câu hỏi trên Chat GUI
 
 | # | Stream | Công nghệ | Đối tượng | Input | Trường |
 |---|--------|----------|-----------|-------|--------|
-| 1 | Dense vector | pgvector (cosine distance) | `page_sections` | Question embedding | `section_vector` |
-| 2 | Sparse keyword | tsvector (`to_tsquery`, `ts_rank`) | `page_sections` | `analysis.search_query` (OR-delimited, bilingual) | `fts_vector` |
-| 3 | Event dense | pgvector | `event_observations` | Question embedding | `embedding` |
-| 4 | Event keyword | tsvector | `event_observations` | `analysis.search_query` (OR-delimited, bilingual) | `fts_vector` |
+| 1 | Dense vector | pgvector (cosine distance) | `page_sections` | `analysis.embedding_text` (structured bilingual) | `section_vector` |
+| 2 | Sparse keyword | tsvector (`to_tsquery`, `ts_rank`) | `page_sections` | `analysis.page_search_query` (OR-delimited, domain terms) | `fts_vector` |
+| 3 | Event dense | pgvector | `event_observations` | `analysis.embedding_text` (shared with stream 1) | `embedding` |
+| 4 | Event keyword | tsvector | `event_observations` | `analysis.event_search_query` (OR-delimited, proper nouns) | `fts_vector` |
 | 5 | Graph traversal | Entity→Event→Observation | `event_entity_links` | Detected entities | — |
 
-Tất cả 5 stream chạy **song song**. Graph RAG chỉ kích hoạt nếu entity được detect ở bước Query Analysis.
+Tất cả 5 stream chạy **song song**. Graph RAG chỉ kích hoạt nếu entity được detect.
 
-**Keyword query logic** (`_build_keyword_query()`):
-1. Nếu analyzer trả về `search_query` → dùng trực tiếp (OR logic, `to_tsquery`)
-2. Nếu chỉ có `keywords` → join với ` | ` (OR logic)
-3. Fallback: raw question → `plainto_tsquery` (AND logic, hành vi cũ)
-
-Việc dùng `search_query` từ analyzer thay vì raw question giúp:
-- Loại bỏ stopwords gây 0 match
-- OR logic tăng recall (so với AND của `plainto_tsquery`)
-- Bilingual terms search được cả nội dung tiếng Việt và tiếng Anh
+**Key change from old design:** Stream 1 & 3 share `embedding_text` (không còn embed raw question nữa). Stream 2 dùng `page_search_query` riêng, stream 4 dùng `event_search_query` riêng — mỗi tool có input tối ưu cho loại dữ liệu nó tìm kiếm.
 
 ### Weighted RRF (Reciprocal Rank Fusion)
 
@@ -282,6 +247,7 @@ Công thức RRF: `score = Σ(weight / (k + rank))` với `k=60`.
 | `historical` | 0.8 | 0.5 | 0.5 | 0.3 | 0.6 |
 | `timeline` | **1.0** | 0.3 | 0.5 | 0.3 | 0.6 |
 | `comparative` | 0.5 | 0.8 | 0.5 | 0.3 | 0.6 |
+| `factual_listing` | 0.3 | **1.0** | 0.5 | 0.3 | 0.6 |
 | `general` | 0.4 | **1.0** | 0.5 | 0.3 | 0.6 |
 
 ### Adaptive Recency Decay
@@ -291,7 +257,7 @@ Decay được áp dụng trực tiếp trong SQL query: `score * EXP(-λ * days
 | Intent | λ | Half-life | Ý nghĩa |
 |--------|---|-----------|---------|
 | `current_state` | 0.05 | ~14 ngày | Tin cũ hơn 2 tuần bị giảm 50% trọng số |
-| `general` | 0.01 | ~69 ngày | Tin cũ giảm nhẹ |
+| `general` / `factual_listing` | 0.01 | ~69 ngày | Tin cũ giảm nhẹ |
 | `comparative` | 0.005 | ~138 ngày | Giảm rất ít |
 | `historical` / `timeline` | 0.0 | ∞ | Không decay — tin lịch sử vẫn giá trị |
 
@@ -360,16 +326,18 @@ Chỉ có trong `SelfReflectiveRAGPipeline` (`reasoning_enabled=true`):
 | Config | `config.py` | Settings: reasoning_enabled, reranker_enabled, etc. |
 | Frontend | `frontend/hooks/use-query-stream.ts` | SSE client, 180s timeout |
 | **Ports** | | |
-| Query Analyzer | `application/ports/search/query_analyzer_port.py` | Interface: intent, time_range, entities, keywords, key_phrases, search_query, sub_questions, language |
-| Query Rewriter | `application/ports/search/query_rewriter_port.py` | Interface: resolve pronouns |
-| Query Expander | `application/ports/search/query_expander_port.py` | Interface: sinh synonyms |
+| Guardrail Analyzer | `application/ports/search/guardrail_analyzer_port.py` | **ACTIVE** — unified guardrail + intent + per-tool search inputs |
+| Query Analyzer | `application/ports/search/query_analyzer_port.py` | LEGACY — superseded by guardrail_analyzer_port |
+| Query Rewriter | `application/ports/search/query_rewriter_port.py` | LEGACY — not wired; kept for backward compat |
+| Query Expander | `application/ports/search/query_expander_port.py` | Interface: sinh synonyms (used in reflective pipeline expand strategy) |
 | Reranker | `application/ports/search/reranker_port.py` | Interface: rerank docs |
 | Graph RAG | `application/ports/search/graph_rag_port.py` | Interface: graph traversal |
 | Answer Evaluator | `application/ports/search/answer_evaluator_port.py` | Interface: evaluate answer quality |
 | Event Search | `application/ports/search/event_search_port.py` | Interface: dense + sparse event search |
 | **Adapters** | | |
-| LLM Analyzer | `infrastructure/llm/query_analyzer_adapter.py` | LLM-based: intent, time_range, entities, keywords, key_phrases, search_query, sub_questions, language |
-| LLM Rewriter | `infrastructure/llm/query_rewriter_adapter.py` | LLM-based pronoun resolution |
+| Guardrail Analyzer | `infrastructure/llm/guardrail_analyzer_adapter.py` | **ACTIVE** — unified guardrail+intent+per-tool inputs. Injects today's date |
+| LLM Analyzer | `infrastructure/llm/query_analyzer_adapter.py` | LEGACY — superseded |
+| LLM Rewriter | `infrastructure/llm/query_rewriter_adapter.py` | LEGACY — not wired |
 | LLM Expander | `infrastructure/llm/query_expander_adapter.py` | LLM-based synonym generation |
 | LLM Reranker | `infrastructure/llm/reranker_adapter.py` | LLM-based doc scoring |
 | LLM Evaluator | `infrastructure/llm/answer_evaluator_adapter.py` | LLM-as-judge |
@@ -378,8 +346,9 @@ Chỉ có trong `SelfReflectiveRAGPipeline` (`reasoning_enabled=true`):
 | TsVector | `infrastructure/search/tsvector_adapter.py` | Sparse keyword search |
 | Event Search | `infrastructure/search/event_search_adapter.py` | Dense + sparse event search |
 | **Traced Wrappers** | | |
-| Traced LLM | `infrastructure/llm/traced_llm_wrapper.py` | Spans for all LLM calls |
-| Traced Analyzer | `infrastructure/llm/traced_query_analyzer_wrapper.py` | Spans for query_analyze with keywords, language, sub_questions |
+| Traced LLM | `infrastructure/llm/traced_llm_wrapper.py` | Spans for all LLM calls (full content, no redaction) |
+| Traced Guardrail Analyzer | `infrastructure/llm/traced_guardrail_analyzer_wrapper.py` | Spans for guardrail_analyze with per-tool inputs |
+| Traced Analyzer | `infrastructure/llm/traced_query_analyzer_wrapper.py` | LEGACY — superseded |
 | Traced Event Search | `infrastructure/search/traced_event_search_wrapper.py` | Spans for event_search + event_keyword_search |
 
 ---
@@ -388,7 +357,10 @@ Chỉ có trong `SelfReflectiveRAGPipeline` (`reasoning_enabled=true`):
 
 1. **`reranker_enabled` và `temporal_precision_enabled`** trong `config.py` được load nhưng không được pipeline đọc — config flag chết.
 2. **Reranker chỉ có trong Reflective mode** — Standard `QueryPipeline` không rerank, chỉ RRF fusion rồi đưa thẳng vào LLM.
-3. **Reranker dùng LLM, không phải cross-encoder** — có thể chậm và đắt hơn so với model chuyên dụng (BGE-reranker, Cohere Rerank).
+3. **Reranker dùng LLM, không phải cross-encoder** — có thể chậm và đắt hơn so với model chuyên dụng (BGE-reranker, Cohere Rerank). Có thể bật Cross-Encoder qua `CROSS_ENCODER_ENABLED=true`.
 4. **`traverse_timeline` chưa được wired** — Graph RAG port có định nghĩa `traverse_timeline()` để duyệt causal/temporal chains giữa events nhưng chưa pipeline nào gọi.
 5. **Không có fallback reranker** — nếu LLMRerankerAdapter lỗi, kết quả giữ nguyên thứ tự RRF.
 6. **Reflective streaming UX** — retry 2-3 chạy ngầm và thay thế `complete` event; frontend hiện tại overwrite `answer` nếu `payload.answer` có giá trị.
+7. **Legacy ports vẫn tồn tại** — `QueryAnalyzerPort`, `QueryRewriterPort` và adapters/traced wrappers của chúng vẫn trong codebase nhưng không được wired. Pipeline hiện tại chỉ dùng `GuardrailAnalyzerPort`.
+8. **GuardrailAnalyzerAdapter injects today's date** — prompt có `f"Hôm nay là {now().strftime('%Y-%m-%d')}"` để ngăn deepseek-v4-flash hallucinate sai năm (VD: 2025 thay vì 2026).
+9. **Embedding text dùng structured format** — `"query: ... keywords: ..."` thay vì mixed VI+EN natural language trước đây. Phần query giúp bge-m3 match meaning, phần keywords giúp tăng recall cross-lingual.

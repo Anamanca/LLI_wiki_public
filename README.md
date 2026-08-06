@@ -18,14 +18,16 @@ LLM Wiki is a knowledge-aggregation system that:
 3. **Extracts** entities, events, and relations into a knowledge graph.
 4. **Answers** natural-language questions through an **agentic RAG pipeline** that combines:
    - Vector search (pgvector HNSW) + full-text search (PostgreSQL `tsvector`) + event search + GraphRAG (entity→event traversal)
-   - Reciprocal Rank Fusion (RRF) over 5 retrieval streams
-   - Query analysis (intent, time_range, entities, keywords, bilingual `search_query`, sub_questions, language)
-   - Query rewriting (pronoun resolution from chat history) + query expansion (synonyms)
+   - Reciprocal Rank Fusion (RRF) over 4 retrieval streams with intent-driven weights
+   - **Unified guardrail + intent analysis** (single LLM call replaces old rewrite→analyze chain): domain guardrail, intent detection (6 types), time_range extraction, entity extraction, **per-tool search inputs** (`embedding_text` for vector, `page_search_query` for keyword, `event_search_query` for event keyword), sub-questions, language detection
+   - Structured embedding text format (`query: ... keywords: ...`) with bilingual VI+EN keywords for bge-m3
+   - Today's date injected into analyzer prompt to prevent LLM date hallucination
    - LLM-based reranking (Cross-Encoder optional)
    - **Self-reflective loop**: evaluate answer quality → retry with alternate strategies (HyDE, decompose, expand) if below threshold
    - Three-tier caching: exact match, semantic (cosine ≥0.80), variable TTL (1h time-sensitive / 24h factual)
    - Temporal filtering with recency decay scoring
    - Multi-provider LLM backend (OpenCode Zen, Gemini) with API key rotation
+   - Full LLM input/output visibility in LangSmith traces for synthesis debugging
 5. **Observes** pipeline execution via optional LangSmith tracing and Prometheus metrics (Port/Adapter pattern).
 6. **Monitors** itself via an in-cluster Prometheus + Grafana + Loki + AlertManager stack with Telegram alerting.
 7. **Exposes** everything through a Next.js 14 admin dashboard: chat, wiki browser, source management, progress monitoring, knowledge graph, cron-job administration, and worker administration.
@@ -82,17 +84,17 @@ This README is written for **AI agents and future developers**. It explains the 
 |----------|-----------|
 | **Clean Architecture** | Business logic (`domain` + `application`) is isolated from frameworks (FastAPI, SQLAlchemy, Redis, Ollama). You can swap databases or LLM providers without touching use cases. |
 | **Async-first** | FastAPI + SQLAlchemy async (`asyncpg`) + `httpx` for all external calls. |
-| **Multi-stream hybrid search** | 5 retrieval streams (pgvector dense, tsvector keyword, event dense, event keyword, GraphRAG entity→event) merged via Reciprocal Rank Fusion (RRF) with intent-aware weights. Diversity capping (max 5/source, 2/page) prevents single-source dominance. |
+| **Multi-stream hybrid search** | 4 retrieval streams (pgvector dense, tsvector keyword, event dense, event keyword) + GraphRAG entity→event traversal merged via Reciprocal Rank Fusion (RRF) with intent-aware weights. Diversity capping (max 5/source, 2/page) prevents single-source dominance. |
 | **Self-reflective (Agentic) RAG** | The pipeline evaluates its own answer (faithfulness, completeness, relevance 0–10) and retries with alternate strategies (HyDE, decompose, expand) if quality is below threshold. Controlled via `REASONING_ENABLED=true`. |
 | **Redis answer cache** | Three-tier caching: (1) exact-match via SHA256 of normalized question, (2) semantic cache via embedding cosine similarity (≥0.80), (3) variable TTL: 1h for time-sensitive questions, 24h for factual. Both `/api/query` and `/api/query/stream` benefit. Cache failures are swallowed (degraded performance, not failure). |
-| **Query analysis + keyword extraction** | 1 lightweight LLM call extracts intent, time_range, entities, keywords (bilingual VI+EN), key_phrases, `search_query` (OR-delimited for tsquery), sub_questions, and language. This single call powers RRF weighting, SQL time filters, keyword search input, decompose strategy, and bilingual system prompts — maximum value per LLM token. |
-| **Query rewriting + expansion** | Pronoun resolution via chat history (LLM): "Thế còn hôm qua?" → "Giá vàng ngày 28/07/2026". Synonym expansion for broader keyword recall. |
+| **Unified guardrail + intent analysis** | Single lightweight LLM call replaces the old rewrite→analyze chain. Extracts: domain guardrail (allowed/blocked), intent (6 types: current_state, historical, timeline, comparative, factual_listing, general), time_range, entities, **per-tool search inputs** (structured `embedding_text` for vector search, `page_search_query` for keyword search, `event_search_query` for event keyword search), sub_questions, and language. Today's date is injected to prevent LLM date hallucination. |
+| **Per-tool search inputs** | The analyzer generates separate search inputs for each tool: `embedding_text` (structured `query: ... keywords: ...` format for bge-m3 embedding → used by both vector_search and event_search), `page_search_query` (OR-delimited domain terms for PostgreSQL tsvector on page_sections), `event_search_query` (OR-delimited proper nouns/events for tsvector on event_observations). This replaces the old generic keyword blob approach. |
 | **LLM-based reranking** | After RRF merge, an LLM re-ranks top candidates for relevance. Optional Cross-Encoder (BAAI/bge-reranker-v2-m3) via `CROSS_ENCODER_ENABLED=true`. |
 | **Multi-provider LLM** | API key rotation across providers (OpenCode Zen, Gemini) with priority and rate-limit tracking. Configured per model tier: primary, fallback, chat, analyzer, evaluator. |
 | **Temporal filtering** | Questions like "trong tháng vừa qua" or "past 2 weeks" are parsed into a `TimeRange` and applied to both vector and keyword search; recency decay boosts newer pages. |
 | **Bilingual search + synthesis** | Search queries include both Vietnamese and English terms so both VI and EN content are retrieved. Answer language matches the user's question — detected by the analyzer LLM (primary) or regex on Vietnamese diacritics (zero-token fallback). System prompts switch between VI and EN at zero additional cost. |
-| **Telemetry** | Optional LangSmith tracing spans every pipeline step (query + ingestion). See [`docs/telemetry-implementation-strategy.md`](docs/telemetry-implementation-strategy.md) for the full trace tree architecture. Disabled by default via `LANGSMITH_TRACING=false`. |
-| **Observability** | Prometheus RED metrics + business metrics via `MetricsPort` ABC, structured JSON logging with `trace_id` correlation, Loki + Promtail for log aggregation, Grafana dashboards, AlertManager → Telegram alerting. All monitoring runs in-cluster (Kind/K3s). |
+| **Telemetry** | Optional LangSmith tracing spans every pipeline step (query + ingestion). Full LLM input/output content is stored in span inputs (no redaction) for synthesis debugging. See [`docs/telemetry-implementation-strategy.md`](docs/telemetry-implementation-strategy.md) for the full trace tree architecture. Disabled by default via `LANGSMITH_TRACING=false`. |
+| **Observability** | Prometheus RED metrics + business metrics via `MetricsPort` ABC, structured JSON logging with `trace_id` correlation, Loki + Promtail for log aggregation, Grafana dashboards, AlertManager → Telegram alerting. All monitoring runs in-cluster (Kind/K3s). See [`docs/observability-guide.md`](docs/observability-guide.md). |
 | **Ports as abstract classes** | Every external service is hidden behind a port in `application/ports/`. Infrastructure provides concrete adapters. |
 | **Dependency injection** | `dependency-injector` wires singletons (embedder, LLM, cache, telemetry) and per-request factories (pipeline, use cases). |
 
@@ -142,9 +144,8 @@ This README is written for **AI agents and future developers**. It explains the 
 │   └── unit/                            # Domain / use-case unit tests
 │
 ├── docs/                                # Technical documentation
-│   ├── search-strategy.md               # Full RAG pipeline strategy (12-step, agentic)
+│   ├── search-strategy.md               # Full RAG pipeline strategy (unified guardrail+analyzer, per-tool inputs)
 │   ├── telemetry-implementation-strategy.md  # LangSmith tracing architecture
-│   ├── monitoring-guide.md              # Prometheus + Grafana + Loki + AlertManager guide
 │   └── observability-guide.md           # Full SRE 4-pillar reference (metrics, logs, traces, alerts)
 │
 ├── k8s/                                 # Kubernetes manifests (Kind / K3s)
@@ -204,7 +205,7 @@ Each use case is a single class with one primary `execute(...)` method.
 |----------|------|----------------|
 | `AskQuestionUseCase` | `query/ask_question.py` | Orchestrates the RAG pipeline for non-streaming queries. |
 | `StreamAnswerUseCase` | `query/stream_answer.py` | Wraps `QueryPipeline.execute_stream()` for SSE. |
-| `QueryPipeline` | `query/pipeline.py` | **Core orchestrator:** cache → rewrite → embed → semantic cache → analyze → 5-stream retrieve → RRF → rerank → diversity cap → LLM synthesis → cache save. |
+| `QueryPipeline` | `query/pipeline.py` | **Core orchestrator:** cache → embed → guardrail+intent analysis (single LLM call) → 4-stream retrieve → RRF → rerank → diversity cap → LLM synthesis → cache save. |
 | `SelfReflectiveRAGPipeline` | `query/reflective_pipeline.py` | **Agentic RAG:** wraps `QueryPipeline`, evaluates answer quality (faithfulness/completeness/relevance 0–10), retries with alternate strategies (HyDE, decompose, expand) if below threshold. Controlled via `REASONING_ENABLED=true`. |
 | `IntegrateWikiUseCase` | `ingestion/wiki_integrator.py` | 3-pass LLM integrator: (1) Extract — raw sections from transcript, (2) Analyze — entity/event detection + cross-section links, (3) Write — structured wiki sections with citations. |
 | `ProcessVideoUseCase` | `ingestion/process_video.py` | Takes a `SourceItem` with transcript, runs wiki integration, retries on failure. |
@@ -228,9 +229,10 @@ application/ports/
 │   ├── vector_search.py          # VectorSearchPort, KeywordSearchPort,
 │   │                             # LLMClientPort, EmbeddingServicePort, CacheServicePort
 │   ├── event_search_port.py      # EventSearchPort — dense + sparse event search
-│   ├── query_analyzer_port.py    # QueryAnalyzerPort — intent, time_range, entities,
-│   │                             # keywords, key_phrases, search_query, sub_questions, language
-│   ├── query_rewriter_port.py    # QueryRewriterPort — resolve pronouns via chat history
+│   ├── guardrail_analyzer_port.py # GuardrailAnalyzerPort — unified guardrail + intent
+│   │                             # + per-tool search input generation (single LLM call)
+│   ├── query_analyzer_port.py    # QueryAnalyzerPort (LEGACY — superseded by guardrail)
+│   ├── query_rewriter_port.py    # QueryRewriterPort (LEGACY — kept for backward compat)
 │   ├── query_expander_port.py    # QueryExpanderPort — synonym generation for keyword search
 │   ├── reranker_port.py          # RerankerPort — LLM-based doc relevance scoring
 │   ├── answer_evaluator_port.py  # AnswerEvaluatorPort — faithfulness/completeness/relevance (0-10)
@@ -239,7 +241,7 @@ application/ports/
     ├── telemetry_port.py         # TelemetryPort for LangSmith / null tracing
     └── metrics_port.py           # MetricsPort for Prometheus RED + business metrics
 ```
-**Note:** All new ports (query_analyzer, query_rewriter, query_expander, reranker, answer_evaluator, graph_rag, event_search) are now implemented with concrete adapters — not stubs. See `infrastructure/llm/` and `infrastructure/search/` for adapters.
+**Note:** `GuardrailAnalyzerPort` is the **active** analyzer. It replaced the separate rewrite→analyze flow and generates per-tool search inputs (`embedding_text`, `page_search_query`, `event_search_query`). The old `QueryAnalyzerPort` and `QueryRewriterPort` are kept for backward compatibility but are no longer wired into the pipeline.
 
 **Rule for AI agents:** When you add a new external dependency (e.g., a new LLM provider, a new vector DB, a new cache), define a port in `application/ports/` first, then implement the adapter in `infrastructure/`. The use case code should not change.
 
@@ -263,9 +265,10 @@ Plain dataclasses for crossing the application boundary:
 #### 4.3.2 External AI services
 
 - **`llm/openai_adapter.py`** — `OpenAIAdapter` implements `LLMClientPort`. Talks to any OpenAI-compatible endpoint. Multi-provider support (OpenCode Zen, Gemini) with API key rotation and rate-limit tracking via `api_key_manager.py`. Supports streaming and reports token usage.
-- **`llm/query_analyzer_adapter.py`** — `LLMQueryAnalyzerAdapter` implements `QueryAnalyzerPort`. Single lightweight LLM call extracts intent, time_range, entities, keywords, key_phrases, search_query, sub_questions, and language for bilingual VI/EN switching.
-- **`llm/query_rewriter_adapter.py`** — `LLMQueryRewriterAdapter` implements `QueryRewriterPort`. Resolves pronouns and implicit references from last 6 chat turns.
-- **`llm/query_expander_adapter.py`** — `LLMQueryExpanderAdapter` implements `QueryExpanderPort`. Generates synonyms and related terms for broader keyword recall.
+- **`llm/guardrail_analyzer_adapter.py`** — `LLMGuardrailAnalyzerAdapter` implements `GuardrailAnalyzerPort`. **Active analyzer** — single LLM call that replaces the old rewrite→analyze chain. Performs guardrail check (finance/economics domain), intent detection (6 types), time_range extraction, entity extraction, and generates **per-tool search inputs**: `embedding_text` (structured `query: ... keywords: ...` format for bge-m3), `page_search_query` (OR-delimited for page_sections tsvector), `event_search_query` (OR-delimited for event_observations tsvector), sub_questions, and language detection. Today's date is injected into the prompt to prevent LLM date hallucination.
+- **`llm/query_analyzer_adapter.py`** — `LLMQueryAnalyzerAdapter` (LEGACY — superseded by guardrail analyzer, kept for backward compat).
+- **`llm/query_rewriter_adapter.py`** — `LLMQueryRewriterAdapter` (LEGACY — no longer wired into pipeline; pronoun resolution was merged into guardrail analysis).
+- **`llm/query_expander_adapter.py`** — `LLMQueryExpanderAdapter` implements `QueryExpanderPort`. Generates synonyms and related terms for broader keyword recall (used in reflective pipeline's `expand` strategy).
 - **`llm/reranker_adapter.py`** — `LLMRerankerAdapter` implements `RerankerPort`. LLM-based relevance scoring of search results before synthesis.
 - **`llm/answer_evaluator_adapter.py`** — `LLMAnswerEvaluatorAdapter` implements `AnswerEvaluatorPort`. Scores faithfulness, completeness, relevance (0–10) for self-reflective loop.
 - **`embedding/ollama_adapter.py`** — `OllamaEmbeddingAdapter` implements `EmbeddingServicePort`. Uses model `bge-m3` and produces 1024-dim vectors.
@@ -289,7 +292,7 @@ Plain dataclasses for crossing the application boundary:
 - **`telemetry/langsmith_telemetry_adapter.py`** — Records spans and metadata to LangSmith when `LANGSMITH_TRACING=true`. Uses `parent_run.create_child()` for proper parent-child trace trees (not isolated root runs).
 - **`telemetry/langsmith_eval_adapter.py`** — Evaluates RAG outputs against labeled datasets (optional batch workflow).
 - **`telemetry/null_telemetry_adapter.py`** — No-op adapter used when tracing is disabled.
-- **Traced wrappers** — Wrap ports to emit spans without changing use-case logic: `llm/traced_llm_wrapper.py`, `llm/traced_query_analyzer_wrapper.py`, `embedding/traced_embedding_wrapper.py`, `search/traced_search_wrapper.py`, `search/traced_event_search_wrapper.py`, `persistence/redis/traced_cache_wrapper.py`.
+- **Traced wrappers** — Wrap ports to emit spans without changing use-case logic: `llm/traced_llm_wrapper.py` (full message content, no redaction), `llm/traced_guardrail_analyzer_wrapper.py`, `embedding/traced_embedding_wrapper.py`, `search/traced_search_wrapper.py`, `search/traced_event_search_wrapper.py`, `persistence/redis/traced_cache_wrapper.py`.
 
 **Metrics (Prometheus — Port/Adapter pattern)**
 
@@ -384,50 +387,54 @@ User Question
 [2. Exact Cache Check] ──hit──▶ return cached answer (0 LLM cost)
     │ miss
     ▼
-[3. Query Rewriting] ──▶ resolve pronouns via chat history (LLM, 6 turns)
+[3. Embed Question] ──▶ Ollama bge-m3 ──▶ Embedding(1024)
     │
     ▼
-[4. Embed Question] ──▶ Ollama bge-m3 ──▶ Embedding(1024)
-    │
-    ▼
-[5. Semantic Cache Check] ──▶ cosine similarity ≥ 0.80 against stored embeddings
+[4. Semantic Cache Check] ──▶ cosine similarity ≥ 0.80 against stored embeddings
     │ hit                              │ miss
     ▼                                  ▼
-[return cached answer]       [6. Query Analysis] ──▶ 1 lightweight LLM call →
-    (embed cost only)              │                   intent, time_range, entities,
-                                   │                   keywords, key_phrases,
-                                   │                   search_query (OR-delimited, bilingual),
-                                   │                   sub_questions, language
+[return cached answer]       [5. Guardrail + Intent Analysis] ──▶ 1 lightweight LLM call →
+    (embed cost only)              │  guardrail (domain check: finance/economics),
+                                   │  intent (6 types: current_state, historical,
+                                   │    timeline, comparative, factual_listing, general),
+                                   │  time_range (with today's date injected),
+                                   │  entities, language (vi/en),
+                                   │  embedding_text (structured query:... keywords:...),
+                                   │  page_search_query (OR-delimited, section terms),
+                                   │  event_search_query (OR-delimited, proper nouns),
+                                   │  sub_questions (multi-hop decomposition)
                                    ▼
-                        [7. Multi-Stream Retrieval] ──▶ 5 parallel streams:
+                        [6. Multi-Stream Retrieval] ──▶ 4 parallel streams:
                         │   a) Vector Search (pgvector HNSW cosine + time filter + recency)
-                        │   b) Keyword Search (tsvector + analyzer search_query + time filter + recency)
+                        │      Input: embedding_text (bge-m3 embedding)
+                        │   b) Keyword Search (tsvector + page_search_query + time filter)
                         │   c) Event Dense Search (pgvector on event_observations)
-                        │   d) Event Keyword Search (tsvector on event_observations + search_query)
+                        │      Input: embedding_text (shared with vector search)
+                        │   d) Event Keyword Search (tsvector + event_search_query)
                         │   e) Graph RAG (entity→event traversal, if entities detected)
                                    │
                                    ▼
-                        [8. Reciprocal Rank Fusion] ──▶ merge 5 streams, weights vary by intent
+                        [7. Reciprocal Rank Fusion] ──▶ merge 4+ streams, weights vary by intent
                         │                              (k=60)
                                    │
                                    ▼
-                        [9. Query Expansion + Rerank] ──▶ expand keywords → rerank via LLM
-                        │                              (or Cross-Encoder if enabled)
+                        [8. Rerank] ──▶ LLM-based relevance scoring
+                        │              (or Cross-Encoder if enabled)
                                    │
                                    ▼
-                        [10. Diversity Capping] ──▶ max 5/source, 2/page, top 20 to context
+                        [9. Diversity Capping] ──▶ max 5/source, 2/page, top 20 to context
                                    │
                                    ▼
-                        [11. Build Context] ──▶ top 20 sections, truncated to 2000 chars, cited [1]..[N]
+                        [10. Build Context] ──▶ top 20 sections, truncated to 2000 chars, cited [1]..[N]
                                    │
                                    ▼
-                        [12. LLM Synthesis] ──▶ OpenAI-compatible, bilingual system prompt
+                        [11. LLM Synthesis] ──▶ OpenAI-compatible, bilingual system prompt
                         │                       (VI/EN switched by detected language),
                         │                       intent-specific temporal addendum,
                         │                       temp=0.3, max_tokens=16384
                                    │
                                    ▼
-                        [13. Self-Reflective Evaluate] ──▶ if REASONING_ENABLED=true:
+                        [12. Self-Reflective Evaluate] ──▶ if REASONING_ENABLED=true:
                         │    Score: faithfulness, completeness, relevance (0–10)
                         │    If score < threshold → retry with alternate strategy:
                         │      • HyDE (hypothetical document embedding)
@@ -436,13 +443,13 @@ User Question
                         │    Best answer after budget exhausted
                                    │
                                    ▼
-                        [14. Cache Save] ──▶ exact (TTL 1h/24h) + semantic (embedding)
+                        [13. Cache Save] ──▶ exact (TTL 1h/24h) + semantic (embedding)
                                    │
                                    ▼
 Response: {answer, sources, tokens_used, cache_hit, pipeline_steps, evaluation_scores}
 ```
 
-Streaming version (`/api/query/stream`) follows the same flow: exact cache → rewrite → embed → semantic cache → retrieval → rerank → LLM synthesis → self-reflective evaluate → cache save. Cache hits return immediately as a `type: "complete"` SSE event.
+Streaming version (`/api/query/stream`) follows the same flow: exact cache → embed → semantic cache → guardrail+intent analysis → retrieval → rerank → LLM synthesis → self-reflective evaluate → cache save. Cache hits return immediately as a `type: "complete"` SSE event.
 
 SSE events emitted:
 - `status: processing` → `retrieving` → `thinking` → `summarizing`
@@ -751,6 +758,7 @@ API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
 10. **Self-reflective pipeline adds latency:** with `REASONING_ENABLED=true`, the pipeline may make 2–4 additional LLM calls per query (evaluate + retry). Monitor token usage and response times.
 11. **Cross-Encoder requires GPU for reasonable speed:** `CROSS_ENCODER_ENABLED=true` with `BAAI/bge-reranker-v2-m3` adds ~1–2s per query on CPU. Leave disabled (`false`) for CPU-only deployments.
 12. **`data/` directory is git-ignored:** the `data/` directory contains PostgreSQL data, MinIO objects, Redis dumps, and other sensitive runtime state — it is excluded from version control via `.gitignore`.
+13. **Legacy ports still exist in codebase:** `QueryAnalyzerPort`, `QueryRewriterPort`, and their adapters/traced wrappers are kept for backward compatibility but are no longer wired into the pipeline. The active analyzer is `GuardrailAnalyzerPort` with `LLMGuardrailAnalyzerAdapter`.
 
 ---
 
@@ -782,4 +790,4 @@ API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
 
 ---
 
-*Last updated for backend v2.2.0 / frontend v3.0.1 — agentic RAG with self-reflective pipeline, 5-stream hybrid retrieval, LLM reranking + Cross-Encoder, multi-provider LLM, Prometheus metrics (Port/Adapter), Grafana/Loki/AlertManager stack, structured JSON logging with trace_id.*
+*Last updated for backend v2.2.0 / frontend v3.0.1 — unified guardrail+intent analysis (single LLM call), per-tool search inputs (embedding_text, page_search_query, event_search_query), structured embedding format (query:... keywords:...), today's date injection for analyzer, full LLM content visibility in LangSmith, 4-stream hybrid retrieval, LLM reranking + Cross-Encoder, multi-provider LLM, Prometheus metrics (Port/Adapter), Grafana/Loki/AlertManager stack, structured JSON logging with trace_id.*

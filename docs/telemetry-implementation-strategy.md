@@ -126,8 +126,8 @@ Every external service is wrapped in a **traced proxy** that implements the same
 
 | Wrapper | Wraps Interface | Emits Spans For |
 |---------|----------------|-----------------|
-| `TracedLLMWrapper` | `LLMClientPort` | `chat_completion`, `chat_completion_raw`, `chat_completion_reasoning`, `chat_completion_stream` |
-| `TracedQueryAnalyzerWrapper` | `QueryAnalyzerPort` | `query_analyze` — intent, language, keywords, key_phrases, search_query, sub_questions, entities, time_range |
+| `TracedLLMWrapper` | `LLMClientPort` | `chat_completion`, `chat_completion_raw`, `chat_completion_reasoning`, `chat_completion_stream` — **full message content stored** (no redaction) |
+| `TracedGuardrailAnalyzerWrapper` | `GuardrailAnalyzerPort` | `guardrail_analyze` — allowed, intent, language, embedding_text preview, page_search_query, event_search_query, sub_questions, entities, time_range |
 | `TracedEmbeddingWrapper` | `EmbeddingServicePort` | `embed_query`, `embed_documents` |
 | `TracedVectorSearchWrapper` | `VectorSearchPort` | `vector_search` |
 | `TracedKeywordSearchWrapper` | `KeywordSearchPort` | `keyword_search` |
@@ -174,26 +174,27 @@ class TracedLLMWrapper(LLMClientPort):
 rag_query (chain)                              ← root: created in query.py
 ├── cache_check (chain)                        ← exact + semantic cache lookup
 │   ├── cache_get (cache)                      ← Redis exact-match check
-│   └── embedding (embedding)                  ← embed question for semantic cache
-├── query_analyze (chain)                      ← 1 LLM call → full analysis
-│   │  inputs: question (full text)
-│   │  outputs: intent, language, time_range,
-│   │           entities_count, keywords_count,
-│   │           key_phrases_count, sub_questions_count
-│   │  metadata: keywords[], key_phrases[],
-│   │             search_query, sub_questions[],
-│   │             entities[], latency_ms
-├── embedding (embedding)                      ← embed question for search
+│   ├── embedding (embedding)                  ← embed question for semantic cache
+│   └── cache_semantic_get (cache)             ← semantic cache lookup
+├── guardrail_analyze (chain)                  ← unified guardrail + intent + per-tool inputs
+│   │  inputs: question (full text), today's date injected
+│   │  outputs: allowed, intent, language, time_range,
+│   │           entities_count, sub_questions_count,
+│   │           embedding_text (truncated 200 chars),
+│   │           page_search_query, event_search_query
+│   │  metadata: entities[], sub_questions[], latency_ms
+├── embedding (embedding)                      ← embed embedding_text for search
 ├── vector_search (retriever)                  ← pgvector HNSW cosine + time filter + recency
+│   │  inputs: embedding_dimensions (1024), time_range, top_k
 ├── keyword_search (retriever)                 ← tsvector full-text + time filter + recency
-│   │  inputs: query (analyzer search_query or keywords)
+│   │  inputs: query (analyzer page_search_query)
 ├── event_search (retriever)                   ← pgvector on event_observations
 │   │  inputs: embedding_dimensions, top_k, time_range
 ├── event_keyword_search (retriever)           ← tsvector on event_observations
-│   │  inputs: query (analyzer search_query), top_k, time_range
+│   │  inputs: query (analyzer event_search_query), top_k, time_range
 ├── rerank (chain)                             ← RRF merge + LLM rerank (if enabled)
 │   └── llm_chat_completion_reasoning (llm)    ← reasoning model scores candidates
-└── llm_chat_completion_reasoning (llm)        ← final answer synthesis
+└── llm_chat_completion_stream (llm)           ← final answer synthesis
 ```
 
 ### 4.2 What to look for in LangSmith
@@ -201,10 +202,11 @@ rag_query (chain)                              ← root: created in query.py
 | Signal | Where to check |
 |--------|---------------|
 | Cache hit rate | `cache_get` → check outputs for `{hit: true}` vs `{hit: false}` |
-| Query analysis quality | `query_analyze` → outputs: intent, language, keywords_count; metadata: keywords[], search_query, sub_questions[] |
+| Guardrail analysis quality | `guardrail_analyze` → outputs: allowed, intent, language; metadata: embedding_text (preview), page_search_query, event_search_query, sub_questions[] |
 | Embedding latency | `embedding` span → metadata has `latency_ms` |
 | Search recall | `vector_search`, `keyword_search`, `event_search`, `event_keyword_search` → `outputs.result_count` |
-| Keyword search input | `keyword_search`, `event_keyword_search` → `inputs.query` (now shows the actual analyzer search_query, not just query_length) |
+| Per-tool search inputs | `keyword_search` → `inputs.query` (page_search_query), `event_keyword_search` → `inputs.query` (event_search_query) |
+| LLM synthesis input | `llm_chat_completion_stream` → `inputs.messages[]` (full content visible, no redaction) |
 | Token usage | Each `llm_*` span → `metadata.tokens_used` |
 | Total pipeline latency | `rag_query` root span → wall-clock start to end |
 | Rerank effectiveness | `rerank` → `outputs.reranked_count` vs `inputs.candidate_count` |
@@ -371,8 +373,8 @@ src/llm_wiki/
 │   ├── langsmith_telemetry_adapter.py       # LangSmith implementation
 │   └── null_telemetry_adapter.py            # No-op fallback
 ├── infrastructure/llm/
-│   ├── traced_llm_wrapper.py                # TracedLLMWrapper
-│   └── traced_query_analyzer_wrapper.py     # TracedQueryAnalyzerWrapper
+│   ├── traced_llm_wrapper.py                # TracedLLMWrapper (full content, no redaction)
+│   └── traced_guardrail_analyzer_wrapper.py # TracedGuardrailAnalyzerWrapper
 ├── infrastructure/embedding/
 │   └── traced_embedding_wrapper.py          # TracedEmbeddingWrapper
 ├── infrastructure/search/

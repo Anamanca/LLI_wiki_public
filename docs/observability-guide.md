@@ -489,15 +489,15 @@ rag_query (chain)                        ← root span
 ├── cache_check (chain)                  ← exact → semantic cache
 │   ├── cache_get (cache)
 │   └── embedding (embedding)
-├── query_analyze (chain)                ← intent, keywords, entities, time_range
-├── embedding (embedding)                ← embed question
+├── guardrail_analyze (chain)            ← unified guardrail + intent + per-tool search inputs
+├── embedding (embedding)                ← embed embedding_text
 ├── vector_search (retriever)            ← pgvector HNSW
-├── keyword_search (retriever)           ← tsvector full-text
-├── event_search (retriever)             ← event observations
-├── event_keyword_search (retriever)
+├── keyword_search (retriever)           ← tsvector (input: page_search_query)
+├── event_search (retriever)             ← event observations (shared embedding_text)
+├── event_keyword_search (retriever)     ← tsvector (input: event_search_query)
 ├── rerank (chain)                       ← RRF merge + LLM scoring
 │   └── llm_chat_completion_reasoning
-└── llm_chat_completion_reasoning (llm)  ← final answer synthesis
+└── llm_chat_completion_stream (llm)     ← final answer synthesis (full input visible)
 ```
 
 ### 5.3 Trace tree: Ingestion pipeline (2 workers, 2 root traces)
@@ -902,3 +902,24 @@ k8s/
 |------|---------|
 | `docs/observability-guide.md` | **This document** — complete observability reference |
 | `docs/telemetry-implementation-strategy.md` | LangSmith tracing deep-dive (wrapper pattern, span trees) |
+
+---
+
+## 11. Interview Talking Points
+
+When demoing this to a senior developer interviewer, highlight these aspects:
+
+### Architecture Discipline
+> "All application metrics follow Clean Architecture — `MetricsPort` is an ABC in the application layer. The concrete `PrometheusMetricsAdapter` implements it in infrastructure. Call sites use `inc_counter()` / `track_duration()`, which are zero-dependency helpers. When Prometheus isn't enabled, a `NullMetricsAdapter` takes over — zero performance cost, zero code branches at call sites."
+
+### SRE 4-Pillar Model
+> "I implemented all four pillars of the Google SRE observability model: Metrics (Prometheus + Grafana), Logging (structured JSON → Loki), Tracing (LangSmith with trace_id injected into logs), and Alerting (8 PromQL + 3 LogQL rules → AlertManager). The trace_id bridges logs and traces — you can copy a trace ID from LangSmith and grep Loki for the exact log lines of that request."
+
+### RED + Business Dashboards
+> "The RED dashboard proves every HTTP request is instrumented with path normalization to prevent cardinality explosion. The Business dashboard proves monitoring isn't just ops overhead — cache hit rate directly maps to LLM cost savings, token tracking maps to budget control."
+
+### Infrastructure as Code
+> "The entire monitoring stack — Prometheus, Grafana, Loki, Promtail, AlertManager, plus all dashboards, alert rules, RBAC, and scrape configs — deploys with one shell script. Every component is a K8s manifest in `k8s/monitoring/`. Zero cloud dependencies — everything runs in-cluster."
+
+### Practical Incident Response
+> "WorkerStalled fires within 2 minutes of a missing heartbeat. The runbook in the alert annotation tells the on-call exactly which command to run. That's the difference between 'something is wrong' and 'here's what to do about it.'"
