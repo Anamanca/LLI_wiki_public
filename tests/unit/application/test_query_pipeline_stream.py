@@ -101,9 +101,10 @@ async def test_execute_stream_yields_status_sequence_and_complete(
 
 
 @pytest.mark.asyncio
-async def test_execute_stream_chat_history_passed_to_llm(
+async def test_execute_stream_chat_history_not_passed_to_llm(
     mock_embedder, mock_vector_search, mock_keyword_search, mock_llm, mock_cache
 ):
+    """Chat history is no longer forwarded to LLM — each question is independent."""
     pipeline = QueryPipeline(
         embedder=mock_embedder,
         vector_search=mock_vector_search,
@@ -114,7 +115,7 @@ async def test_execute_stream_chat_history_passed_to_llm(
 
     async for _ in pipeline.execute_stream(
         QueryInput(
-            question="Follow-up?",
+            question="What is CPI?",
             chat_history=[
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "Hi"},
@@ -127,8 +128,9 @@ async def test_execute_stream_chat_history_passed_to_llm(
     messages = mock_llm._stream_calls[0].kwargs["messages"]
     roles = [m["role"] for m in messages]
     assert "system" in roles
-    assert roles.count("user") >= 2
-    assert "assistant" in roles
+    # Only 1 user message — chat history is no longer included
+    assert roles.count("user") == 1
+    assert "assistant" not in roles
 
 
 @pytest.mark.asyncio

@@ -551,21 +551,7 @@ class TestPages:
     async def test_get_page_frontend_shape(self, api_tester: ApiTester):
         """BUG: pages.py GET /pages/{slug} lacks sections/media_assets/linked_pages
         that frontend PageDetail type expects. The richer version in stubs.py gets shadowed."""
-        # Create a source first, then a page, then test
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
-            # Create source
-            src_r = await c.post(
-                api("/sources"),
-                json={
-                    "name": "page-shape-test",
-                    "platform": "youtube",
-                    "external_id": f"UC-pg-{uuid.uuid4().hex[:8]}",
-                    "url": "https://youtube.com/@pagetest",
-                },
-            )
-            src_id = src_r.json()["id"]
-
-            # Check what the existing pages endpoint returns for any known page
             list_r = await c.get(api("/pages"))
             pages_data = list_r.json()
             items = pages_data.get("items", [])
@@ -598,8 +584,15 @@ class TestPages:
                         f"  or ensure ENABLE_STUB_ROUTES version has different paths."
                     )
 
-            # Cleanup
-            await c.delete(api(f"/sources/{src_id}"))
+                # Verify each section has keywords field (new contract)
+                for sec in detail_data.get("sections", []):
+                    assert "keywords" in sec, (
+                        f"Section '{sec.get('title')}' missing 'keywords' field. "
+                        f"Got keys: {list(sec.keys())}"
+                    )
+                    assert isinstance(sec["keywords"], list), (
+                        f"Section 'keywords' must be a list, got {type(sec['keywords'])}"
+                    )
 
 
 # ===================================================================

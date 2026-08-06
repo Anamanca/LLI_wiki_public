@@ -3,32 +3,45 @@ name = "llm-wiki"
 version = "2.2.0"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
+    # ── Shared (all services) ──
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
     "psycopg2-binary>=2.9",
     "pgvector>=0.3",
-    "redis[hiredis]>=5.0",
     "httpx",
     "pydantic>=2.0",
     "pydantic-settings>=2.5",
     "dependency-injector>=4.0",
-    "alembic>=1.13",
-    "minio",
-    "python-telegram-bot>=21.0",
-    "yt-dlp>=2024.0",
-    "faster-whisper>=1.0",
-    "ollama>=0.4",
-    "psutil>=5.9",
     "python-dotenv",
-    "langsmith>=0.1.0",
+    "python-telegram-bot>=21.0",
     "prometheus-client>=0.21",
-    "curl_cffi>=0.13",
-    "sentence-transformers>=3.0",
 ]
 
 [project.optional-dependencies]
+# ── API server (backend-v2) ────
+# Includes embedding (ollama via http, no GPU needed) and reranker (torch CPU).
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "minio",
+    "alembic>=1.13",
+    "langsmith>=0.1.0",
+    # Embedding + reranker — torch CPU-only (no nvidia/CUDA)
+    "ollama>=0.4",
+    "sentence-transformers>=3.0",
+]
+
+# ── Workers (cpu-worker + wiki-consumer) ──
+worker = [
+    "redis[hiredis]>=5.0",
+    "minio",
+    "yt-dlp>=2024.0",
+    "faster-whisper>=1.0",
+    "curl_cffi==0.15.0",
+    "psutil>=5.9",
+    "langsmith>=0.1.0",
+]
+
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
@@ -54,6 +67,9 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
 # N818 — DomainException, YouTubeQuotaExceeded are intentional names
 # N806 — lowercase var naming in tests for MockClient
 ignore = ["B008", "E402", "F821", "N818", "N806"]
+
+[tool.ruff.lint.per-file-ignores]
+"wiki_prompts.py" = ["E501"]  # LLM prompt strings with markdown tables can't be line-wrapped
 
 [tool.mypy]
 strict = false

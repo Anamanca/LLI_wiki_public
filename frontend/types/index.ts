@@ -76,6 +76,7 @@ export interface PageSection {
   section_order: number;
   title: string | null;
   content_markdown: string | null;
+  keywords?: string[];
   source_ref: string | null;
 }
 
@@ -407,7 +408,8 @@ export interface CronJobActionResponse {
 // --- Workers ---
 
 export interface WorkerInfo {
-  worker_id: number;
+  worker_id: string;
+  worker_type: string | null;
   status: string;
   alive: boolean;
   heartbeat_ago_secs: number;

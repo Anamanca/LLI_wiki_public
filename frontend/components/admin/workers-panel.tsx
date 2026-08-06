@@ -7,24 +7,24 @@ import { useWorkers } from "@/hooks/use-workers";
 import { Cpu, Activity, CheckCircle, XCircle, Clock, AlertTriangle } from "lucide-react";
 import type { WorkerInfo } from "@/types";
 
-// Worker ID convention (matching StatefulSet ordinal logic):
-//   1..98   — CPU workers    (cpu-worker-N  → WORKER_ID = 1 + N)
-//   99      — GPU worker
-//   101..   — Wiki consumers (wiki-consumer-N → CONSUMER_ID = 101 + N)
-const GPU_WORKER = 99;
+// Worker type is now explicitly stored in the heartbeat table.
+// This replaces the old numeric-ID convention (1-98 cpu, 99 gpu, 101+ wiki).
 
-function workerLabel(id: number): string {
-  if (id >= 101) return `Wiki-${id - 100}`;
-  if (id === GPU_WORKER) return "GPU";
-  if (id >= 1 && id < GPU_WORKER) return `CPU-${id}`;
-  return `W${id}`;
+function workerLabel(worker: WorkerInfo): string {
+  if (worker.worker_type === "cpu") return `CPU`;
+  if (worker.worker_type === "wiki") return `Wiki`;
+  if (worker.worker_type === "gpu") return `GPU`;
+  return worker.worker_id;
 }
 
-function workerGroup(id: number): string {
-  if (id >= 101) return "wiki";
-  if (id === GPU_WORKER) return "gpu";
-  if (id >= 1 && id < GPU_WORKER) return "cpu";
+function workerGroup(worker: WorkerInfo): string {
+  if (worker.worker_type) return worker.worker_type;
   return "unknown";
+}
+
+function workerShortId(worker: WorkerInfo): string {
+  const parts = worker.worker_id.split("-");
+  return parts.slice(-2).join("-");
 }
 
 function StatusBadge({ status, alive }: { status: string; alive: boolean }) {
@@ -36,7 +36,7 @@ function StatusBadge({ status, alive }: { status: string; alive: boolean }) {
 }
 
 function WorkerCard({ worker }: { worker: WorkerInfo }) {
-  const group = workerGroup(worker.worker_id);
+  const group = workerGroup(worker);
   const groupColor = group === "cpu" ? "border-l-blue-500" : group === "gpu" ? "border-l-purple-500" : "border-l-green-500";
 
   return (
@@ -48,7 +48,7 @@ function WorkerCard({ worker }: { worker: WorkerInfo }) {
         ) : (
           <XCircle className="h-3.5 w-3.5 text-red-500 shrink-0" />
         )}
-        <span className="text-xs font-mono font-medium truncate">{workerLabel(worker.worker_id)}</span>
+        <span className="text-xs font-mono font-medium truncate">{workerLabel(worker)}</span>
         <StatusBadge status={worker.status} alive={worker.alive} />
         {worker.error_message && (
           <span title={worker.error_message} className="shrink-0">
@@ -80,9 +80,9 @@ export function WorkersPanel() {
   const { data, isLoading, error } = useWorkers();
 
   const workers = data?.workers || [];
-  const cpuWorkers = workers.filter((w) => workerGroup(w.worker_id) === "cpu");
-  const gpuWorker = workers.find((w) => workerGroup(w.worker_id) === "gpu");
-  const wikiConsumers = workers.filter((w) => workerGroup(w.worker_id) === "wiki");
+  const cpuWorkers = workers.filter((w) => workerGroup(w) === "cpu");
+  const gpuWorker = workers.find((w) => workerGroup(w) === "gpu");
+  const wikiConsumers = workers.filter((w) => workerGroup(w) === "wiki");
   const alive = workers.filter((w) => w.alive).length;
   const dead = workers.filter((w) => !w.alive).length;
 
