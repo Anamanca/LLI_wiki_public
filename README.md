@@ -2,37 +2,24 @@
 
 # LLM Wiki — Clean Architecture RAG Knowledge System
 
-> **Project version:** backend `2.2.0`, frontend `3.0.1`  
-> **Primary language:** Python 3.12+ (backend), TypeScript / Next.js 14 (frontend)  
-> **Architecture:** Clean Architecture (a.k.a. Onion / Ports & Adapters) with FastAPI.  
-> **Agent notes:** see root [`AGENTS.md`](AGENTS.md), [`frontend/AGENTS.md`](frontend/AGENTS.md), and [`k8s/AGENTS.md`](k8s/AGENTS.md) for environment-specific gotchas.
+> **Version:** backend `2.2.0`, frontend `3.0.1`
+> **Stack:** Python 3.12+ / FastAPI (backend), TypeScript / Next.js 14 (frontend)
+> **Architecture:** Clean Architecture (Ports & Adapters)
+> **Agent notes:** [`AGENTS.md`](AGENTS.md), [`frontend/AGENTS.md`](frontend/AGENTS.md), [`k8s/AGENTS.md`](k8s/AGENTS.md)
 
 ---
 
-## 1. Project Overview
+## 1. What It Does
 
 LLM Wiki is a knowledge-aggregation system that:
 
-1. **Ingests** multi-source content (YouTube videos via transcript, manual upload).
-2. **Converts** raw content into structured wiki pages (`pages` + `page_sections`) via a 3-pass LLM integrator.
+1. **Ingests** multi-source content (YouTube transcripts, manual upload).
+2. **Converts** raw content into structured wiki pages via a 3-pass LLM integrator.
 3. **Extracts** entities, events, and relations into a knowledge graph.
-4. **Answers** natural-language questions through an **agentic RAG pipeline** that combines:
-   - Vector search (pgvector HNSW) + full-text search (PostgreSQL `tsvector`) + event search + GraphRAG (entity→event traversal)
-   - Reciprocal Rank Fusion (RRF) over 4 retrieval streams with intent-driven weights
-   - **Unified guardrail + intent analysis** (single LLM call replaces old rewrite→analyze chain): domain guardrail, intent detection (6 types), time_range extraction, entity extraction, **per-tool search inputs** (`embedding_text` for vector, `page_search_query` for keyword, `event_search_query` for event keyword), sub-questions, language detection
-   - Structured embedding text format (`query: ... keywords: ...`) with bilingual VI+EN keywords for bge-m3
-   - Today's date injected into analyzer prompt to prevent LLM date hallucination
-   - LLM-based reranking (Cross-Encoder optional)
-   - **Self-reflective loop**: evaluate answer quality → retry with alternate strategies (HyDE, decompose, expand) if below threshold
-   - Three-tier caching: exact match, semantic (cosine ≥0.80), variable TTL (1h time-sensitive / 24h factual)
-   - Temporal filtering with recency decay scoring
-   - Multi-provider LLM backend (OpenCode Zen, Gemini) with API key rotation
-   - Full LLM input/output visibility in LangSmith traces for synthesis debugging
-5. **Observes** pipeline execution via optional LangSmith tracing and Prometheus metrics (Port/Adapter pattern).
-6. **Monitors** itself via an in-cluster Prometheus + Grafana + Loki + AlertManager stack with Telegram alerting.
-7. **Exposes** everything through a Next.js 14 admin dashboard: chat, wiki browser, source management, progress monitoring, knowledge graph, cron-job administration, and worker administration.
-
-This README is written for **AI agents and future developers**. It explains the architecture, the core patterns, and the rules you must follow when extending the codebase.
+4. **Answers** natural-language questions through an **agentic RAG pipeline**: hybrid search (pgvector HNSW + tsvector + event search + GraphRAG), RRF fusion, LLM reranking, self-reflective evaluation with retry, and three-tier caching.
+5. **Observes** execution via LangSmith tracing and Prometheus metrics (Port/Adapter pattern).
+6. **Monitors** itself via in-cluster Prometheus + Grafana + Loki + AlertManager with Telegram alerting.
+7. **Exposes** a Next.js admin dashboard: chat, wiki browser, source management, knowledge graph, cron-job and worker administration.
 
 ---
 
@@ -41,16 +28,15 @@ This README is written for **AI agents and future developers**. It explains the 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         Next.js 14 Frontend                         │
-│  App Router  •  TanStack Query  •  Tailwind + shadcn/ui primitives  │
+│  App Router  •  TanStack Query  •  Tailwind + shadcn/ui             │
 │  /api/* rewrites → backend-v2:8000 (or NEXT_PUBLIC_API_URL)        │
 └──────────────────────────────────┬──────────────────────────────────┘
                                    │ HTTP / SSE
 ┌──────────────────────────────────▼──────────────────────────────────┐
-│                     FastAPI Backend (llm_wiki)                        │
-│  ─────────────────────────────────────────────────────────────────  │
+│                     FastAPI Backend (llm_wiki)                       │
 │  Presentation  │  Application  │  Domain  │  Infrastructure          │
 │  routes/        use_cases/      entities/   persistence/              │
-│  schemas/       ports/          value_objects  llm/                   │
+│  schemas/       ports/          value_objects  llm/                  │
 │  middleware/    dto/            exceptions.py   search/               │
 │  metrics/                                       embedding/            │
 │                                                 telemetry/            │
@@ -71,32 +57,28 @@ This README is written for **AI agents and future developers**. It explains the 
        │
 ┌──────▼──────────────────────────────────────────────────────────────┐
 │  Monitoring Stack (in-cluster K8s)                                   │
-│  Prometheus (metrics pull) + Grafana (dashboards)                    │
-│  Loki + Promtail (log aggregation)                                   │
-│  AlertManager → Telegram                                             │
-│  Exporters: postgres_exporter, redis_exporter, ollama_exporter        │
+│  Prometheus + Grafana + Loki + Promtail + AlertManager → Telegram    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key design decisions
+### Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| **Clean Architecture** | Business logic (`domain` + `application`) is isolated from frameworks (FastAPI, SQLAlchemy, Redis, Ollama). You can swap databases or LLM providers without touching use cases. |
+| **Clean Architecture** | Business logic isolated from frameworks; swap DBs or LLM providers without touching use cases. |
 | **Async-first** | FastAPI + SQLAlchemy async (`asyncpg`) + `httpx` for all external calls. |
-| **Multi-stream hybrid search** | 4 retrieval streams (pgvector dense, tsvector keyword, event dense, event keyword) + GraphRAG entity→event traversal merged via Reciprocal Rank Fusion (RRF) with intent-aware weights. Diversity capping (max 5/source, 2/page) prevents single-source dominance. |
-| **Self-reflective (Agentic) RAG** | The pipeline evaluates its own answer (faithfulness, completeness, relevance 0–10) and retries with alternate strategies (HyDE, decompose, expand) if quality is below threshold. Controlled via `REASONING_ENABLED=true`. |
-| **Redis answer cache** | Three-tier caching: (1) exact-match via SHA256 of normalized question, (2) semantic cache via embedding cosine similarity (≥0.80), (3) variable TTL: 1h for time-sensitive questions, 24h for factual. Both `/api/query` and `/api/query/stream` benefit. Cache failures are swallowed (degraded performance, not failure). |
-| **Unified guardrail + intent analysis** | Single lightweight LLM call replaces the old rewrite→analyze chain. Extracts: domain guardrail (allowed/blocked), intent (6 types: current_state, historical, timeline, comparative, factual_listing, general), time_range, entities, **per-tool search inputs** (structured `embedding_text` for vector search, `page_search_query` for keyword search, `event_search_query` for event keyword search), sub_questions, and language. Today's date is injected to prevent LLM date hallucination. |
-| **Per-tool search inputs** | The analyzer generates separate search inputs for each tool: `embedding_text` (structured `query: ... keywords: ...` format for bge-m3 embedding → used by both vector_search and event_search), `page_search_query` (OR-delimited domain terms for PostgreSQL tsvector on page_sections), `event_search_query` (OR-delimited proper nouns/events for tsvector on event_observations). This replaces the old generic keyword blob approach. |
-| **LLM-based reranking** | After RRF merge, an LLM re-ranks top candidates for relevance. Optional Cross-Encoder (BAAI/bge-reranker-v2-m3) via `CROSS_ENCODER_ENABLED=true`. |
-| **Multi-provider LLM** | API key rotation across providers (OpenCode Zen, Gemini) with priority and rate-limit tracking. Configured per model tier: primary, fallback, chat, analyzer, evaluator. |
-| **Temporal filtering** | Questions like "trong tháng vừa qua" or "past 2 weeks" are parsed into a `TimeRange` and applied to both vector and keyword search; recency decay boosts newer pages. |
-| **Bilingual search + synthesis** | Search queries include both Vietnamese and English terms so both VI and EN content are retrieved. Answer language matches the user's question — detected by the analyzer LLM (primary) or regex on Vietnamese diacritics (zero-token fallback). System prompts switch between VI and EN at zero additional cost. |
-| **Telemetry** | Optional LangSmith tracing spans every pipeline step (query + ingestion). Full LLM input/output content is stored in span inputs (no redaction) for synthesis debugging. See [`docs/telemetry-implementation-strategy.md`](docs/telemetry-implementation-strategy.md) for the full trace tree architecture. Disabled by default via `LANGSMITH_TRACING=false`. |
-| **Observability** | Prometheus RED metrics + business metrics via `MetricsPort` ABC, structured JSON logging with `trace_id` correlation, Loki + Promtail for log aggregation, Grafana dashboards, AlertManager → Telegram alerting. All monitoring runs in-cluster (Kind/K3s). See [`docs/observability-guide.md`](docs/observability-guide.md). |
-| **Ports as abstract classes** | Every external service is hidden behind a port in `application/ports/`. Infrastructure provides concrete adapters. |
-| **Dependency injection** | `dependency-injector` wires singletons (embedder, LLM, cache, telemetry) and per-request factories (pipeline, use cases). |
+| **Multi-stream hybrid search** | 4 retrieval streams + GraphRAG merged via RRF with intent-aware weights and diversity capping. |
+| **Self-reflective (Agentic) RAG** | Pipeline evaluates its own answer and retries with alternate strategies (HyDE, decompose, expand) if quality is below threshold. |
+| **Redis answer cache** | Three-tier: exact-match (SHA256), semantic (cosine ≥0.80), variable TTL (1h/24h). Cache failures degrade gracefully. |
+| **Unified guardrail + intent analysis** | Single LLM call replaces old rewrite→analyze chain. Extracts guardrail, intent (6 types), time_range, entities, per-tool search inputs, sub-questions, language. |
+| **Per-tool search inputs** | Separate structured inputs per retrieval stream: `embedding_text`, `page_search_query`, `event_search_query`. |
+| **LLM-based reranking** | LLM re-ranks top candidates; optional Cross-Encoder (`BAAI/bge-reranker-v2-m3`). |
+| **Multi-provider LLM** | API key rotation across providers (OpenCode Zen, Gemini) with priority and rate-limit tracking. |
+| **Temporal filtering** | Parsed `TimeRange` applied to search with recency decay. |
+| **Bilingual search + synthesis** | VI + EN keywords; answer language matches question (LLM-detected with regex fallback). |
+| **Telemetry** | LangSmith tracing (full LLM I/O) + Prometheus metrics + JSON structured logging with `trace_id`. |
+| **Ports as ABCs** | Every external service behind a port; infrastructure provides adapters. |
+| **DI** | `dependency-injector` wires singletons (embedder, LLM, cache) and per-request factories (pipeline, repos). |
 
 ---
 
@@ -106,688 +88,136 @@ This README is written for **AI agents and future developers**. It explains the 
 32_LLM_wiki_clean_arch/
 ├── src/llm_wiki/                      # Backend Python package
 │   ├── domain/                          # Pure business logic (no frameworks)
-│   │   ├── entities/                    # Dataclasses: Page, Source, Event, Entity, …
-│   │   ├── value_objects/               # Identifiers, Embedding, SearchResult, Status enums
-│   │   └── exceptions.py                # Domain exception hierarchy
 │   ├── application/                     # Use cases + ports + DTOs
-│   │   ├── use_cases/                   # Query pipeline, ingestion, event extraction
-│   │   ├── ports/                       # Abstract repository & service interfaces
-│   │   └── dto/                         # Input/output dataclasses
 │   ├── infrastructure/                  # Concrete adapters (I/O, frameworks)
-│   │   ├── persistence/postgres/        # SQLAlchemy ORM, mappers, repositories
-│   │   ├── persistence/redis/           # Redis cache adapter
-│   │   ├── llm/                         # OpenAI-compatible LLM adapter + analyzers + reranker
-│   │   ├── embedding/                   # Ollama embedding adapter
-│   │   ├── search/                      # pgvector, tsvector, event_search, cross_encoder, graph_rag
-│   │   ├── telemetry/                   # LangSmith tracing, Prometheus metrics, JSON logging
-│   │   └── entrypoints/                 # cpu_worker, wiki_consumer, health_server
-│   ├── presentation/                    # FastAPI layer
-│   │   ├── routes/                      # API routers
-│   │   ├── middleware/                  # Error handling, request logging
-│   │   ├── schemas/                     # Pydantic request/response models
-│   │   └── dependencies.py              # DI container
+│   ├── presentation/                    # FastAPI layer (routes, schemas, middleware, DI)
 │   ├── config.py                        # Pydantic-settings configuration
 │   └── main.py                          # FastAPI app assembly
-│
 ├── frontend/                            # Next.js 14 App Router
-│   ├── app/                             # Routes (page.tsx, layout.tsx, API routes)
-│   ├── components/                      # UI by feature (chat, wiki, kg, admin, …)
-│   ├── hooks/                           # TanStack Query wrappers
-│   ├── lib/                             # API client, colors, query keys, utils
-│   ├── types/index.ts                   # Shared TypeScript interfaces
+│   ├── app/, components/, hooks/, lib/, types/index.ts
 │   └── next.config.js                   # Standalone output + /api rewrites
-│
-├── tests/                               # Pytest suite
-│   ├── test_all_apis.py                 # Contract/integration tests for all endpoints
-│   ├── conftest.py                      # Async DB session fixture
-│   ├── integration/                     # (reserved)
-│   └── unit/                            # Domain / use-case unit tests
-│
-├── docs/                                # Technical documentation
-│   ├── search-strategy.md               # Full RAG pipeline strategy (unified guardrail+analyzer, per-tool inputs)
-│   ├── telemetry-implementation-strategy.md  # LangSmith tracing architecture
-│   └── observability-guide.md           # Full SRE 4-pillar reference (metrics, logs, traces, alerts)
-│
+├── tests/                               # Pytest suite (contract, integration, unit)
+├── docs/                                # Technical documentation (see §4 below)
 ├── k8s/                                 # Kubernetes manifests (Kind / K3s)
-│   ├── README.md                        # Deployment guide
-│   ├── AGENTS.md                        # Agent notes for K8s operations
-│   ├── backend/                         # FastAPI deployment
-│   ├── frontend/                        # Next.js deployment
-│   ├── postgres/                        # PostgreSQL + pgvector
-│   ├── redis/                           # Valkey
-│   ├── minio/                           # S3-compatible object storage
-│   ├── ollama/                          # Embedding / LLM inference
-│   ├── monitoring/                      # Prometheus + Grafana + Loki + AlertManager
-│   ├── cpu-worker/                      # CPU-bound background worker
-│   ├── wiki-consumer/                   # Wiki ingestion consumer
-│   └── telegram-bot/
-│
-├── scripts/                             # Dev / deploy helpers (see scripts/AGENTS.md)
-│   ├── dev-local.sh                     # Run backend locally against K8s services
-│   ├── test-apis.sh                     # Run API contract tests
-│   ├── sync-and-test.sh                 # Sync changed files into K8s pods
-│   ├── deploy-k8s.sh                    # Build & deploy Docker images to K3s
-│   ├── deploy-monitoring.sh             # Deploy monitoring stack to Kind
-│   ├── monitoring-socat-forward.sh      # Expose all services via socat (Kind)
-│   ├── port-forward-monitoring.sh       # Expose monitoring UIs via kubectl port-forward
-│   ├── benchmark_rag.py                 # Benchmark RAG pipeline with/without tracing
-│   └── eval_rag.py                      # Evaluate RAG against dataset (LangSmith)
-│
+├── scripts/                             # Dev / deploy helpers
 ├── pyproject.toml                       # Python dependencies & tool config
-├── pytest.ini                          # Pytest markers & options
-├── Dockerfile                          # Multi-stage Python backend image
-└── .env.example                        # Required environment variables
+├── pytest.ini, Dockerfile, .env.example
+└── migrations/                          # Alembic migrations
 ```
 
 ---
 
-## 4. Clean Architecture Layers (the “core”)
+## 4. Documentation Map
 
-### 4.1 `domain/` — Enterprise business rules
-
-- **Entities** are plain `@dataclass` objects (`Page`, `Source`, `SourceItem`, `EventCanonical`, `Entity`, `MediaAsset`, `WorkerHeartbeat`, `ApiKey`, `CronJob`, …).
-- **Value objects** are immutable:
-  - `SourceId`, `PageId`, `EventId`, `SourceItemId` — frozen dataclasses wrapping `UUID`.
-  - `Embedding` — validates 1024-dim vectors.
-  - `SearchResult` — uniform result shape for all search adapters.
-  - `Status` enums — `SourceItemStatus`, `PageStatus`, `EventStatus`, `EntityType`.
-- **Domain exceptions** (`DomainException` base) are thrown by business logic and mapped to HTTP status codes in the presentation layer.
-
-**Rule for AI agents:** `domain/` MUST NOT import FastAPI, SQLAlchemy, Redis, `httpx`, or any infrastructure library. If you add a new business concept, put it here first as a dataclass + exception + value object if needed.
-
-### 4.2 `application/` — Application business rules
-
-#### 4.2.1 `application/use_cases/`
-
-Each use case is a single class with one primary `execute(...)` method.
-
-| Use case | File | Responsibility |
-|----------|------|----------------|
-| `AskQuestionUseCase` | `query/ask_question.py` | Orchestrates the RAG pipeline for non-streaming queries. |
-| `StreamAnswerUseCase` | `query/stream_answer.py` | Wraps `QueryPipeline.execute_stream()` for SSE. |
-| `QueryPipeline` | `query/pipeline.py` | **Core orchestrator:** cache → embed → guardrail+intent analysis (single LLM call) → 4-stream retrieve → RRF → rerank → diversity cap → LLM synthesis → cache save. |
-| `SelfReflectiveRAGPipeline` | `query/reflective_pipeline.py` | **Agentic RAG:** wraps `QueryPipeline`, evaluates answer quality (faithfulness/completeness/relevance 0–10), retries with alternate strategies (HyDE, decompose, expand) if below threshold. Controlled via `REASONING_ENABLED=true`. |
-| `IntegrateWikiUseCase` | `ingestion/wiki_integrator.py` | 3-pass LLM integrator: (1) Extract — raw sections from transcript, (2) Analyze — entity/event detection + cross-section links, (3) Write — structured wiki sections with citations. |
-| `ProcessVideoUseCase` | `ingestion/process_video.py` | Takes a `SourceItem` with transcript, runs wiki integration, retries on failure. |
-| `ExtractEventsUseCase` | `ingestion/extract_events.py` | Uses LLM to extract events/entities from a page and stores them in the knowledge graph. |
-| `SummarizeTimeRangeUseCase` | `query/summarize_time_range.py` | Generates a summary of events/pages within a date range. |
-
-**Rule for AI agents:** A use case should only know about **ports** (abstract interfaces) and **domain objects**. It never imports SQLAlchemy or HTTP clients directly.
-
-#### 4.2.2 `application/ports/`
-
-Abstract base classes that define the contract between application and infrastructure.
-
-```
-application/ports/
-├── repositories/
-│   ├── source_repository.py      # SourceRepository, SourceItemRepository
-│   ├── page_repository.py        # PageRepository, PageSectionRepository
-│   ├── event_repository.py       # EventRepository
-│   └── entity_repository.py      # EntityRepository
-├── search/
-│   ├── vector_search.py          # VectorSearchPort, KeywordSearchPort,
-│   │                             # LLMClientPort, EmbeddingServicePort, CacheServicePort
-│   ├── event_search_port.py      # EventSearchPort — dense + sparse event search
-│   ├── guardrail_analyzer_port.py # GuardrailAnalyzerPort — unified guardrail + intent
-│   │                             # + per-tool search input generation (single LLM call)
-│   ├── query_analyzer_port.py    # QueryAnalyzerPort (LEGACY — superseded by guardrail)
-│   ├── query_rewriter_port.py    # QueryRewriterPort (LEGACY — kept for backward compat)
-│   ├── query_expander_port.py    # QueryExpanderPort — synonym generation for keyword search
-│   ├── reranker_port.py          # RerankerPort — LLM-based doc relevance scoring
-│   ├── answer_evaluator_port.py  # AnswerEvaluatorPort — faithfulness/completeness/relevance (0-10)
-│   └── graph_rag_port.py         # GraphRAGPort — entity→event graph traversal
-└── telemetry/
-    ├── telemetry_port.py         # TelemetryPort for LangSmith / null tracing
-    └── metrics_port.py           # MetricsPort for Prometheus RED + business metrics
-```
-**Note:** `GuardrailAnalyzerPort` is the **active** analyzer. It replaced the separate rewrite→analyze flow and generates per-tool search inputs (`embedding_text`, `page_search_query`, `event_search_query`). The old `QueryAnalyzerPort` and `QueryRewriterPort` are kept for backward compatibility but are no longer wired into the pipeline.
-
-**Rule for AI agents:** When you add a new external dependency (e.g., a new LLM provider, a new vector DB, a new cache), define a port in `application/ports/` first, then implement the adapter in `infrastructure/`. The use case code should not change.
-
-#### 4.2.3 `application/dto/`
-
-Plain dataclasses for crossing the application boundary:
-- `QueryInput` / `QueryResult` / `QueryResponse`
-- `SourceCreateRequest` / `SourceResponse` (some overlap with Pydantic schemas — see below)
-- `Admin` DTOs
-
-### 4.3 `infrastructure/` — Frameworks & drivers
-
-#### 4.3.1 Persistence
-
-- **`persistence/postgres/models.py`** — SQLAlchemy ORM models. Mirrors domain entities but adds indexes, foreign keys, `pgvector` columns, computed `tsvector` columns, and JSONB fields.
-- **`persistence/postgres/mappers.py`** — Bidirectional `to_domain(orm)` / `to_orm(domain, existing)` mappers. **This is the only place ORM models become domain entities.**
-- **`persistence/postgres/repositories/*.py`** — Concrete repository implementations (`PostgresSourceRepository`, `PostgresPageRepository`, etc.). They depend on `AsyncSession` and use mappers.
-- **`persistence/postgres/database.py`** — `async_session_factory`, `get_db()` FastAPI dependency, and a sync engine fallback for Alembic/psycopg2 operations.
-- **`persistence/redis/cache_adapter.py`** — `RedisCacheAdapter` implementing `CacheServicePort`. Failures are logged and ignored.
-
-#### 4.3.2 External AI services
-
-- **`llm/openai_adapter.py`** — `OpenAIAdapter` implements `LLMClientPort`. Talks to any OpenAI-compatible endpoint. Multi-provider support (OpenCode Zen, Gemini) with API key rotation and rate-limit tracking via `api_key_manager.py`. Supports streaming and reports token usage.
-- **`llm/guardrail_analyzer_adapter.py`** — `LLMGuardrailAnalyzerAdapter` implements `GuardrailAnalyzerPort`. **Active analyzer** — single LLM call that replaces the old rewrite→analyze chain. Performs guardrail check (finance/economics domain), intent detection (6 types), time_range extraction, entity extraction, and generates **per-tool search inputs**: `embedding_text` (structured `query: ... keywords: ...` format for bge-m3), `page_search_query` (OR-delimited for page_sections tsvector), `event_search_query` (OR-delimited for event_observations tsvector), sub_questions, and language detection. Today's date is injected into the prompt to prevent LLM date hallucination.
-- **`llm/query_analyzer_adapter.py`** — `LLMQueryAnalyzerAdapter` (LEGACY — superseded by guardrail analyzer, kept for backward compat).
-- **`llm/query_rewriter_adapter.py`** — `LLMQueryRewriterAdapter` (LEGACY — no longer wired into pipeline; pronoun resolution was merged into guardrail analysis).
-- **`llm/query_expander_adapter.py`** — `LLMQueryExpanderAdapter` implements `QueryExpanderPort`. Generates synonyms and related terms for broader keyword recall (used in reflective pipeline's `expand` strategy).
-- **`llm/reranker_adapter.py`** — `LLMRerankerAdapter` implements `RerankerPort`. LLM-based relevance scoring of search results before synthesis.
-- **`llm/answer_evaluator_adapter.py`** — `LLMAnswerEvaluatorAdapter` implements `AnswerEvaluatorPort`. Scores faithfulness, completeness, relevance (0–10) for self-reflective loop.
-- **`embedding/ollama_adapter.py`** — `OllamaEmbeddingAdapter` implements `EmbeddingServicePort`. Uses model `bge-m3` and produces 1024-dim vectors.
-- **`llm/api_key_manager.py`** — Rotates multiple provider API keys with priority and rate-limit tracking.
-
-#### 4.3.3 Search
-
-- **`search/pgvector_adapter.py`** — `PgVectorSearchAdapter` implements `VectorSearchPort`. Uses HNSW cosine-distance queries on `page_sections.section_vector` and `event_canonicals.canonical_embedding`. Applies optional `TimeRange` filters and recency scoring (`EXP(-λ * days)`).
-- **`search/tsvector_adapter.py`** — `TsVectorSearchAdapter` implements `KeywordSearchPort`. Uses the persisted `fts_vector` on `page_sections`. Query cleaning preserves Vietnamese diacritics. Also supports `TimeRange` filters and recency scoring.
-- **`search/event_search_adapter.py`** — `EventSearchAdapter` implements `EventSearchPort`. Runs dense (pgvector cosine) and sparse (tsvector) search over `event_observations`. Both modes support `TimeRange` filtering.
-- **`search/graph_rag_adapter.py`** — `GraphRAGAdapter` implements `GraphRAGPort`. Traverses entity→event links: given entities from query analysis, finds related events via `event_entity_links`.
-- **`search/cross_encoder_reranker_adapter.py`** — `CrossEncoderRerankerAdapter` implements `RerankerPort`. Uses sentence-transformers (BAAI/bge-reranker-v2-m3) for pairwise (query, doc) relevance scoring. Optional — enabled via `CROSS_ENCODER_ENABLED=true`.
-
-#### 4.3.4 Telemetry & Observability
-
-> **Full documentation:** [`docs/telemetry-implementation-strategy.md`](docs/telemetry-implementation-strategy.md) — architecture, trace trees, LangSmith UI guide.  
-> **Monitoring plan:** [`plans/260723-0636-monitoring-strategy/`](plans/260723-0636-monitoring-strategy/) — phased rollout for Prometheus/Grafana/Loki/AlertManager.
-
-**Tracing (LangSmith)**
-
-- **`telemetry/langsmith_telemetry_adapter.py`** — Records spans and metadata to LangSmith when `LANGSMITH_TRACING=true`. Uses `parent_run.create_child()` for proper parent-child trace trees (not isolated root runs).
-- **`telemetry/langsmith_eval_adapter.py`** — Evaluates RAG outputs against labeled datasets (optional batch workflow).
-- **`telemetry/null_telemetry_adapter.py`** — No-op adapter used when tracing is disabled.
-- **Traced wrappers** — Wrap ports to emit spans without changing use-case logic: `llm/traced_llm_wrapper.py` (full message content, no redaction), `llm/traced_guardrail_analyzer_wrapper.py`, `embedding/traced_embedding_wrapper.py`, `search/traced_search_wrapper.py`, `search/traced_event_search_wrapper.py`, `persistence/redis/traced_cache_wrapper.py`.
-
-**Metrics (Prometheus — Port/Adapter pattern)**
-
-- **`application/ports/telemetry/metrics_port.py`** — `MetricsPort` ABC defining `counter()`, `histogram()`, `gauge()`. Also defines `MetricsMiddleware` for FastAPI RED metrics (Rate/Error/Duration on HTTP endpoints).
-- **`telemetry/prometheus_metrics_adapter.py`** — `PrometheusMetricsAdapter` — concrete adapter wrapping `prometheus-client`. Lazy metric creation; metrics only appear in `/api/metrics` after first call.
-- **`telemetry/null_metrics_adapter.py`** — `NullMetricsAdapter` — no-op adapter used when `ENABLE_METRICS=false`.
-- **`telemetry/metrics_collector.py`** — `get_metrics()` singleton factory, resolved via `ENABLE_METRICS` config.
-- **`telemetry/business_metrics.py`** — Helper wrappers (`inc_counter`, `track_duration`, `set_gauge`) for pipeline code. Thin layer over `get_metrics()`.
-
-**Structured Logging**
-
-- **`telemetry/logging_config.py`** — JSON-formatted logging with `trace_id`/`span_id` correlation. Controlled via `LOG_FORMAT=text|json`.
-
-**Monitoring Stack (K8s)**
-
-- **`k8s/monitoring/`** — Prometheus, Grafana, Loki, Promtail, AlertManager manifests. Deployed via `scripts/deploy-monitoring.sh`.
-- **Exporter sidecars** on Postgres (`postgres_exporter`), Redis (`redis_exporter`), Ollama (`ollama_exporter`).
-- **Grafana dashboards:** RED (HTTP-level), Business (cache hit rate, LLM tokens, query volume), Ingestion (throughput, queue depth, job duration).
-- **Alerting:** AlertManager → Telegram via `telegram-bot` webhook.
-
-### 4.4 `presentation/` — FastAPI layer
-
-- **`routes/`** — FastAPI routers grouped by feature: `health`, `query`, `sources`, `pages`, `search`, `stubs`.
-- **`schemas/common.py`** — Pydantic request/response models. These are the **public API contract**.
-- **`middleware/error_handler.py`** — Maps `DomainException` subclasses to HTTP codes (404, 409, 400, 502, 429, 422, 500).
-- **`middleware/request_logging.py`** — Logs all requests.
-- **`dependencies.py`** — DI container using `dependency-injector`.
-
-#### Critical presentation detail: two `pages` routes
-
-There are two implementations of `GET /api/pages/{slug}`:
-
-1. `presentation/routes/pages.py` — registered first. Returns a **basic** page shape with sections, media, links joined manually.
-2. `presentation/routes/stubs.py` — has a richer version, but is **shadowed** because of registration order.
-
-> `main.py` registers `pages.router` before `stubs.router`. The richer endpoint in `stubs.py` is effectively unreachable for `/api/pages/{slug}`.
-
-`stubs.py` is only mounted when `ENABLE_STUB_ROUTES=true`. It provides admin endpoints (`/progress`, `/workers`, `/system-stats`, `/graph`, `/entity-graph`, `/admin/*`, `/restart/*`, `/chat/*`, `/attention-items`).
-
-**Rule for AI agents:** If you add a route that conflicts with another path, explicitly check registration order in `main.py`. When in doubt, give admin routes distinct prefixes or merge them into the canonical router.
+| Document | Contents |
+|----------|----------|
+| [`docs/system-architecture.md`](docs/system-architecture.md) | Layer discipline, use-case catalog, ports inventory, adapters, DI pattern, DB schema, frontend architecture, K8s services, feature flags, known gotchas |
+| [`docs/conventions.md`](docs/conventions.md) | Code style, adding concepts/services/APIs, route registration, error handling, env vars, testing, commits |
+| [`docs/search-strategy.md`](docs/search-strategy.md) | Full RAG pipeline: cache, guardrail+intent analysis, 4-stream retrieval, RRF, reranking, synthesis, self-reflective loop |
+| [`docs/telemetry-implementation-strategy.md`](docs/telemetry-implementation-strategy.md) | LangSmith tracing architecture, trace trees, span hierarchy |
+| [`docs/observability-guide.md`](docs/observability-guide.md) | SRE 4-pillar reference: Prometheus, Grafana, Loki, AlertManager |
+| [`01_API_list.md`](01_API_list.md) | Complete API reference (all endpoints, request/response shapes) |
+| [`AGENTS.md`](AGENTS.md) | Agent context: Docker builds, cluster context, design constraints |
+| [`frontend/AGENTS.md`](frontend/AGENTS.md) | Frontend Docker build, Next.js config, environment |
+| [`k8s/AGENTS.md`](k8s/AGENTS.md) | K8s deployment order, RBAC, troubleshooting |
+| [`scripts/AGENTS.md`](scripts/AGENTS.md) | Script usage guide for AI agents |
 
 ---
 
-## 5. Dependency Injection (DI)
+## 5. Core API Surface
 
-`presentation/dependencies.py` defines a `dependency-injector` `Container`:
-
-```python
-class Container(containers.DeclarativeContainer):
-    embedder      = providers.Singleton(OllamaEmbeddingAdapter, ...)
-    llm_client    = providers.Singleton(OpenAIAdapter, ...)
-    cache         = providers.Singleton(RedisCacheAdapter)
-
-    query_pipeline = providers.Factory(
-        QueryPipeline,
-        embedder=embedder,
-        vector_search=None,      # overridden per-request in routes
-        keyword_search=None,     # overridden per-request in routes
-        llm=llm_client,
-        cache=cache,
-    )
-```
-
-**Why some factories pass `None`:** Search adapters need a live `AsyncSession`, which is only available inside a request. So `query.py` builds the pipeline manually:
-
-```python
-def get_query_pipeline(db: AsyncSession = Depends(get_db)):
-    return QueryPipeline(
-        embedder=container.embedder(),
-        vector_search=PgVectorSearchAdapter(db),
-        keyword_search=TsVectorSearchAdapter(db),
-        llm=container.llm_client(),
-        cache=container.cache(),
-    )
-```
-
-**Rule for AI agents:** Stateless singletons (embedder, LLM, cache) go in the DI container. Per-request objects (repositories, search adapters tied to a DB session) are constructed inside route handlers or dependencies using `Depends(get_db)`.
-
----
-
-## 6. Core Flows
-
-### 6.1 RAG Query Pipeline (`POST /api/query` & `/api/query/stream`)
-
-```
-User Question
-    │
-    ▼
-[1. Question Normalization] ──▶ lowercase, strip punctuation, collapse whitespace
-    │
-    ▼
-[2. Exact Cache Check] ──hit──▶ return cached answer (0 LLM cost)
-    │ miss
-    ▼
-[3. Embed Question] ──▶ Ollama bge-m3 ──▶ Embedding(1024)
-    │
-    ▼
-[4. Semantic Cache Check] ──▶ cosine similarity ≥ 0.80 against stored embeddings
-    │ hit                              │ miss
-    ▼                                  ▼
-[return cached answer]       [5. Guardrail + Intent Analysis] ──▶ 1 lightweight LLM call →
-    (embed cost only)              │  guardrail (domain check: finance/economics),
-                                   │  intent (6 types: current_state, historical,
-                                   │    timeline, comparative, factual_listing, general),
-                                   │  time_range (with today's date injected),
-                                   │  entities, language (vi/en),
-                                   │  embedding_text (structured query:... keywords:...),
-                                   │  page_search_query (OR-delimited, section terms),
-                                   │  event_search_query (OR-delimited, proper nouns),
-                                   │  sub_questions (multi-hop decomposition)
-                                   ▼
-                        [6. Multi-Stream Retrieval] ──▶ 4 parallel streams:
-                        │   a) Vector Search (pgvector HNSW cosine + time filter + recency)
-                        │      Input: embedding_text (bge-m3 embedding)
-                        │   b) Keyword Search (tsvector + page_search_query + time filter)
-                        │   c) Event Dense Search (pgvector on event_observations)
-                        │      Input: embedding_text (shared with vector search)
-                        │   d) Event Keyword Search (tsvector + event_search_query)
-                        │   e) Graph RAG (entity→event traversal, if entities detected)
-                                   │
-                                   ▼
-                        [7. Reciprocal Rank Fusion] ──▶ merge 4+ streams, weights vary by intent
-                        │                              (k=60)
-                                   │
-                                   ▼
-                        [8. Rerank] ──▶ LLM-based relevance scoring
-                        │              (or Cross-Encoder if enabled)
-                                   │
-                                   ▼
-                        [9. Diversity Capping] ──▶ max 5/source, 2/page, top 20 to context
-                                   │
-                                   ▼
-                        [10. Build Context] ──▶ top 20 sections, truncated to 2000 chars, cited [1]..[N]
-                                   │
-                                   ▼
-                        [11. LLM Synthesis] ──▶ OpenAI-compatible, bilingual system prompt
-                        │                       (VI/EN switched by detected language),
-                        │                       intent-specific temporal addendum,
-                        │                       temp=0.3, max_tokens=16384
-                                   │
-                                   ▼
-                        [12. Self-Reflective Evaluate] ──▶ if REASONING_ENABLED=true:
-                        │    Score: faithfulness, completeness, relevance (0–10)
-                        │    If score < threshold → retry with alternate strategy:
-                        │      • HyDE (hypothetical document embedding)
-                        │      • Decompose (break into sub-questions)
-                        │      • Expand (synonym keyword expansion)
-                        │    Best answer after budget exhausted
-                                   │
-                                   ▼
-                        [13. Cache Save] ──▶ exact (TTL 1h/24h) + semantic (embedding)
-                                   │
-                                   ▼
-Response: {answer, sources, tokens_used, cache_hit, pipeline_steps, evaluation_scores}
-```
-
-Streaming version (`/api/query/stream`) follows the same flow: exact cache → embed → semantic cache → guardrail+intent analysis → retrieval → rerank → LLM synthesis → self-reflective evaluate → cache save. Cache hits return immediately as a `type: "complete"` SSE event.
-
-SSE events emitted:
-- `status: processing` → `retrieving` → `thinking` → `summarizing`
-- `chunk` / `token` → answer tokens
-- `complete` → {answer, citations, sources_used, tokens_used, evaluation_scores}
-
-**Time range support:** Both `POST /api/query` and `POST /api/query/stream` accept `from_date`/`to_date`. The frontend types expose these as ISO strings (`frontend/types/index.ts` and `frontend/hooks/use-query-stream.ts`).
-
-### 6.2 Ingestion Pipeline
-
-```
-Source (YouTube channel)
-    │
-    ▼
-SourceItem (video) ──▶ download / transcribe ──▶ transcript_text
-    │
-    ▼
-ProcessVideoUseCase ──▶ IntegrateWikiUseCase
-    │
-    ▼
-Page + PageSections (markdown split by headings)
-    │
-    ▼
-ExtractEventsUseCase ──▶ EventCanonical + Entity + EntityRelation
-```
-
-- `IntegrateWikiUseCase` splits markdown on `\n(?=#{1,3} )` and embeds each section.
-- `ExtractEventsUseCase` prompts an LLM to return structured JSON events and links them to entities.
-- Status machine for `SourceItem`: `pending → processing → completed | failed | no_captions | skipped | rate_limited | requires_membership`.
-
----
-
-## 7. Database Schema (key tables)
-
-| Table | Purpose |
-|-------|---------|
-| `sources` | YouTube channels / data sources. |
-| `source_items` | Individual videos/items to ingest. |
-| `pages` | Wiki pages generated from items. `summary_vector` for future page-level search. |
-| `page_sections` | Sections of a page. Contains `section_vector` (HNSW) and `fts_vector` (persisted tsvector). |
-| `page_links` | Manual / extracted links between pages. |
-| `media_assets` | Files stored in MinIO, referenced by page/section. |
-| `event_canonicals` | Canonical events extracted across pages. |
-| `event_observations` | Per-page evidence for an event. |
-| `event_timeline_chains` | Causal / temporal links between events. |
-| `entities` | People, organizations, locations, concepts, products, … |
-| `event_entity_links` | Many-to-many: event ↔ entity. |
-| `entity_relations` | Typed relations between entities (e.g., `competes_with`, `located_in`). |
-| `ingestion_logs` | Audit trail of ingestion events. |
-| `worker_heartbeats` | Worker liveness and current job. |
-| `api_keys` | Rotating LLM provider keys with priority & rate-limit tracking. |
-| `cron_jobs` | Managed background tasks. |
-| `telegram_subscribers` | Telegram bot subscribers. |
-
-**Vector dimensions:** All `Vector(1024)` columns expect the `bge-m3` embedding model.
-
----
-
-## 8. Frontend Architecture
-
-### Stack
-
-- **Next.js 14** App Router, `output: 'standalone'`
-- **React 18**, TypeScript 5.6
-- **TanStack Query v5** for server state
-- **Tailwind CSS v3** + custom `components/ui/*` primitives (shadcn/ui style)
-- **Graph visualization:** `react-force-graph-3d`, `@xyflow/react`, `@dagrejs/dagre`
-- **Markdown:** `react-markdown` + `rehype-highlight` + `rehype-sanitize` + `remark-gfm`
-
-### Key directories
-
-```
-frontend/
-├── app/                 # Routes
-│   ├── page.tsx         # Dashboard
-│   ├── chat/            # Chat with streaming
-│   ├── wiki/            # Wiki list + detail
-│   ├── sources/         # Source CRUD
-│   ├── kg/              # Knowledge graph
-│   ├── admin/           # Admin panels
-│   └── api/query/stream/route.ts   # Server-side SSE proxy
-├── components/          # UI components
-│   ├── ui/              # Primitive components (card, button, badge, …)
-│   ├── chat/            # Chat-specific components
-│   ├── wiki/            # Wiki-specific components
-│   ├── kg/              # Graph components
-│   ├── sources/         # Source forms/cards
-│   ├── admin/           # Admin panels
-│   ├── dashboard/       # Dashboard widgets
-│   └── layout/          # Sidebar, header
-├── hooks/               # TanStack Query hooks
-├── lib/                 # API client, query keys, helpers
-└── types/index.ts       # API contracts in TypeScript
-```
-
-### API client
-
-`lib/api-client.ts` is the single source of truth for backend calls. All hooks use it. The base URL is `process.env.NEXT_PUBLIC_API_URL || "/api"`. In production/K8s, the Next.js rewrite proxies `/api/*` to `backend-v2.llm-wiki.svc.cluster.local:8000/api/*`.
-
-### Streaming
-
-- `frontend/app/api/query/stream/route.ts` proxies the SSE stream from the backend to the browser (avoids CORS and long-timeout issues).
-- `frontend/hooks/use-query-stream.ts` consumes the SSE and updates React state.
-
-### Type contract
-
-`frontend/types/index.ts` defines the exact shapes the frontend expects. **The backend must match these shapes.** The integration test `tests/test_all_apis.py` verifies this contract.
-
----
-
-## 9. API Surface
-
-All backend endpoints are under `/api`. See `01_API_list.md` for full details.
-
-### Core (always available)
+All endpoints under `/api`. See [`01_API_list.md`](01_API_list.md) for full details.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/health` | `{status, version, db, pending_count, requires_membership_count, failed_count}`. |
-| GET | `/api/metrics` | Prometheus text format metrics (enabled when `ENABLE_METRICS=true`). |
-| POST | `/api/query` | Non-streaming RAG. Returns `{answer, sources, tokens_used, cache_hit, pipeline_steps}`. |
-| POST | `/api/query/stream` | SSE streaming RAG. |
-| GET | `/api/summarize` | Time-range summary: `{summary, time_range, stats, top_events, top_pages}`. |
-| POST | `/api/sources` | Create source. |
-| GET | `/api/sources` | List active sources as `{sources, total}`. |
-| GET | `/api/pages/{slug}` | Get page detail (basic version from `pages.py`). |
-| GET | `/api/pages` | Paginated page list `{items, total, page, per_page}`. |
-| GET | `/api/search` | Full-text search: `{results: [{id,title,slug,summary,source_name,published_at}], total}`. |
-
-### Admin / stubs (require `ENABLE_STUB_ROUTES=true`)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/progress` | Ingestion dashboard stats. |
-| GET | `/api/system-stats` | CPU/RAM/disk via `psutil`. |
-| GET | `/api/workers` | Worker heartbeat list. |
-| GET | `/api/attention-items` | Failed / needs-attention items. |
-| GET/POST | `/api/graph`, `/api/entity-graph`, `/api/cluster-graph`, `/api/cluster-expand` | Graph data. `entity-graph` and `cluster-expand` now return real `entities` nodes and `entity_relations` edges. |
-| GET/POST/PATCH/DELETE | `/api/sources/{id}/*` | Source detail, scan, items, skip/retry/transcript. |
-| POST | `/api/restart/{id}`, `/api/restart/source/{id}` | Reset items to pending. |
-| GET/POST/PUT/DELETE | `/api/admin/api-keys` | API key management. |
-| GET/POST | `/api/admin/cron-jobs` | Cron job management. Status is real: `scheduled`, `running`, `error`, `stopped`, `not_found`, `no_workers`. |
-| DELETE | `/api/admin/clear-alerts` | Clear ingestion logs. |
-| GET/POST/PUT/DELETE | `/api/chat/sessions` | Chat sessions (currently stub). |
+| GET | `/api/health` | `{status, version, db, pending_count, ...}` |
+| GET | `/api/metrics` | Prometheus text format (when `ENABLE_METRICS=true`) |
+| POST | `/api/query` | Non-streaming RAG: `{answer, sources, tokens_used, ...}` |
+| POST | `/api/query/stream` | SSE streaming RAG |
+| GET | `/api/summarize` | Time-range summary: `{summary, time_range, stats, top_events, top_pages}` |
+| POST | `/api/sources` | Create source |
+| GET | `/api/sources` | List active sources `{sources, total}` |
+| GET | `/api/pages/{slug}` | Page detail with sections, media, links |
+| GET | `/api/pages` | Paginated list `{items, total, page, per_page}` |
+| GET | `/api/search` | Full-text search `{results, total}` |
+| GET/POST | `/api/admin/*` | Admin endpoints (require `ENABLE_STUB_ROUTES=true`) |
 
 ---
 
-## 10. Development & Deployment
+## 6. Development
 
-### Local development against K8s services
+### Local dev against K8s services
 
 ```bash
-# 1. Ensure K8s services are running (see k8s/README.md)
-# 2. Port-forward in separate terminals:
-kubectl port-forward -n llm-wiki svc/postgres 5432:5432
-kubectl port-forward -n llm-wiki svc/redis   6379:6379
-kubectl port-forward -n llm-wiki svc/ollama  11434:11434
+# 1. Port-forward K8s services:
+kubectl port-forward -n llm-wiki svc/postgres 5432:5432 &
+kubectl port-forward -n llm-wiki svc/redis   6379:6379 &
+kubectl port-forward -n llm-wiki svc/ollama  11434:11434 &
 
-# 3. Create .env from .env.example, using localhost endpoints.
+# 2. Create .env from .env.example
 
-# 4. Backend
+# 3. Backend
 pip install -e ".[dev]"
 PYTHONPATH=src:. uvicorn llm_wiki.main:app --reload --host 0.0.0.0 --port 8000
 
-# 5. Frontend (another terminal)
-cd frontend
-npm install
+# 4. Frontend
+cd frontend && npm install
 echo "NEXT_PUBLIC_API_URL=http://localhost:8000/api" > .env.local
 npm run dev
 ```
 
-### Useful scripts
+### Key scripts
 
 | Script | Purpose |
 |--------|---------|
-| `./scripts/dev-local.sh` | Install deps and start backend locally (manual frontend step). |
-| `./scripts/test-apis.sh [URL]` | Run contract tests against running backend. |
-| `./scripts/test-apis.sh --critical-only` | Run only frontend-breaking tests. |
-| `./scripts/test-apis.sh --report` | Run all + generate JSON report. |
-| `./scripts/sync-and-test.sh` | Copy changed files into K8s pods and run tests. |
-| `./scripts/sync-and-test.sh --backend` | Sync backend files only. |
-| `./scripts/sync-and-test.sh --frontend` | Rebuild + reload frontend image. |
-| `./scripts/sync-and-test.sh --test-only` | Just run tests against port-forwarded backend. |
-| `./scripts/deploy-k8s.sh` | Build images and deploy to K3s. |
-| `./scripts/deploy-monitoring.sh` | Deploy Prometheus + Grafana + Loki + AlertManager to Kind. |
-| `./scripts/monitoring-socat-forward.sh` | Expose all services (app + monitoring) via socat on LAN-accessible ports. |
-| `./scripts/port-forward-monitoring.sh` | Expose monitoring UIs (Grafana, Prometheus, AlertManager) via `kubectl port-forward`. |
-| `python scripts/benchmark_rag.py` | Benchmark RAG pipeline latency/throughput with tracing on/off. |
-| `python scripts/eval_rag.py` | Evaluate RAG quality against a labeled dataset (LangSmith). |
-| See `scripts/AGENTS.md` | AI agent usage guide for all scripts. |
+| `./scripts/dev-local.sh` | Install deps + start backend locally |
+| `./scripts/test-apis.sh [URL]` | Run contract tests against running backend |
+| `./scripts/sync-and-test.sh` | Sync changed files into K8s pods + test |
+| `./scripts/deploy-k8s.sh` | Build images + deploy to K3s |
+| `./scripts/deploy-monitoring.sh` | Deploy monitoring stack to Kind |
+| `./scripts/monitoring-socat-forward.sh` | Expose all services via socat (Kind) |
+| `python scripts/benchmark_rag.py` | Benchmark RAG pipeline |
+| `python scripts/eval_rag.py` | Evaluate RAG against labeled dataset (LangSmith) |
+
+### Docker builds
+
+```bash
+# Backend
+docker build --network=host -t 32_llm_wiki_clean_arch-backend:latest .
+
+# Frontend
+docker build --network=host -t 32_llm_wiki_clean_arch-frontend:latest -f frontend/Dockerfile frontend/
+```
+
+Both require `--network=host` — the default Docker bridge on this host cannot resolve external registries.
 
 ### K8s deployment
 
-See `k8s/README.md` for full instructions. Highlights:
+See [`k8s/README.md`](k8s/README.md) and [`k8s/AGENTS.md`](k8s/AGENTS.md). Key facts:
 
-- Uses `kind` with `extraMounts` + `hostPath` for live code reload without rebuilding images.
-- `backend-v2`, `cpu-worker`, and `wiki-consumer` all use the same backend image (`32_llm_wiki_clean_arch-backend:latest`).
-- `cpu-worker` deployment includes an `api` sidecar container on port `8100` so the backend can forward cron-job start/stop requests.
-- `backend-v2` runs under `serviceAccountName: backend-v2` so it can read K8s `cronjobs`/`jobs` via RBAC (`k8s/backend/rbac.yaml`).
-- Frontend image is built standalone (no `initContainer`/`hostPath` volumes); `next.config.js` rewrites `/api/*` to the backend service.
-- Ingress: `llm-wiki.local` → `/api` → backend, `/` → frontend. NodePort `30080` also exposed.
+- `backend-v2`, `cpu-worker`, `wiki-consumer` share the same backend image.
+- `cpu-worker` includes an `api` sidecar on port `8100` for cron-job control.
+- Frontend image is standalone; Next.js `rewrites()` proxies `/api/*` to `backend-v2:8000`.
+- Ingress: `llm-wiki.local` → `/api` → backend, `/` → frontend. NodePort `30080`.
 
 ---
 
-## 11. Testing Strategy
-
-### `tests/test_all_apis.py`
-
-A comprehensive integration / contract test suite. It validates every endpoint against the **frontend-expected shapes** and explicitly catches known mismatches:
-
-- `GET /api/sources` must be `{sources: [], total: N}` not a flat array.
-- `GET /api/pages` must include `page` and `per_page`.
-- `GET /api/search` results must include `slug`, `summary`, `source_name`, `published_at`.
-- `POST /api/query` must return `answer`, `sources`, `tokens_used`, `cache_hit`, `pipeline_steps`.
-- `POST /api/query/stream` must emit `type: "token"` and `type: "complete"`.
-- `GET /api/health` must include `pending_count`, `requires_membership_count`, `failed_count`.
-- `GET /api/pages/{slug}` must include sections, media, links, source info.
-
-Run it:
+## 7. Testing
 
 ```bash
+# Contract tests (validate API shapes against frontend types)
 API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v
+
+# Unit tests
+pytest tests/unit/ -v
+
+# Lint + type check
+ruff check . && ruff format . --check
+mypy src/
 ```
 
-### Unit tests
-
-- `tests/unit/domain/test_entities.py` — domain entity behavior.
-- `tests/unit/application/test_query_pipeline.py` — use-case logic.
-
-### Lint / type check
-
-- `ruff` (lint + format) configured in `pyproject.toml`.
-- `mypy` (non-strict) with pydantic plugin.
-- Pre-commit hooks in `.pre-commit-config.yaml`.
+See [`docs/conventions.md`](docs/conventions.md) for the full testing strategy and quality gates.
 
 ---
 
-## 12. Conventions & Rules for AI Contributors
-
-### 12.1 Code style
-
-- Python 3.12+ syntax; line length 100; target `py312`.
-- Use `async`/`await` for I/O. Use `AsyncSession` for DB work.
-- Prefer `dataclasses` for domain objects and DTOs.
-- Use Pydantic v2 for request/response schemas.
-- Import order: `ruff` handles it; run `ruff check .` and `ruff format .` before committing.
-
-### 12.2 Adding a new domain concept
-
-1. Add dataclass to `domain/entities/<feature>.py`.
-2. Add value object / ID / enum if needed in `domain/value_objects/`.
-3. Add domain exception in `domain/exceptions.py` if it represents a business error.
-4. Add repository port in `application/ports/repositories/<feature>_repository.py`.
-5. Add use case in `application/use_cases/<feature>/`.
-6. Add ORM model in `infrastructure/persistence/postgres/models.py`.
-7. Add mapper in `infrastructure/persistence/postgres/mappers.py`.
-8. Add concrete repository in `infrastructure/persistence/postgres/repositories/<feature>_repository.py`.
-9. Add route in `presentation/routes/<feature>.py` and schema in `presentation/schemas/common.py`.
-10. Add TypeScript type in `frontend/types/index.ts` and API client function in `frontend/lib/api-client.ts`.
-11. Add test in `tests/test_all_apis.py` (and unit tests if needed).
-
-### 12.3 Adding a new external service
-
-1. Define a port in `application/ports/search/` or `application/ports/repositories/`.
-2. Implement adapter in `infrastructure/<category>/`.
-3. Wire adapter in `presentation/dependencies.py` (or construct per-request in routes if it needs `AsyncSession`).
-4. Update `.env.example` and `config.py` if new settings are required.
-
-### 12.4 API response shapes
-
-- **Never** return a raw ORM model or domain entity directly from a route. Always build a Pydantic/JSON response that matches `frontend/types/index.ts`.
-- When modifying an endpoint, update `01_API_list.md`, `frontend/types/index.ts`, `frontend/lib/api-client.ts`, and the contract tests.
-
-### 12.5 Route registration
-
-- `main.py` registers routers in order. The first matching route wins.
-- If you add a path that overlaps an existing one, verify which router is served.
-- Admin-only routes should live in `stubs.py` and be gated by `ENABLE_STUB_ROUTES=true` only if they are genuinely not ready for production. Prefer moving admin routes to their own canonical router as they mature.
-
-### 12.6 Error handling
-
-- Business errors throw `DomainException` subclasses.
-- `presentation/middleware/error_handler.py` maps them to HTTP codes.
-- Unexpected errors are caught by `unhandled_exception_handler` and logged.
-- Never swallow exceptions silently in infrastructure adapters unless degradation is intentional (e.g., Redis cache failures).
-
-### 12.7 Environment variables
-
-- All settings live in `llm_wiki.config.settings` using `pydantic-settings`.
-- Add new env vars to both `.env.example` and `config.py`.
-- Use `validation_alias` for uppercase env var names; default values should be safe for local dev.
-
----
-
-## 13. Known Issues & Gotchas
-
-1. **Route shadowing:** `GET /api/pages/{slug}` is served by `pages.py`, not the richer version in `stubs.py`. If you need the enriched shape, either merge the implementations or change registration order.
-2. **DI container passes `None` for session-bound deps:** `query_pipeline`, `integrate_wiki_use_case`, etc. are declared with `None` for repository/search args because they need a per-request `AsyncSession`. The real objects are built in route handlers or dependencies.
-3. **Chat sessions use file-backed storage:** persisted to `CHAT_HISTORY_DIR` (default `/data/chat-history`). In K8s this is a `hostPath` volume. Sessions auto-title from the first user message.
-4. **Chat session mutation endpoints return 501:** POST/PUT/DELETE on `/api/chat/sessions` are stubs. Chat history read works; CRUD mutations are not yet implemented.
-5. **Frontend streaming proxy:** `frontend/app/api/query/stream/route.ts` proxies the SSE stream from the backend to the browser. In K8s it uses the internal service DNS; for local dev, set `NEXT_PUBLIC_API_URL`.
-6. **Cache failures are silent:** if Redis is down, the system still works but answers are not cached.
-7. **Embedding dimension mismatch:** `Embedding` validates 1024 dims. If you change the embedding model, update `Embedding.dimensions` and all `Vector(...)` columns in `models.py`.
-8. **Docker DNS on this host:** the default Docker bridge cannot resolve `registry.npmjs.org` reliably. Build the frontend image with `--network=host` (see `frontend/AGENTS.md`).
-9. **K8s CronJob status requires RBAC:** the backend ServiceAccount must be bound to `k8s/backend/rbac.yaml` before `/api/admin/cron-jobs` can report real K8s state.
-10. **Self-reflective pipeline adds latency:** with `REASONING_ENABLED=true`, the pipeline may make 2–4 additional LLM calls per query (evaluate + retry). Monitor token usage and response times.
-11. **Cross-Encoder requires GPU for reasonable speed:** `CROSS_ENCODER_ENABLED=true` with `BAAI/bge-reranker-v2-m3` adds ~1–2s per query on CPU. Leave disabled (`false`) for CPU-only deployments.
-12. **`data/` directory is git-ignored:** the `data/` directory contains PostgreSQL data, MinIO objects, Redis dumps, and other sensitive runtime state — it is excluded from version control via `.gitignore`.
-13. **Legacy ports still exist in codebase:** `QueryAnalyzerPort`, `QueryRewriterPort`, and their adapters/traced wrappers are kept for backward compatibility but are no longer wired into the pipeline. The active analyzer is `GuardrailAnalyzerPort` with `LLMGuardrailAnalyzerAdapter`.
-
----
-
-## 14. Quick Reference
-
-| I want to… | Look at / Run |
-|------------|---------------|
-| Understand the RAG pipeline | `src/llm_wiki/application/use_cases/query/pipeline.py` |
-| Understand the agentic/reflective loop | `src/llm_wiki/application/use_cases/query/reflective_pipeline.py` |
-| Understand the full search strategy | `docs/search-strategy.md` |
-| Add a new API endpoint | `src/llm_wiki/presentation/routes/`, `schemas/common.py`, `tests/test_all_apis.py` |
-| Add a new DB table | `models.py` → `mappers.py` → `repositories/` → `ports/` → `routes/` |
-| Add a new search port+adapter | `application/ports/search/<new>_port.py` → `infrastructure/search/<new>_adapter.py` → wire in `query/pipeline.py` |
-| Change LLM provider | `infrastructure/llm/openai_adapter.py` + `config.py` + `dependencies.py` |
-| Change embedding model | `infrastructure/embedding/ollama_adapter.py` + `domain/value_objects/embedding.py` + `models.py` |
-| Add a new business metric | `infrastructure/telemetry/business_metrics.py` → call `inc_counter`/`track_duration` in pipeline code |
-| View Prometheus metrics | `GET /api/metrics` (Prometheus text format) or Grafana at `http://<host>:3100` (after `monitoring-socat-forward.sh`) |
-| View monitoring dashboards | `./scripts/monitoring-socat-forward.sh` (all services) or `./scripts/port-forward-monitoring.sh` (monitoring only) |
-| Run all contract tests | `API_BASE_URL=http://localhost:8000 pytest tests/test_all_apis.py -v` |
-| Sync code to K8s + test | `./scripts/sync-and-test.sh` |
-| Deploy to K3s | `./scripts/deploy-k8s.sh` |
-| Deploy to Kind | See `k8s/README.md` quick-start + `k8s/AGENTS.md` for order + RBAC |
-| Deploy monitoring stack | `./scripts/deploy-monitoring.sh` |
-| Run frontend locally | `cd frontend && npm install && npm run dev` |
-| Build frontend Docker image | `docker build --network=host -t 32_llm_wiki_clean_arch-frontend:latest -f frontend/Dockerfile frontend/` (see `frontend/AGENTS.md`) |
-| Run RAG benchmarks | `LANGSMITH_TRACING=false python scripts/benchmark_rag.py --questions eval/questions.jsonl` |
-| Evaluate RAG quality | `python scripts/eval_rag.py --dataset eval/rag_eval_dataset.jsonl --run` |
-| Analyze LangSmith traces | Use the trace-analyzer skill or open `https://smith.langchain.com` |
-
----
-
-*Last updated for backend v2.2.0 / frontend v3.0.1 — unified guardrail+intent analysis (single LLM call), per-tool search inputs (embedding_text, page_search_query, event_search_query), structured embedding format (query:... keywords:...), today's date injection for analyzer, full LLM content visibility in LangSmith, 4-stream hybrid retrieval, LLM reranking + Cross-Encoder, multi-provider LLM, Prometheus metrics (Port/Adapter), Grafana/Loki/AlertManager stack, structured JSON logging with trace_id.*
+*Last updated: backend v2.2.0 / frontend v3.0.1*
