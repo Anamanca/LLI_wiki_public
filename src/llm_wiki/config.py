@@ -80,7 +80,6 @@ class Settings(BaseSettings):
     rapidapi_host: str = Field(
         default="youtube-transcriptor.p.rapidapi.com", validation_alias="RAPIDAPI_HOST"
     )
-    telegram_alert_chat_id: str = Field(default="", validation_alias="TELEGRAM_ALERT_CHAT_ID")
     worker_id: str = Field(default="", validation_alias="WORKER_ID")
     consumer_id: str = Field(default="", validation_alias="CONSUMER_ID")
     minio_bucket: str = Field(default="llm-wiki-media", validation_alias="MINIO_BUCKET")

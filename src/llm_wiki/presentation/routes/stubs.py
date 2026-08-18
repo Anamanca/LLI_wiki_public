@@ -89,7 +89,7 @@ async def progress(db: AsyncSession = Depends(get_db)):
     # latest ingestion alerts — error/warning types for items that are
     # still active. Once an item reaches a terminal state (completed, failed,
     # unavailable, etc.) its stale error/retry logs are no longer relevant.
-    alert_types = ["error", "rate_limit", "retry", "api_limit"]
+    alert_types = ["error", "rate_limit", "retry", "api_limit", "api_key_error"]
     terminal_done = [
         "completed",
         "published",

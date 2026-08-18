@@ -10,6 +10,7 @@ from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +20,9 @@ from llm_wiki.application.use_cases.ingestion.youtube_poller import (
     poll_channel,
     write_scan_log,
 )
+from llm_wiki.infrastructure.llm.api_key_manager import get_key_manager
 from llm_wiki.infrastructure.persistence.postgres import models as orm
+from llm_wiki.infrastructure.persistence.redis.wiki_queue import push_wiki_job
 from llm_wiki.presentation.dependencies import get_db
 from llm_wiki.shared.datetime_utils import now
 
@@ -456,18 +459,18 @@ async def get_scan_logs(
     logs = result.scalars().all()
     return [
         {
-            "id": l.id,
-            "source_id": str(l.source_id),
-            "source_name": l.source_name,
-            "scan_type": l.scan_type,
-            "started_at": l.started_at.isoformat(),
-            "completed_at": l.completed_at.isoformat() if l.completed_at else None,
-            "api_calls": l.api_calls,
-            "quota_used": l.quota_used,
-            "videos_found": l.videos_found,
-            "videos_inserted": l.videos_inserted,
-            "error_message": l.error_message,
-            "success": l.success,
+            "id": log.id,
+            "source_id": str(log.source_id),
+            "source_name": log.source_name,
+            "scan_type": log.scan_type,
+            "started_at": log.started_at.isoformat(),
+            "completed_at": log.completed_at.isoformat() if log.completed_at else None,
+            "api_calls": log.api_calls,
+            "quota_used": log.quota_used,
+            "videos_found": log.videos_found,
+            "videos_inserted": log.videos_inserted,
+            "error_message": log.error_message,
+            "success": log.success,
         }
         for log in logs
     ]
@@ -498,11 +501,25 @@ async def restart_item(item_id: str, db: AsyncSession = Depends(get_db)):
     item = result.scalar_one_or_none()
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
-    item.status = "pending"
+    # If item has already passed through cpu-worker (has transcript and classification),
+    # reset to "classified" so cpu-worker skips re-extraction and wiki-consumer picks it up.
+    # Otherwise, reset to "pending" so the full pipeline runs.
+    if item.status == "wiki_processing" or (item.transcript_text and item.transcript_json):
+        item.status = "classified"
+    else:
+        item.status = "pending"
     item.error_message = None
     item.retry_after = None
     await db.commit()
-    return {"status": "ok", "item_id": item_id, "restarted": 1}
+    # If reset to "classified", push into Redis wiki queue so wiki-consumer picks it up.
+    if item.status == "classified":
+        try:
+            await push_wiki_job(item.id)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to push %s to wiki queue after restart", item.id
+            )
+    return {"status": "ok", "item_id": item_id, "restarted": 1, "new_status": item.status}
 
 
 @router.post("/restart/source/{source_id}")
@@ -511,7 +528,7 @@ async def restart_source(source_id: str, db: AsyncSession = Depends(get_db)):
         sid = UUID(source_id)
     except ValueError as err:
         raise HTTPException(status_code=400, detail="Invalid source ID") from err
-    error_statuses = ["failed", "no_captions", "rate_limited", "skipped"]
+    error_statuses = ["failed", "no_captions", "rate_limited", "skipped", "wiki_processing"]
     result = await db.execute(
         select(orm.SourceItem).where(
             orm.SourceItem.source_id == sid,
@@ -521,7 +538,8 @@ async def restart_source(source_id: str, db: AsyncSession = Depends(get_db)):
     items = result.scalars().all()
     count = 0
     for item in items:
-        item.status = "pending"
+        # wiki_processing items already have transcript → reset to classified, not pending
+        item.status = "classified" if item.status == "wiki_processing" else "pending"
         item.error_message = None
         item.retry_after = None
         count += 1
@@ -536,8 +554,44 @@ async def restart_source_legacy(source_id: str, db: AsyncSession = Depends(get_d
 
 
 # ---------------------------------------------------------------------------
-# API key management stubs (read-only list; mutations are not implemented)
+# API key management
 # ---------------------------------------------------------------------------
+
+
+class ApiKeyCreate(BaseModel):
+    provider: str = Field(default="opencode", pattern="^(opencode|gemini)$")
+    api_key: str = Field(min_length=8, max_length=512)
+    model_name: str = Field(default="deepseek-v4-flash", max_length=255)
+    priority: int = Field(default=0, ge=0, le=100)
+
+
+class ApiKeyUpdate(BaseModel):
+    status: str | None = Field(default=None, pattern="^(active|rate_limited|disabled)$")
+    priority: int | None = Field(default=None, ge=0, le=100)
+    model_name: str | None = Field(default=None, max_length=255)
+
+
+def _mask_key(api_key: str) -> str:
+    """Mask an API key, showing only the trailing 4 characters."""
+    return "***" + api_key[-4:] if len(api_key) >= 4 else "***"
+
+
+def _serialize_key(r: orm.ApiKey) -> dict:
+    return {
+        "id": str(r.id),
+        "provider": r.provider,
+        "api_key_masked": _mask_key(r.api_key),
+        "model_name": r.model_name,
+        "status": r.status,
+        "priority": r.priority,
+        "rate_limited_until": r.rate_limited_until.isoformat()
+        if r.rate_limited_until
+        else None,
+        "usage_count": r.usage_count,
+        "last_used_at": r.last_used_at.isoformat() if r.last_used_at else None,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    }
 
 
 @router.get("/api-keys")
@@ -545,34 +599,68 @@ async def list_api_keys(db: AsyncSession = Depends(get_db)):
     q = select(orm.ApiKey).order_by(orm.ApiKey.priority, orm.ApiKey.created_at.desc())
     result = await db.execute(q)
     rows = result.scalars().all()
-    return [
-        {
-            "id": str(r.id),
-            "provider": r.provider,
-            "api_key_masked": "***" + r.api_key[-4:] if len(r.api_key) >= 4 else "***",
-            "model_name": r.model_name,
-            "status": r.status,
-            "priority": r.priority,
-            "rate_limited_until": r.rate_limited_until.isoformat()
-            if r.rate_limited_until
-            else None,
-            "usage_count": r.usage_count,
-            "last_used_at": r.last_used_at.isoformat() if r.last_used_at else None,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
-        }
-        for r in rows
-    ]
+    return [_serialize_key(r) for r in rows]
 
 
-@router.post("/api-keys")
-async def create_api_key(_: dict):
-    raise HTTPException(status_code=501, detail="Creating API keys via the UI is not implemented")
+@router.post("/api-keys", status_code=201)
+async def create_api_key(payload: ApiKeyCreate, db: AsyncSession = Depends(get_db)):
+    existing = await db.execute(
+        select(orm.ApiKey).where(
+            orm.ApiKey.provider == payload.provider,
+            orm.ApiKey.api_key == payload.api_key,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="API key already exists for this provider")
+
+    key = orm.ApiKey(
+        provider=payload.provider,
+        api_key=payload.api_key,
+        model_name=payload.model_name,
+        status="active",
+        priority=payload.priority,
+    )
+    db.add(key)
+    await db.commit()
+    await db.refresh(key)
+
+    await get_key_manager().invalidate_cache()
+
+    logging.getLogger(__name__).info(
+        "Created API key: provider=%s model=%s priority=%d",
+        key.provider,
+        key.model_name,
+        key.priority,
+    )
+    return _serialize_key(key)
 
 
 @router.put("/api-keys/{key_id}")
-async def update_api_key(key_id: str, _: dict):
-    raise HTTPException(status_code=501, detail="Updating API keys via the UI is not implemented")
+async def update_api_key(key_id: str, payload: ApiKeyUpdate, db: AsyncSession = Depends(get_db)):
+    try:
+        kid = UUID(key_id)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail="Invalid API key ID") from err
+    result = await db.execute(select(orm.ApiKey).where(orm.ApiKey.id == kid))
+    key = result.scalar_one_or_none()
+    if not key:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    if payload.status is not None:
+        key.status = payload.status
+        if payload.status != "rate_limited":
+            key.rate_limited_until = None
+    if payload.priority is not None:
+        key.priority = payload.priority
+    if payload.model_name is not None:
+        key.model_name = payload.model_name
+
+    await db.commit()
+    await db.refresh(key)
+
+    await get_key_manager().invalidate_cache()
+
+    return _serialize_key(key)
 
 
 @router.delete("/api-keys/{key_id}")
@@ -585,8 +673,26 @@ async def delete_api_key(key_id: str, db: AsyncSession = Depends(get_db)):
     key = result.scalar_one_or_none()
     if not key:
         raise HTTPException(status_code=404, detail="API key not found")
+
+    # Invariant: never delete the last *active* key, so at least one usable key
+    # always remains (the env fallback is the safety net only if the DB is empty).
+    if key.status == "active":
+        active_count = (
+            await db.execute(
+                select(func.count(orm.ApiKey.id)).where(orm.ApiKey.status == "active")
+            )
+        ).scalar() or 0
+        if active_count <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot delete the last active API key",
+            )
+
     await db.delete(key)
     await db.commit()
+
+    await get_key_manager().invalidate_cache()
+
     return {"status": "ok", "deleted": 1}
 
 
@@ -603,7 +709,11 @@ async def activate_api_key(key_id: str, db: AsyncSession = Depends(get_db)):
     key.status = "active"
     key.rate_limited_until = None
     await db.commit()
-    return {"status": "ok", "activated": 1}
+    await db.refresh(key)
+
+    await get_key_manager().invalidate_cache()
+
+    return _serialize_key(key)
 
 
 # ---------------------------------------------------------------------------
@@ -613,7 +723,7 @@ async def activate_api_key(key_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.delete("/clear-alerts")
 async def clear_alerts(db: AsyncSession = Depends(get_db)):
-    alert_types = ["error", "rate_limit", "retry", "api_limit"]
+    alert_types = ["error", "rate_limit", "retry", "api_limit", "api_key_error"]
     result = await db.execute(
         delete(orm.IngestionLog).where(orm.IngestionLog.event_type.in_(alert_types))
     )

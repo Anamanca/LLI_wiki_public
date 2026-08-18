@@ -94,6 +94,7 @@ export function ApiKeysPanel() {
       await deleteKey.mutateAsync(keyId);
     } catch (err) {
       console.error("Failed to delete API key:", err);
+      alert((err as Error)?.message || "Failed to delete API key");
     }
   }
 

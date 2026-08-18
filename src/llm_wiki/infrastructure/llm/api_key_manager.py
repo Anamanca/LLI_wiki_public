@@ -12,6 +12,7 @@ import logging
 import time
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select, update
 
@@ -254,6 +255,7 @@ class ApiKeyManager:
     async def mark_rate_limited(self, key_id: str, until: float) -> None:
         """Mark a key as rate-limited in both in-memory cache and DB."""
         until_dt = datetime.fromtimestamp(until, tz=get_system_tz())
+        key_uuid = UUID(key_id)
 
         for k in self._keys:
             if k["id"] == key_id:
@@ -268,12 +270,47 @@ class ApiKeyManager:
             async with async_session_factory() as session:
                 await session.execute(
                     update(ApiKey)
-                    .where(ApiKey.id == key_id)
+                    .where(ApiKey.id == key_uuid)
                     .values(status="rate_limited", rate_limited_until=until_dt)
                 )
                 await session.commit()
         except Exception:
             logger.exception("Failed to persist rate-limit mark for key %s", key_id[-8:])
+
+    async def mark_key_invalid(self, key_id: str | None, reason: str = "") -> None:
+        """Disable a key that the provider rejected (401/403) and raise an alert.
+
+        Marks the key ``disabled`` in memory and DB so it is no longer served,
+        and persists a system-level alert (no source_item) for the Web UI.
+        """
+        masked = "env"
+        if key_id:
+            key_uuid = UUID(key_id)
+            for k in self._keys:
+                if k["id"] == key_id:
+                    k["status"] = "disabled"
+                    masked = "***" + (k["api_key"][-4:] if len(k["api_key"]) >= 4 else "")
+                    break
+            try:
+                async with async_session_factory() as session:
+                    await session.execute(
+                        update(ApiKey)
+                        .where(ApiKey.id == key_uuid)
+                        .values(status="disabled")
+                    )
+                    await session.commit()
+                logger.warning("Key %s disabled (invalid/expired): %s", key_id[-8:], reason[:200])
+            except Exception:
+                logger.exception("Failed to disable key %s", key_id[-8:])
+        else:
+            logger.warning("Env-fallback key rejected (invalid/expired): %s", reason[:200])
+
+        from llm_wiki.infrastructure.notifier import push_system_alert
+
+        await push_system_alert(
+            message=f"API key {masked} bị từ chối (invalid/expired): {reason[:300]}".strip(),
+            event_type="api_key_error",
+        )
 
     async def increment_usage(self, key_id: str | None) -> None:
         """Increment usage_count for a key after a successful call."""
@@ -287,10 +324,11 @@ class ApiKeyManager:
                 break
 
         try:
+            key_uuid = UUID(key_id)
             async with async_session_factory() as session:
                 await session.execute(
                     update(ApiKey)
-                    .where(ApiKey.id == key_id)
+                    .where(ApiKey.id == key_uuid)
                     .values(usage_count=ApiKey.usage_count + 1, last_used_at=now_ts)
                 )
                 await session.commit()
@@ -349,10 +387,11 @@ class ApiKeyManager:
     async def _reactivate_in_db(self, key_id: str) -> None:
         """Set a key's status back to active and clear rate_limited_until."""
         try:
+            key_uuid = UUID(key_id)
             async with async_session_factory() as session:
                 await session.execute(
                     update(ApiKey)
-                    .where(ApiKey.id == key_id)
+                    .where(ApiKey.id == key_uuid)
                     .values(status="active", rate_limited_until=None)
                 )
                 await session.commit()

@@ -636,7 +636,7 @@ The current AlertManager uses **null receivers** (alerts fire silently). To wire
 4. Store the token in `k8s/secret.yaml` (do NOT commit):
    ```yaml
    TELEGRAM_BOT_TOKEN: "<token>"
-   TELEGRAM_ALERT_CHAT_ID: "-1001234567890"
+   ALLOWED_TELEGRAM_CHAT_IDS: "-1001234567890"
    ```
 5. Update the `route` to use `receiver: 'telegram'`
 6. Re-apply:

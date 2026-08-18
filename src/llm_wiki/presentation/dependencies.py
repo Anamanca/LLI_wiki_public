@@ -11,9 +11,9 @@ from llm_wiki.application.use_cases.query.pipeline import QueryPipeline
 from llm_wiki.application.use_cases.query.stream_answer import StreamAnswerUseCase
 from llm_wiki.config import settings
 from llm_wiki.infrastructure.embedding.ollama_adapter import OllamaEmbeddingAdapter
-from llm_wiki.infrastructure.persistence.postgres.database import get_db  # noqa: F401
-from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter
+from llm_wiki.infrastructure.llm.managed_llm_adapter import ManagedLLMAdapter
 from llm_wiki.infrastructure.persistence.file import ChatSessionFileRepository
+from llm_wiki.infrastructure.persistence.postgres.database import get_db  # noqa: F401
 from llm_wiki.infrastructure.persistence.redis.cache_adapter import RedisCacheAdapter
 from llm_wiki.infrastructure.telemetry import create_telemetry_adapter
 
@@ -51,12 +51,7 @@ class Container(containers.DeclarativeContainer):
 
     embedder = providers.Singleton(OllamaEmbeddingAdapter, host=settings.ollama_host)
 
-    llm_client = providers.Singleton(
-        OpenAIAdapter,
-        api_key=settings.opencode_api_key,
-        base_url=settings.opencode_base_url,
-        model=settings.opencode_primary_model,
-    )
+    llm_client = providers.Singleton(ManagedLLMAdapter)
 
     cache = providers.Singleton(RedisCacheAdapter)
 

@@ -47,6 +47,10 @@ export function useDeleteApiKey() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.apiKeys.all });
     },
+    onError: (err: Error) => {
+      // 409 = cannot delete the last active key; surface a readable message.
+      console.error("Failed to delete API key:", err);
+    },
   });
 }
 

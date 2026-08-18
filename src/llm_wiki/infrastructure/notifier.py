@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from uuid import UUID
 
 import httpx
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from llm_wiki.config import settings
@@ -21,7 +19,7 @@ _last_telegram_alert_at: float = 0.0
 
 
 async def push_error_web(
-    source_item_id: UUID,
+    source_item_id: UUID | None,
     error_message: str,
     db: AsyncSession,
     event_type: str = "error",
@@ -30,6 +28,8 @@ async def push_error_web(
     """Log an ingestion event to the ingestion_logs table.
 
     This table is polled by the Web UI dashboard to display recent errors.
+    ``source_item_id`` may be None for system-level alerts (e.g. API-key
+    failures) that are not tied to a specific item.
     """
     log_entry = IngestionLog(
         source_item_id=source_item_id,
@@ -40,6 +40,34 @@ async def push_error_web(
     db.add(log_entry)
     await db.flush()
     logger.info("Ingestion log: %s — %s", event_type, error_message[:100])
+
+
+async def push_system_alert(
+    message: str,
+    event_type: str = "api_key_error",
+    metadata: dict | None = None,
+) -> None:
+    """Persist a system-level alert (no associated source_item) to ingestion_logs.
+
+    Used for API-key failures detected outside any single ingestion job. Uses
+    its own session so it can be called from the LLM adapter layer without an
+    existing DB session in scope.
+    """
+    from llm_wiki.infrastructure.persistence.postgres.database import async_session_factory
+
+    try:
+        async with async_session_factory() as session:
+            log_entry = IngestionLog(
+                source_item_id=None,
+                event_type=event_type,
+                message=message[:2000],
+                metadata_json=metadata or {},
+            )
+            session.add(log_entry)
+            await session.commit()
+        logger.info("System alert: %s — %s", event_type, message[:100])
+    except Exception:
+        logger.exception("Failed to persist system alert (%s)", event_type)
 
 
 async def send_telegram_alert(message: str) -> bool:
@@ -101,35 +129,3 @@ async def send_telegram_alert(message: str) -> bool:
     return success
 
 
-async def notify_rate_limit(
-    provider: str,
-    jobs_paused: int,
-    resume_info: str = "",
-    db: AsyncSession | None = None,
-) -> None:
-    """Notify that a rate limit has been hit, pausing N jobs.
-
-    Logs to ingestion_logs if db provided, and sends Telegram alert.
-    """
-    message = f"Rate limit: {provider}. {jobs_paused} jobs paused." + (
-        f" Resume: {resume_info}" if resume_info else ""
-    )
-    logger.warning(message)
-
-    if db:
-        # Log a rate_limit_hit event with a synthetic log entry linked to no specific item
-        # Using NULL source_item_id via raw SQL since FK is NOT NULL in the model
-        await db.execute(
-            text(
-                "INSERT INTO ingestion_logs "
-                "(id, source_item_id, event_type, message, metadata_json, created_at) "
-                "SELECT gen_random_uuid(), id, 'rate_limit_hit', :message, :meta, now() "
-                "FROM source_items WHERE status='rate_limited' LIMIT 1"
-            ),
-            {
-                "message": message,
-                "meta": json.dumps({"provider": provider, "jobs_paused": jobs_paused}),
-            },
-        )
-
-    await send_telegram_alert(f"⏸️ {message}")

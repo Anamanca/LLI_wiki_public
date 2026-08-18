@@ -421,10 +421,10 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
         await _log_event(db, item.id, "classify_start", "Classifying transcript")
         _heartbeat("classifying")
         from llm_wiki.application.use_cases.ingestion.classifier import classify_transcript
-        from llm_wiki.infrastructure.llm.openai_adapter import OpenAIAdapter
+        from llm_wiki.infrastructure.llm.managed_llm_adapter import ManagedLLMAdapter
         from llm_wiki.infrastructure.llm.traced_llm_wrapper import TracedLLMWrapper
 
-        raw_llm = OpenAIAdapter()
+        raw_llm = ManagedLLMAdapter()
         llm_client = TracedLLMWrapper(
             raw_llm,
             _telemetry,
@@ -532,7 +532,8 @@ async def handle_job_failure(
     error_str = error_msg.lower()
     is_rate_limit = "429" in error_str or "rate" in error_str or "too many" in error_str
     is_payment_required = "402" in error_str or "payment" in error_str or "quota" in error_str
-    is_temporary_pause = is_rate_limit or is_payment_required
+    is_invalid_key = "401" in error_str or "403" in error_str or "invalid" in error_str
+    is_temporary_pause = is_rate_limit or is_payment_required or is_invalid_key
 
     if is_temporary_pause:
         logger.warning(

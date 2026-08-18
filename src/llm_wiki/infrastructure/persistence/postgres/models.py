@@ -276,7 +276,7 @@ class IngestionLog(Base):
         server_default=text("gen_random_uuid()"),
     )
     source_item_id = Column(
-        UUID(as_uuid=True), ForeignKey("source_items.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True), ForeignKey("source_items.id", ondelete="CASCADE"), nullable=True
     )
     event_type = Column(String(50), nullable=False)
     message = Column(Text, nullable=True)

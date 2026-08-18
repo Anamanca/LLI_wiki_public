@@ -332,7 +332,7 @@ export function updateApiKey(id: string, payload: import("@/types").UpdateApiKey
 }
 
 export function deleteApiKey(id: string) {
-  return request<{ status: string; deleted: string }>(`/admin/api-keys/${id}`, {
+  return request<{ status: string; deleted: number }>(`/admin/api-keys/${id}`, {
     method: "DELETE",
   });
 }

@@ -156,7 +156,7 @@ export default function AdminPage() {
                       {alert.created_at ? formatDate(alert.created_at) : ""}
                     </span>
                     <Badge variant={
-                      alert.event_type === "error"
+                      alert.event_type === "error" || alert.event_type === "api_key_error"
                         ? "error"
                         : alert.event_type === "retry"
                         ? "processing"

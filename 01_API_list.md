@@ -286,30 +286,28 @@ Dự án được xây dựng theo Clean Architecture với FastAPI. Tất cả 
 ## 14. Admin API Keys (Quản lý khóa API)
 
 ### `GET /api/admin/api-keys`
-- **Tag:** stubs
-- **Mô tả:** Lấy danh sách tất cả API keys đã đăng ký trong hệ thống (dùng để gọi các LLM provider như OpenAI, v.v.). Key được mask (chỉ hiển thị 7 ký tự đầu + `***`).
+- **Mô tả:** Lấy danh sách tất cả API keys đã đăng ký trong hệ thống (dùng để gọi các LLM provider như OpenAI, v.v.). Key được mask (hiển thị `***` + 4 ký tự cuối).
 - **Response:** Mảng các key gồm `id`, `provider`, `api_key_masked`, `model_name`, `status`, `priority`, `rate_limited_until`, `usage_count`, `last_used_at`, `created_at`, `updated_at`.
 
 ### `POST /api/admin/api-keys`
-- **Tag:** stubs
-- **Mô tả:** Tạo mới một API key. **Hiện chưa implement (trả về 501).**
+- **Mô tả:** Tạo mới một API key. Trùng `provider` + `api_key` → `409`.
+- **Request:** `{ "provider": "opencode"|"gemini", "api_key": str, "model_name": str, "priority": int }`.
+- **Response:** `201` với object key đã serialize (gồm `api_key_masked`).
 
 ### `PUT /api/admin/api-keys/{key_id}`
-- **Tag:** stubs
-- **Mô tả:** Cập nhật thông tin API key. **Hiện chưa implement (trả về 501).**
+- **Mô tả:** Cập nhật `status`, `priority`, `model_name` của một API key. Không tồn tại → `404`.
 - **Parameters:** `key_id` (path, UUID, required).
+- **Response:** Object key đã serialize.
 
 ### `DELETE /api/admin/api-keys/{key_id}`
-- **Tag:** stubs
-- **Mô tả:** Xóa vĩnh viễn một API key khỏi database.
+- **Mô tả:** Xóa vĩnh viễn một API key khỏi database. Không thể xóa key `active` cuối cùng → `409`.
 - **Parameters:** `key_id` (path, UUID, required).
-- **Response:** `{"status": "deleted", "deleted": "<key_id>"}`
+- **Response:** `{"status": "ok", "deleted": 1}`
 
 ### `POST /api/admin/api-keys/{key_id}/activate`
-- **Tag:** stubs
-- **Mô tả:** Kích hoạt lại một API key đang bị rate-limited. Set `status = "active"` và xóa `rate_limited_until`.
+- **Mô tả:** Kích hoạt lại một API key đang bị rate-limited/disabled. Set `status = "active"` và xóa `rate_limited_until`.
 - **Parameters:** `key_id` (path, UUID, required).
-- **Response:** Thông tin key sau khi activate.
+- **Response:** Object key sau khi activate.
 
 ---
 
