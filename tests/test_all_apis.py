@@ -172,6 +172,7 @@ async def api_tester(client):
 # ===================================================================
 
 
+@pytest.mark.health
 class TestHealth:
     """GET /api/health — Frontend calls fetchHealth() expecting {status, db}."""
 
@@ -199,6 +200,7 @@ class TestHealth:
 # ===================================================================
 
 
+@pytest.mark.query
 class TestQuery:
     """POST /api/query and POST /api/query/stream."""
 
@@ -300,12 +302,21 @@ class TestQuery:
                 f"backend sends type==='chunk'"
             )
 
+    async def test_summarize(self, api_tester: ApiTester):
+        """GET /api/summarize — time-range summary used by the summary view."""
+        r = await api_tester.get("/summarize?days=30")
+        data = r.json()
+        for field_name in ["summary", "time_range", "stats", "top_events", "top_pages"]:
+            assert field_name in data, f"Missing '{field_name}' in summarize response"
+        assert "event_count" in data["stats"]
+
 
 # ===================================================================
 # 3. SOURCES
 # ===================================================================
 
 
+@pytest.mark.sources
 class TestSources:
     """Source CRUD endpoints."""
 
@@ -471,6 +482,7 @@ class TestSources:
 # ===================================================================
 
 
+@pytest.mark.sources
 class TestSourceItems:
     @pytest.fixture
     async def source_with_item(self, api_tester: ApiTester):
@@ -510,6 +522,30 @@ class TestSourceItems:
         fake_id = "00000000-0000-0000-0000-000000000000"
         await api_tester.post(f"/sources/items/{fake_id}/retry", expected_status=404)
 
+    async def test_skip_retry_happy_path(self, api_tester: ApiTester):
+        """Skip a real item, then retry it — asserts the state machine round-trips."""
+        # Find a real source with items so the mutation paths are exercised.
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+            src_list = (await c.get(api("/sources"))).json()
+            srcs = src_list.get("sources", []) if isinstance(src_list, dict) else []
+            item_id = None
+            for src in srcs:
+                items_r = (await c.get(api(f"/sources/{src['id']}/items"))).json()
+                items = items_r.get("items", []) if isinstance(items_r, dict) else []
+                if items:
+                    item_id = items[0]["id"]
+                    break
+        if not item_id:
+            pytest.skip("No source items exist in database to exercise skip/retry")
+
+        skip = (await api_tester.post(f"/sources/items/{item_id}/skip")).json()
+        assert skip.get("status") == "skipped"
+        assert skip.get("item_id") == item_id
+
+        retry = (await api_tester.post(f"/sources/items/{item_id}/retry")).json()
+        assert retry.get("status") == "retrying"
+        assert retry.get("item_id") == item_id
+
     async def test_transcript_stub(self, api_tester: ApiTester):
         """POST /api/sources/items/{id}/transcript — stub acknowledges."""
         fake_id = "00000000-0000-0000-0000-000000000000"
@@ -521,6 +557,7 @@ class TestSourceItems:
 # ===================================================================
 
 
+@pytest.mark.pages
 class TestPages:
     async def test_list_pages_response_shape(self, api_tester: ApiTester):
         """BUG: Backend returns {items, total} but frontend expects
@@ -547,6 +584,11 @@ class TestPages:
 
     async def test_get_page_by_slug_404(self, api_tester: ApiTester):
         await api_tester.get("/pages/nonexistent-slug-12345", expected_status=404)
+
+    async def test_patch_page(self, api_tester: ApiTester):
+        """PATCH /api/pages/{page_id} — partial update; 404 for unknown id."""
+        fake_id = "00000000-0000-0000-0000-000000000000"
+        await api_tester.patch(f"/pages/{fake_id}", {"summary": "updated"}, expected_status=404)
 
     async def test_get_page_frontend_shape(self, api_tester: ApiTester):
         """BUG: pages.py GET /pages/{slug} lacks sections/media_assets/linked_pages
@@ -600,6 +642,7 @@ class TestPages:
 # ===================================================================
 
 
+@pytest.mark.search
 class TestSearch:
     async def test_search(self, api_tester: ApiTester):
         r = await api_tester.get("/search?q=test")
@@ -652,6 +695,7 @@ class TestSearch:
 # ===================================================================
 
 
+@pytest.mark.progress
 class TestProgress:
     async def test_progress(self, api_tester: ApiTester):
         """GET /api/progress — stub routes only if ENABLE_STUB_ROUTES=true."""
@@ -698,6 +742,7 @@ class TestProgress:
 # ===================================================================
 
 
+@pytest.mark.graph
 class TestGraph:
     async def test_page_graph(self, api_tester: ApiTester):
         r = await api_tester.get("/graph")
@@ -758,6 +803,7 @@ class TestGraph:
 # ===================================================================
 
 
+@pytest.mark.attention
 class TestAttentionItems:
     async def test_attention_items(self, api_tester: ApiTester):
         r = await api_tester.get("/attention-items")
@@ -776,6 +822,7 @@ class TestAttentionItems:
 # ===================================================================
 
 
+@pytest.mark.workers
 class TestWorkers:
     async def test_workers(self, api_tester: ApiTester):
         r = await api_tester.get("/workers")
@@ -808,6 +855,7 @@ class TestWorkers:
 # ===================================================================
 
 
+@pytest.mark.restart
 class TestRestart:
     async def test_restart_item_404(self, api_tester: ApiTester):
         fake_id = "00000000-0000-0000-0000-000000000000"
@@ -822,12 +870,20 @@ class TestRestart:
         # Frontend expects: {status, restarted} OR {status, item_id, restarted}
         assert "restarted" in data
 
+    async def test_restart_source_legacy_path(self, api_tester: ApiTester):
+        """POST /api/admin/api/restart/source/{id} (legacy admin alias) also succeeds."""
+        fake_id = "00000000-0000-0000-0000-000000000000"
+        r = await api_tester.post(f"/admin/api/restart/source/{fake_id}")
+        data = r.json()
+        assert "restarted" in data
+
 
 # ===================================================================
 # 12. ADMIN API KEYS
 # ===================================================================
 
 
+@pytest.mark.apikeys
 class TestApiKeys:
     async def test_list_api_keys(self, api_tester: ApiTester):
         r = await api_tester.get("/admin/api-keys")
@@ -856,22 +912,53 @@ class TestApiKeys:
             if missing:
                 pytest.fail(f"FRONTEND MISMATCH: ApiKeyRow missing fields: {missing}")
 
-    async def test_create_api_key_501(self, api_tester: ApiTester):
-        """POST /api/admin/api-keys returns 501 Not Implemented."""
+    async def test_create_api_key(self, api_tester: ApiTester):
+        """POST /api/admin/api-keys creates a key and returns its masked shape."""
+        import uuid
+
+        unique_key = f"sk-test-{uuid.uuid4().hex[:12]}"
+        r = await api_tester.post(
+            "/admin/api-keys",
+            {
+                "provider": "opencode",
+                "api_key": unique_key,
+                "model_name": "test-model",
+            },
+            expected_status=201,
+        )
+        data = r.json()
+        assert data["provider"] == "opencode"
+        assert data["api_key_masked"].startswith("***")
+        assert data["status"] == "active"
+
+    async def test_create_api_key_duplicate(self, api_tester: ApiTester):
+        """Creating the same provider+key twice returns 409."""
+        import uuid
+
+        unique_key = f"sk-test-{uuid.uuid4().hex[:12]}"
         await api_tester.post(
             "/admin/api-keys",
             {
                 "provider": "opencode",
-                "api_key": "sk-test-1234",
+                "api_key": unique_key,
                 "model_name": "test-model",
             },
-            expected_status=501,
+            expected_status=201,
+        )
+        await api_tester.post(
+            "/admin/api-keys",
+            {
+                "provider": "opencode",
+                "api_key": unique_key,
+                "model_name": "test-model",
+            },
+            expected_status=409,
         )
 
-    async def test_update_api_key_501(self, api_tester: ApiTester):
+    async def test_update_api_key_404(self, api_tester: ApiTester):
         fake_id = "00000000-0000-0000-0000-000000000000"
         await api_tester.put(
-            f"/admin/api-keys/{fake_id}", {"status": "active"}, expected_status=501
+            f"/admin/api-keys/{fake_id}", {"status": "active"}, expected_status=404
         )
 
     async def test_delete_api_key_404(self, api_tester: ApiTester):
@@ -882,12 +969,58 @@ class TestApiKeys:
         fake_id = "00000000-0000-0000-0000-000000000000"
         await api_tester.post(f"/admin/api-keys/{fake_id}/activate", expected_status=404)
 
+    async def test_api_key_lifecycle(self, api_tester: ApiTester):
+        """Full CRUD round-trip: create → update → activate → delete."""
+        import uuid
+
+        unique_key = f"sk-lifecycle-{uuid.uuid4().hex[:12]}"
+        created = (
+            await api_tester.post(
+                "/admin/api-keys",
+                {
+                    "provider": "opencode",
+                    "api_key": unique_key,
+                    "model_name": "test-model",
+                    "priority": 5,
+                },
+                expected_status=201,
+            )
+        ).json()
+        key_id = created["id"]
+        assert created["status"] == "active"
+        assert created["priority"] == 5
+
+        # Update: disable it.
+        updated = (
+            await api_tester.put(
+                f"/admin/api-keys/{key_id}", {"status": "disabled"}, expected_status=200
+            )
+        ).json()
+        assert updated["status"] == "disabled"
+
+        # Activate: back to active.
+        activated = (
+            await api_tester.post(f"/admin/api-keys/{key_id}/activate", expected_status=200)
+        ).json()
+        assert activated["status"] == "active"
+        assert activated["rate_limited_until"] is None
+
+        # Delete: clean up after ourselves.
+        deleted = (
+            await api_tester.delete(f"/admin/api-keys/{key_id}", expected_status=200)
+        ).json()
+        assert deleted.get("status") == "ok"
+
+        # Confirm gone: further delete → 404.
+        await api_tester.delete(f"/admin/api-keys/{key_id}", expected_status=404)
+
 
 # ===================================================================
 # 13. ADMIN CRON JOBS
 # ===================================================================
 
 
+@pytest.mark.cronjobs
 class TestCronJobs:
     async def test_list_cron_jobs(self, api_tester: ApiTester):
         r = await api_tester.get("/admin/cron-jobs")
@@ -929,6 +1062,7 @@ class TestCronJobs:
 # ===================================================================
 
 
+@pytest.mark.stubs
 class TestAdminClearAlerts:
     async def test_clear_alerts(self, api_tester: ApiTester):
         r = await api_tester.delete("/admin/clear-alerts")
@@ -937,34 +1071,75 @@ class TestAdminClearAlerts:
         assert "deleted" in data
 
 
+@pytest.mark.stubs
+class TestAdminOps:
+    """Admin operational endpoints not covered elsewhere."""
+
+    async def test_scan_status(self, api_tester: ApiTester):
+        r = await api_tester.get("/admin/scan-status")
+        data = r.json()
+        for field_name in [
+            "last_scan_date",
+            "last_scan_completed_at",
+            "missed_dates",
+            "pending_count",
+            "requires_membership_count",
+            "scan_ok",
+        ]:
+            assert field_name in data, f"Missing '{field_name}' in scan-status"
+
+    async def test_scan_logs(self, api_tester: ApiTester):
+        """GET /api/admin/scan-logs returns a list of audit entries."""
+        r = await api_tester.get("/admin/scan-logs?days=7")
+        data = r.json()
+        assert isinstance(data, list)
+        if data:
+            row = data[0]
+            for field_name in ["id", "source_id", "source_name", "scan_type", "started_at"]:
+                assert field_name in row, f"ScanLog missing '{field_name}'"
+
+    async def test_admin_health(self, api_tester: ApiTester):
+        r = await api_tester.get("/admin/health")
+        data = r.json()
+        assert "failed_count" in data
+
+
 # ===================================================================
 # 15. CHAT SESSIONS
 # ===================================================================
 
 
+@pytest.mark.chatsessions
 class TestChatSessions:
     async def test_list_sessions(self, api_tester: ApiTester):
         r = await api_tester.get("/chat/sessions")
         data = r.json()
         assert isinstance(data, list)
 
-    async def test_create_session_stub(self, api_tester: ApiTester):
+    async def test_create_session(self, api_tester: ApiTester):
         r = await api_tester.post("/chat/sessions")
         data = r.json()
         assert "id" in data
 
-    async def test_get_session_stub(self, api_tester: ApiTester):
-        r = await api_tester.get("/chat/sessions/test-1")
+    async def test_get_session(self, api_tester: ApiTester):
+        created = (await api_tester.post("/chat/sessions")).json()
+        r = await api_tester.get(f"/chat/sessions/{created['id']}")
         data = r.json()
-        assert data["id"] == "test-1"
+        assert data["id"] == created["id"]
 
-    async def test_update_session_stub(self, api_tester: ApiTester):
-        r = await api_tester.put("/chat/sessions/test-1")
+    async def test_update_session(self, api_tester: ApiTester):
+        created = (await api_tester.post("/chat/sessions")).json()
+        r = await api_tester.put(
+            f"/chat/sessions/{created['id']}",
+            {"messages": [{"role": "user", "content": "hello"}]},
+        )
         data = r.json()
-        assert "id" in data
+        assert data["id"] == created["id"]
+        assert data["messages"][0]["content"] == "hello"
 
-    async def test_delete_session_stub(self, api_tester: ApiTester):
-        r = await api_tester.delete("/chat/sessions/test-1")
+    async def test_delete_session(self, api_tester: ApiTester):
+        created = (await api_tester.post("/chat/sessions")).json()
+        r = await api_tester.delete(f"/chat/sessions/{created['id']}")
         data = r.json()
         assert data.get("status") == "deleted"
 
@@ -974,6 +1149,7 @@ class TestChatSessions:
 # ===================================================================
 
 
+@pytest.mark.errors
 class TestErrorHandling:
     async def test_invalid_json_body(self, api_tester: ApiTester):
         """Invalid JSON → should return 422 not 500."""
@@ -1014,6 +1190,7 @@ class TestErrorHandling:
 # ===================================================================
 
 
+@pytest.mark.stubs
 class TestStubRoutesAvailability:
     """Test that stub routes are available (controlled by ENABLE_STUB_ROUTES env var).
     If these fail with 404, the frontend admin dashboard WILL NOT WORK."""
@@ -1051,6 +1228,7 @@ class TestStubRoutesAvailability:
 # ===================================================================
 
 
+@pytest.mark.contract
 class TestFrontendBackendContract:
     """End-to-end contract tests that simulate exactly what the frontend does."""
 
