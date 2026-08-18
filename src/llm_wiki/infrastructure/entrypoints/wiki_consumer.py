@@ -173,6 +173,96 @@ async def _save_section_vectors(page_id_str: str | None, db: AsyncSession) -> in
     return len(page_sections)
 
 
+async def _safe_rollback(db: AsyncSession) -> None:
+    """Safely rollback a session that may already be closed or expired.
+
+    WikiIntegrator.integrate() calls db.commit() internally. When it raises,
+    the session may be in any state (closed, expired, partially committed).
+    A naked db.rollback() on an expired session raises MissingGreenlet.
+    """
+    with contextlib.suppress(Exception):
+        await db.rollback()
+
+
+async def _retry_or_fail(
+    item_id: UUID,
+    max_retries: int,
+    error_message: str,
+    event_type: str,
+    telemetry_span: object | None = None,
+) -> None:
+    """Update item status for retry/permanent failure, write log, push to Redis.
+
+    Everything happens in a fresh DB session — no dependency on any caller's
+    session (which may be expired/rolled-back/closed after integrate() failure).
+    The telemetry end_span is called BEFORE we touch any DB, because after
+    integrate() raises, the caller's session is unsafe for ANY operation.
+    """
+    # End telemetry span first — the caller's session may already be dead.
+    if telemetry_span is not None:
+        try:
+            await _telemetry.end_span(span=telemetry_span, error=error_message[:500])
+        except Exception:
+            pass
+
+    extra_label = "wiki" if event_type.startswith("wiki") else "embed"
+    new_status = "classified"
+    new_retry_count = 0
+    external_id = ""
+
+    # Phase 1: read + update item in a clean session.
+    async with async_session_factory() as db:
+        item = await db.get(SourceItem, item_id)
+        if item is None:
+            return
+        external_id = item.external_id or ""
+        item.retry_count = (item.retry_count or 0) + 1
+        new_retry_count = item.retry_count
+        item.error_message = error_message[:2000]
+        item.started_at = None
+        if item.retry_count > max_retries:
+            new_status = "failed"
+            item.status = "failed"
+            item.error_message = (
+                f"Wiki integration permanently failed after {item.retry_count} "
+                f"attempts: {error_message[:350]}"
+            )
+            inc_counter(
+                "ingestion_jobs_total",
+                {"status": "failed", "stage": extra_label, "worker_id": str(CONSUMER_ID)},
+            )
+            logger.warning(
+                "Wiki consumer %s: %s permanently failed after %d attempts",
+                CONSUMER_ID,
+                external_id,
+                item.retry_count,
+            )
+        else:
+            item.status = "classified"
+            inc_counter(
+                "ingestion_jobs_total",
+                {"status": "retry", "stage": extra_label, "worker_id": str(CONSUMER_ID)},
+            )
+        log = IngestionLog(
+            source_item_id=item_id,
+            event_type=event_type,
+            message=f"{error_message[:1900]} (attempt {item.retry_count})",
+        )
+        db.add(log)
+        await db.commit()
+
+    # Phase 2: push to Redis (outside DB session so Redis failures don't rollback DB).
+    if new_status == "classified":
+        try:
+            await push_wiki_job(item_id)
+        except Exception:
+            logger.exception(
+                "Wiki consumer %s: failed to push %s to Redis after retry",
+                CONSUMER_ID,
+                item_id,
+            )
+
+
 async def process_wiki_job(item_id: UUID) -> None:
     """Read item from DB, run wiki integration, embed sections, mark completed."""
     import time as _time
@@ -278,6 +368,8 @@ async def process_wiki_job(item_id: UUID) -> None:
                 embedder=embedder,
             )
 
+            # Capture IDs BEFORE integrate() — the session may expire on error.
+            _item_pk = item.id
             try:
                 wiki_result = await asyncio.wait_for(
                     integrator.integrate(
@@ -287,96 +379,39 @@ async def process_wiki_job(item_id: UUID) -> None:
                         summary_vector=summary_vector,
                         db=db,
                         source_id=item.source_id,
-                        source_item_id=item.id,
+                        source_item_id=_item_pk,
                         published_at=item.published_at,
                         timeout=1800.0,
                     ),
                     timeout=1800.0,
                 )
             except TimeoutError:
-                await _telemetry.end_span(
-                    span=root_span, error="Wiki integration timed out after 30 min"
-                )
                 logger.error(
-                    "Wiki consumer %s: wiki integrate timed out for %s", CONSUMER_ID, item.id
+                    "Wiki consumer %s: wiki integrate timed out for %s", CONSUMER_ID, _item_pk
                 )
-                await db.rollback()
-                item.retry_count = (item.retry_count or 0) + 1
-                item.error_message = "Wiki integration timed out after 30 min"
-                item.started_at = None
-                if item.retry_count > WIKI_MAX_RETRIES:
-                    item.status = "failed"
-                    item.error_message = (
-                        f"Wiki integration permanently failed after {item.retry_count} "
-                        "attempts: timeout"
-                    )
-                    inc_counter(
-                        "ingestion_jobs_total",
-                        {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
-                    )
-                    logger.warning(
-                        "Wiki consumer %s: %s permanently failed after %d wiki attempts",
-                        CONSUMER_ID,
-                        item.external_id,
-                        item.retry_count,
-                    )
-                else:
-                    item.status = "classified"
-                    inc_counter(
-                        "ingestion_jobs_total",
-                        {"status": "retry", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
-                    )
-                await db.commit()
-                await _log_event(
-                    db,
-                    item.id,
+                await _safe_rollback(db)
+                await _retry_or_fail(
+                    _item_pk,
+                    WIKI_MAX_RETRIES,
+                    "Wiki integration timed out after 30 min",
                     "wiki_timeout",
-                    f"Wiki integration timed out (attempt {item.retry_count})",
+                    telemetry_span=root_span,
                 )
-                if item.status == "classified":
-                    await push_wiki_job(item.id)
                 return
             except Exception as exc:
-                await _telemetry.end_span(span=root_span, error=str(exc)[:500])
                 error_str = str(exc)
                 logger.error(
-                    "Wiki consumer %s: wiki integrate failed for %s: %s", CONSUMER_ID, item.id, exc
+                    "Wiki consumer %s: wiki integrate failed for %s: %s",
+                    CONSUMER_ID, _item_pk, exc,
                 )
-                await db.rollback()
-                item.retry_count = (item.retry_count or 0) + 1
-                item.error_message = f"Wiki integration failed: {error_str[:500]}"
-                item.started_at = None
-                if item.retry_count > WIKI_MAX_RETRIES:
-                    item.status = "failed"
-                    item.error_message = (
-                        f"Wiki integration permanently failed after {item.retry_count} "
-                        f"attempts: {error_str[:400]}"
-                    )
-                    inc_counter(
-                        "ingestion_jobs_total",
-                        {"status": "failed", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
-                    )
-                    logger.warning(
-                        "Wiki consumer %s: %s permanently failed after %d wiki attempts",
-                        CONSUMER_ID,
-                        item.external_id,
-                        item.retry_count,
-                    )
-                else:
-                    item.status = "classified"
-                    inc_counter(
-                        "ingestion_jobs_total",
-                        {"status": "retry", "stage": "wiki", "worker_id": str(CONSUMER_ID)},
-                    )
-                await db.commit()
-                await _log_event(
-                    db,
-                    item.id,
+                await _safe_rollback(db)
+                await _retry_or_fail(
+                    _item_pk,
+                    WIKI_MAX_RETRIES,
+                    f"Wiki integration failed: {error_str[:500]}",
                     "wiki_failed",
-                    f"Wiki integration failed (attempt {item.retry_count}): {exc}",
+                    telemetry_span=root_span,
                 )
-                if item.status == "classified":
-                    await push_wiki_job(item.id)
                 return
 
             # Persist page_id so retries skip wiki integration
@@ -412,86 +447,31 @@ async def process_wiki_job(item_id: UUID) -> None:
                 outputs={"section_count": section_count},
             )
         except TimeoutError:
-            await _telemetry.end_span(span=embed_span, error="section embedding timeout")
             logger.error(
-                "Wiki consumer %s: section embedding timed out for %s", CONSUMER_ID, item.id
+                "Wiki consumer %s: section embedding timed out for %s", CONSUMER_ID, _item_pk
             )
-            await db.rollback()
-            item.retry_count = (item.retry_count or 0) + 1
-            item.error_message = "Section embedding timed out after 300s"
-            item.started_at = None
-            if item.retry_count > WIKI_MAX_RETRIES:
-                item.status = "failed"
-                item.error_message = (
-                    f"Wiki integration permanently failed after {item.retry_count} "
-                    "attempts: section embedding timeout"
-                )
-                inc_counter(
-                    "ingestion_jobs_total",
-                    {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)},
-                )
-                logger.warning(
-                    "Wiki consumer %s: %s permanently failed after %d embed attempts",
-                    CONSUMER_ID,
-                    item.external_id,
-                    item.retry_count,
-                )
-            else:
-                item.status = "classified"
-                inc_counter(
-                    "ingestion_jobs_total",
-                    {"status": "retry", "stage": "embed", "worker_id": str(CONSUMER_ID)},
-                )
-            await db.commit()
-            await _log_event(
-                db,
-                item.id,
+            await _safe_rollback(db)
+            await _retry_or_fail(
+                _item_pk,
+                WIKI_MAX_RETRIES,
+                "Section embedding timed out after 300s",
                 "embed_timeout",
-                f"Section embedding timed out (attempt {item.retry_count})",
+                telemetry_span=embed_span,
             )
-            if item.status == "classified":
-                await push_wiki_job(item.id)
             return
         except Exception as exc:
-            await _telemetry.end_span(span=embed_span, error=str(exc)[:500])
             logger.error(
-                "Wiki consumer %s: section embedding failed for %s: %s", CONSUMER_ID, item.id, exc
+                "Wiki consumer %s: section embedding failed for %s: %s",
+                CONSUMER_ID, _item_pk, exc,
             )
-            await db.rollback()
-            item.retry_count = (item.retry_count or 0) + 1
-            item.error_message = f"Section embedding failed: {str(exc)[:500]}"
-            item.started_at = None
-            if item.retry_count > WIKI_MAX_RETRIES:
-                item.status = "failed"
-                item.error_message = (
-                    f"Wiki integration permanently failed after {item.retry_count} "
-                    "attempts: section embedding error"
-                )
-                inc_counter(
-                    "ingestion_jobs_total",
-                    {"status": "failed", "stage": "embed", "worker_id": str(CONSUMER_ID)},
-                )
-                logger.warning(
-                    "Wiki consumer %s: %s permanently failed after %d embed attempts",
-                    CONSUMER_ID,
-                    item.external_id,
-                    item.retry_count,
-                )
-            else:
-                item.status = "classified"
-                inc_counter(
-                    "ingestion_jobs_total",
-                    {"status": "retry", "stage": "embed", "worker_id": str(CONSUMER_ID)},
-                )
-            await db.commit()
-            await _log_event(
-                db,
-                item.id,
+            await _safe_rollback(db)
+            await _retry_or_fail(
+                _item_pk,
+                WIKI_MAX_RETRIES,
+                f"Section embedding failed: {str(exc)[:500]}",
                 "embed_failed",
-                f"Section embedding failed (attempt {item.retry_count}): {exc}",
+                telemetry_span=embed_span,
             )
-            if item.status == "classified":
-                await push_wiki_job(item.id)
             return
         await _log_event(db, item.id, "section_embed_done", f"{section_count} sections embedded")
 
@@ -567,6 +547,50 @@ async def _heartbeat_loop(consumer_id: str) -> None:
         await asyncio.sleep(15)
 
 
+async def _recover_orphan_wiki_processing() -> int:
+    """Reclaim source_items stuck in 'wiki_processing' after consumer restart/crash.
+
+    When the wiki-consumer crashes or restarts, items that were popped from Redis
+    'wiki:queue' but not yet completed are stranded as 'wiki_processing' with no one
+    to process them (queue is empty, only consumer writes to queue on retry).
+
+    This recovery scans for items in 'wiki_processing' with started_at older than
+    30 minutes, resets them to 'classified', and re-pushes them into the Redis queue
+    so the consumer will pick them up again.
+    """
+    from datetime import timedelta as _td
+
+    _ORPHAN_TIMEOUT = _td(minutes=30)
+    _ORPHAN_CUTOFF = now() - _ORPHAN_TIMEOUT
+
+    reclaimed = 0
+    async with async_session_factory() as db:
+        stmt = select(SourceItem).where(
+            SourceItem.status == "wiki_processing",
+            SourceItem.started_at < _ORPHAN_CUTOFF,
+        )
+        result = await db.execute(stmt)
+        orphans = result.scalars().all()
+        for item in orphans:
+            logger.warning(
+                "Wiki consumer %s: reclaiming orphan wiki_processing item %s (%s) — stuck since %s",
+                CONSUMER_ID,
+                item.id,
+                item.external_id,
+                item.started_at.isoformat() if item.started_at else "unknown",
+            )
+            item.status = "classified"
+            item.started_at = None
+            await db.commit()
+            await push_wiki_job(item.id)
+            reclaimed += 1
+    if reclaimed:
+        logger.info(
+            "Wiki consumer %s: reclaimed %d orphan wiki_processing items", CONSUMER_ID, reclaimed
+        )
+    return reclaimed
+
+
 async def main() -> None:
     global _shutdown_requested
 
@@ -583,6 +607,13 @@ async def main() -> None:
         settings.redis_host,
         settings.redis_port,
     )
+
+    # Recover orphan items before entering main loop — flush any items that were
+    # being processed when this consumer (or a previous instance) died.
+    try:
+        await _recover_orphan_wiki_processing()
+    except Exception:
+        logger.exception("Wiki consumer %s: orphan recovery failed — continuing", CONSUMER_ID)
 
     health_task = asyncio.create_task(start_health_server(), name="health-server")
     set_health_state("running")

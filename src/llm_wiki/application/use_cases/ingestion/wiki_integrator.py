@@ -415,11 +415,16 @@ async def _call_llm_json(
     max_retries: int = 3,
     pass_label: str = "LLM",
     max_tokens: int = 16384,
+    enable_thinking: bool = False,
 ) -> dict[str, Any]:
     """Generic helper: call LLM via port, extract JSON, with retry on parse failure.
 
     Uses ``chat_completion_raw`` so reasoning_content fallback and token usage are
     preserved through the LLM port / traced wrapper.
+
+    ``enable_thinking`` defaults to ``False`` for JSON extraction — reasoning
+    burns token budget on hidden chain-of-thought, truncating the JSON output.
+    Pass 1 (extract) and Pass 2 (write) produce analysis directly in content.
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -428,7 +433,10 @@ async def _call_llm_json(
     try:
         raw_resp = await asyncio.wait_for(
             llm.chat_completion_raw(
-                messages=messages, temperature=temperature, max_tokens=max_tokens
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                enable_thinking=enable_thinking,
             ),
             timeout=timeout,
         )
@@ -455,7 +463,10 @@ async def _call_llm_json(
         try:
             raw_resp2 = await asyncio.wait_for(
                 llm.chat_completion_raw(
-                    messages=retry_messages, temperature=0.1, max_tokens=max_tokens
+                    messages=retry_messages,
+                    temperature=0.1,
+                    max_tokens=max_tokens,
+                    enable_thinking=enable_thinking,
                 ),
                 timeout=timeout,
             )

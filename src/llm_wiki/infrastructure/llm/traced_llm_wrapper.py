@@ -120,6 +120,7 @@ class TracedLLMWrapper(LLMClientPort):
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        enable_thinking: bool = True,
     ) -> dict:
         span = await self._telemetry.start_span(
             name="llm_chat_completion_raw",
@@ -139,6 +140,7 @@ class TracedLLMWrapper(LLMClientPort):
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                enable_thinking=enable_thinking,
             )
             latency_ms = (time.time() - t0) * 1000
             usage = data.get("usage") if isinstance(data, dict) else None
