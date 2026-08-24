@@ -9,8 +9,7 @@ spec:
   - port: 6379
     targetPort: 6379
     name: redis
-  - port: 9121
-    targetPort: 9121
-    name: metrics
+  selector:
+    app: redis
   selector:
     app: redis

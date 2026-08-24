@@ -12,9 +12,7 @@ Guidelines for AI agents when using or modifying scripts in this directory.
 | `test-apis.sh` | Test | Run API contract tests against deployed backend | Backend running |
 | `sync-and-test.sh` | Dev | Copy changed source files into K8s pod + run tests | Kind cluster running |
 | `deploy-k8s.sh` | Deploy | Build images + deploy to K3s | K3s cluster, Docker |
-| `deploy-monitoring.sh` | Deploy | Deploy Prometheus + Grafana + Loki + AlertManager to Kind | Kind/K3s cluster |
-| `monitoring-socat-forward.sh` | Dev | Expose all services via socat → Kind node (LAN-accessible) | Kind cluster |
-| `port-forward-monitoring.sh` | Dev | Expose monitoring UIs via `kubectl port-forward` (LAN-accessible) | Any K8s cluster |
+| `healthcheck.sh` | Ops | Healthcheck cluster + app + host (thay monitoring stack đã gỡ) | Kind cluster |
 | `benchmark_rag.py` | Eval | Measure RAG pipeline latency/throughput with tracing on/off | Backend running, DB access |
 | `eval_rag.py` | Eval | Evaluate RAG quality against labeled dataset (LangSmith) | Backend running, LangSmith key |
 
@@ -57,42 +55,16 @@ synced for live-reload, add them to the `files` array in `sync_backend()`.
 ./scripts/sync-and-test.sh
 ```
 
-### 3. `monitoring-socat-forward.sh` — Kind only
+### 3. `healthcheck.sh` — liveness & tài nguyên
 
-Uses `docker inspect` to find the Kind node IP and `socat` to bridge host ports → Kind NodePorts. 
-This is specific to Kind's Docker-based architecture.
-
-```bash
-# Start all forwarders (app + monitoring):
-./scripts/monitoring-socat-forward.sh &
-
-# Port mapping:
-#   Frontend:     host:3000  → Kind:30080
-#   Backend API:  host:8000  → Kind:30081
-#   Grafana:      host:3100  → Kind:30000
-#   Prometheus:   host:9090  → Kind:30909
-#   AlertManager: host:9093  → Kind:30903
-#   Loki:         host:3200  → Kind:30310
-```
-
-### 4. `port-forward-monitoring.sh` — any K8s cluster
-
-Uses standard `kubectl port-forward --address 0.0.0.0`. Works with Kind, K3s, or any cluster.
+Thay thế toàn bộ monitoring stack (Prometheus/Grafana/Loki/AlertManager đã gỡ 2026-08-23). Kiểm tra: node cluster, readyReplicas workload, HTTP qua NodePort (`:30080`/`:30081`), worker heartbeat (query Postgres), disk/memory host, CPU kind node. Exit 0 = OK.
 
 ```bash
-# Start monitoring port-forwards:
-./scripts/port-forward-monitoring.sh &
-
-# Port mapping (binds to 0.0.0.0):
-#   Grafana:      host:3000
-#   Prometheus:   host:9090
-#   AlertManager: host:9093
+./scripts/healthcheck.sh
+# Cron: */10 * * * * /path/scripts/healthcheck.sh >> /tmp/llm-wiki-health.log 2>&1
 ```
 
-**⚠️ Conflict warning:** Do NOT run both `monitoring-socat-forward.sh` and 
-`port-forward-monitoring.sh` simultaneously — they compete for the same host ports.
-
-### 5. `dev-local.sh` — local dev
+### 4. `dev-local.sh` — local dev
 
 Run backend locally against K8s services (port-forwarded). This script starts uvicorn in the 
 background and prints instructions for the frontend.
@@ -103,7 +75,7 @@ background and prints instructions for the frontend.
 #   cd frontend && npm install && npm run dev
 ```
 
-### 6. `test-apis.sh` — contract tests
+### 5. `test-apis.sh` — contract tests
 
 Runs `tests/test_all_apis.py` against a deployed backend. Auto-detects the URL if not provided.
 
@@ -121,7 +93,7 @@ Runs `tests/test_all_apis.py` against a deployed backend. Auto-detects the URL i
 ./scripts/test-apis.sh --report
 ```
 
-### 7. `benchmark_rag.py` — performance evaluation
+### 6. `benchmark_rag.py` — performance evaluation
 
 Measures pipeline latency (p50/p95/p99), throughput, and token usage. Requires direct database 
 access (not through the API).
@@ -134,7 +106,7 @@ LANGSMITH_TRACING=false python scripts/benchmark_rag.py --questions eval/questio
 LANGSMITH_TRACING=true python scripts/benchmark_rag.py --questions eval/questions.jsonl --output metrics/traced.json
 ```
 
-### 8. `eval_rag.py` — quality evaluation
+### 7. `eval_rag.py` — quality evaluation
 
 Evaluates RAG quality against a labeled dataset and optionally pushes results to LangSmith.
 
@@ -150,9 +122,6 @@ LANGSMITH_TRACING=true python scripts/eval_rag.py --dataset eval/rag_eval_datase
 
 ## Common Pitfalls
 
-1. **K3s vs Kind confusion:** `deploy-k8s.sh` = K3s, `sync-and-test.sh` = Kind, `port-forward-monitoring.sh` = any cluster.
-2. **Port conflicts:** `monitoring-socat-forward.sh` and `port-forward-monitoring.sh` both bind host ports. Only run one at a time.
-3. **Hardcoded file lists:** `sync-and-test.sh` has a hardcoded list of backend files to sync. When adding new files that need live-reload, update the `files` array.
-4. **socat forward requires Kind container name:** `monitoring-socat-forward.sh` looks for `llm-wiki-control-plane`. If your Kind cluster has a different name, update `KIND_CONTAINER`.
-5. **Benchmark/eval scripts import `llm_wiki` directly:** they need `PYTHONPATH` set and database credentials in `.env`. They bypass the HTTP API.
-6. **`deploy-monitoring.sh` skips gracefully:** if manifests don't exist, it prints "Skipped" rather than failing. This is intentional — not all monitoring components are always deployed.
+1. **K3s vs Kind confusion:** `deploy-k8s.sh` = K3s, `sync-and-test.sh` = Kind.
+2. **Hardcoded file lists:** `sync-and-test.sh` has a hardcoded list of backend files to sync. When adding new files that need live-reload, update the `files` array.
+3. **Benchmark/eval scripts import `llm_wiki` directly:** they need `PYTHONPATH` set and database credentials in `.env`. They bypass the HTTP API.

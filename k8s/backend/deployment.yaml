@@ -14,10 +14,8 @@ spec:
     metadata:
       labels:
         app: backend-v2
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8000"
-        prometheus.io/path: "/api/metrics"
+    spec:
+      serviceAccountName: backend-v2
     spec:
       serviceAccountName: backend-v2
       initContainers:

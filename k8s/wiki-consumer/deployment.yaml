@@ -12,10 +12,8 @@ spec:
     metadata:
       labels:
         app: wiki-consumer
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8201"
-        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60
     spec:
       terminationGracePeriodSeconds: 60
       initContainers:
@@ -103,6 +101,26 @@ spec:
           value: deepseek-v4-flash
         - name: RAPIDAPI_HOST
           value: youtube-transcriptor.p.rapidapi.com
+        - name: LANGSMITH_TRACING
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LANGSMITH_TRACING
+        - name: LANGSMITH_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LANGSMITH_ENDPOINT
+        - name: LANGSMITH_PROJECT
+          valueFrom:
+            configMapKeyRef:
+              name: llm-wiki-config
+              key: LANGSMITH_PROJECT
+        - name: LANGSMITH_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-wiki-secrets
+              key: LANGSMITH_API_KEY
         - name: MINIO_BUCKET
           value: llm-wiki-media
         - name: TELEGRAM_BOT_TOKEN

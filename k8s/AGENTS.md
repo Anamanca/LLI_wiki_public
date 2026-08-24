@@ -33,14 +33,24 @@ kubectl apply -f k8s/frontend/
 kubectl apply -f k8s/ollama/
 kubectl apply -f k8s/telegram-bot/
 
-# 5. Monitoring (after app pods are running)
-kubectl apply -f k8s/monitoring/
-# Or use the convenience script:
-# ./scripts/deploy-monitoring.sh
+# 5. (Monitoring stack đã gỡ bỏ 2026-08-23 — xem docs/observability-guide.md)
 
-# 6. Ingress
-kubectl apply -f k8s/ingress.yaml
+# 6. Verify truy cập
+curl -sf http://localhost:30080/          # frontend
+curl -sf http://localhost:30081/api/health # backend
+./scripts/healthcheck.sh
 ```
+
+## Truy cập (không cần port-forward)
+
+Frontend và backend là **NodePort services**; `k8s/kind-config.yaml` map host port 30080/30081 → kind node:
+
+| Gì | URL |
+|---|---|
+| Frontend (toàn app) | `http://localhost:30080` / `http://100.115.181.93:30080` (Tailscale IP) |
+| Backend API | `http://localhost:30081/api/...` |
+
+Frontend tự proxy `/api/*` → backend (Next.js rewrites), nên chỉ cần port 30080 cho toàn app. Không cần socat / kubectl port-forward / systemd service. Ingress resource `llm-wiki.local` đã gỡ (dead config — host-restricted, NodePort không map ra host).
 
 ## HostPath Architecture — How Code Sync Works
 
@@ -200,9 +210,9 @@ The frontend maps these strings to badges in `frontend/components/admin/cron-job
 - Backend deployment sets `serviceAccountName: backend-v2`. Do not remove it.
 - `imagePullPolicy: IfNotPresent` is used everywhere. Load images into kind after each rebuild.
 - The `youtube-daily-scan` CronJob triggers the backend via `wget` POST to `/api/admin/cron-jobs/youtube-daily-scan/start`.
-- **Prometheus scrape annotations** (`prometheus.io/scrape: "true"`, `prometheus.io/port`, `prometheus.io/path`) must be present on pod templates for auto-discovery. Backend, cpu-worker, and wiki-consumer pods already have them.
-- **Monitoring stack** (`k8s/monitoring/`) deploys Prometheus, Grafana, Loki, Promtail, and AlertManager. Prometheus/Grafana/Alertmanager data is ephemeral (`emptyDir`) — lost on pod restart. Loki uses a PVC (1Gi).
-- Expose UIs via `./scripts/monitoring-socat-forward.sh` (Grafana → :3100, Prometheus → :9090, AlertManager → :9093, Loki → :3200, Frontend → :3000, Backend → :8000).
+- **Monitoring stack đã gỡ bỏ** (2026-08-23): `k8s/monitoring/` + `scripts/deploy-monitoring.sh`, `port-forward-monitoring.sh`, `monitoring-socat-forward.sh` không còn. `ENABLE_METRICS=false` — `/api/metrics` không serve nữa. Thay thế: `scripts/healthcheck.sh`.
+- **LangSmith tracing**: cả 3 workload (backend-v2, cpu-worker, wiki-consumer) đều có `LANGSMITH_*` env. Ingestion trace: `process_cpu_job` (có span `transcript_extract`) + `process_wiki_job`.
+- Truy cập qua NodePort `:30080` (frontend) / `:30081` (backend) — không cần forward service.
 - **Postgres/Redis/Ollama exporters** run as sidecar containers in their respective pods. Metrics flow through Prometheus pod annotations.
 - `deploy-k8s.sh` is for K3s ONLY — it uses `sudo k3s ctr images import`. Do NOT use it with Kind.
 

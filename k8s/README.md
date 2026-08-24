@@ -17,8 +17,7 @@ Namespace: llm-wiki
 
   frontend       (Deployment)   — Next.js production build (standalone, node server.js)
 
-Ingress (nginx): llm-wiki.local → /api → backend-v2:8000, / → frontend:3000
-NodePort: frontend exposed on host:30080
+NodePort: frontend :30080 (toàn app — proxy /api nội bộ), backend :30081 (API trực tiếp)
 ```
 
 ## Scaling cpu-worker
@@ -40,8 +39,7 @@ kubectl scale statefulset cpu-worker -n llm-wiki --replicas=1
 | **WORKER_ID trùng** | StatefulSet pod name: `cpu-worker-0`, `cpu-worker-1` → WORKER_ID = 1 + ordinal (từ hostname) → ID duy nhất |
 | **Xung đột claim job** | PostgreSQL `SELECT ... FOR UPDATE SKIP LOCKED` — mỗi worker claim job khác nhau, không race |
 | **Orphan job (scale down)** | `claim_job()` reclaim job stuck `processing` > 30 phút — worker cũ đã bị kill, job được claim lại |
-| **Prometheus scrape** | Annotation-based pod discovery — pod mới tự xuất hiện trong Prometheus targets, không cần sửa config |
-| **Grafana dashboard** | Metric có label `worker_id` — panel tự hiện thêm line cho worker mới |
+| **Worker health** | Worker heartbeat ghi Postgres + `scripts/healthcheck.sh` query trực tiếp (monitoring stack đã gỡ 2026-08-23) |
 | **Giao tiếp service** | Tất cả qua DNS nội bộ `*.llm-wiki.svc.cluster.local` — không phụ thuộc pod IP |
 
 ### Kiến trúc job queue
@@ -76,7 +74,6 @@ Khi refactor sang StatefulSet, container `api` đã được loại bỏ. API v�
 - **Docker** — để build image và chạy kind cluster
 - **kind** — Kubernetes-in-Docker (`go install sigs.k8s.io/kind@latest`)
 - **kubectl** — để tương tác với cluster
-- **nginx ingress controller** — cài riêng trong kind cluster
 
 ## Quick start — tạo cluster từ đầu
 
@@ -92,19 +89,17 @@ kind create cluster --config k8s/kind-config.yaml
 kind load docker-image 32_llm_wiki_clean_arch-backend:latest --name llm-wiki
 kind load docker-image 32_llm_wiki_clean_arch-frontend:latest --name llm-wiki
 
-# 4. Cài nginx ingress controller
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
-kubectl wait --namespace ingress-nginx --for=condition=ready pod -l app.kubernetes.io/component=controller --timeout=90s
-
-# 5. Deploy toàn bộ stack
+# 4. Deploy toàn bộ stack
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/secret.yaml
 kubectl apply -f k8s/
 
-# 6. Kiểm tra
+# 5. Kiểm tra
 kubectl get pods -n llm-wiki
-# Truy cập: http://llm-wiki.local:30080 (thêm 127.0.0.1 llm-wiki.local vào /etc/hosts)
+./scripts/healthcheck.sh
+# Truy cập: http://localhost:30080 (frontend) / http://localhost:30081/api/health (backend)
+# Từ máy khác qua Tailscale: http://100.115.181.93:30080
 ```
 
 ## Development mode — thay đổi code không cần rebuild
@@ -196,17 +191,15 @@ k8s/
 ├── namespace.yaml           # Namespace llm-wiki
 ├── configmap.yaml           # Non-sensitive config
 ├── secret.yaml              # Secrets (DB URL, API keys, ...)
-├── ingress.yaml             # Nginx ingress — llm-wiki.local
-├── postgres/                # PostgreSQL + pgvector + postgres_exporter sidecar
-├── redis/                   # Valkey + redis_exporter sidecar
+├── postgres/                # PostgreSQL + pgvector
+├── redis/                   # Valkey
 ├── minio/                   # Object storage
 ├── ollama/                  # LLM inference + ollama_exporter sidecar
 ├── backend/                 # FastAPI backend
 ├── frontend/                # Next.js frontend
 ├── cpu-worker/              # CPU worker
 ├── wiki-consumer/           # Wiki ingestion
-├── telegram-bot/            # Telegram bot
-└── monitoring/              # Prometheus + Grafana + Loki + Promtail + AlertManager
+└── telegram-bot/            # Telegram bot
 ```
 
 ## Troubleshooting
@@ -235,47 +228,21 @@ Process khác đang chiếm port. Tìm và kill: `sudo lsof -i :30080`
 
 ### Muốn truy cập từ máy khác trong mạng LAN / Tailscale
 
-Kind cluster chỉ expose các port được liệt kê trong `kind-config.yaml` → `extraPortMappings`.
-Monitoring NodePorts (30000, 30909, 30310, 30903) **không được map ra host** → không reachable từ bên ngoài.
-
-**Solution:** `monitoring-socat-forward.sh` + systemd service.
-
-#### Cơ chế
+Frontend/backend là **NodePort services**; `kind-config.yaml` map host port 30080/30081 → kind node → reachable trực tiếp từ localhost và mọi thiết bị Tailscale. **Không cần socat / kubectl port-forward.**
 
 ```
-Host                          Kind Docker container (172.23.0.2)
-────                          ──────────────────────────────────
-socat TCP-LISTEN:30000  ──►  NodePort 30000 → grafana svc → grafana pod :3000
-socat TCP-LISTEN:30909  ──►  NodePort 30909 → prometheus svc → prometheus pod :9090
-socat TCP-LISTEN:30903  ──►  NodePort 30903 → alertmanager svc → alertmanager pod :9093
-socat TCP-LISTEN:30310  ──►  NodePort 30310 → loki svc → loki pod :3100
-socat TCP-LISTEN:30080  ──►  NodePort 30080 → frontend svc → frontend pod :3000
-socat TCP-LISTEN:8000   ──►  NodePort 30081 → backend-v2 svc → backend pod :8000
+Host (0.0.0.0)                      Kind node                   Pod
+──────                             ─────────                   ───
+localhost:30080 ──► docker-proxy ──► NodePort 30080 ──► frontend svc :3000
+100.115.181.93:30080 (Tailscale) ▲
 ```
-
-#### Systemd service
-
-```bash
-# Service: ~/.config/systemd/user/llm-wiki-socat-forward.service
-# Script:  scripts/monitoring-socat-forward.sh
-# Status:  enabled, auto-start on boot (user linger enabled)
-
-systemctl --user status llm-wiki-socat-forward.service
-systemctl --user restart llm-wiki-socat-forward.service   # restart nếu cần
-```
-
-#### Access URLs (qua Tailscale IP `100.115.181.93`)
 
 | Service | URL |
 |---------|-----|
-| Frontend | `http://100.115.181.93:30080` |
-| Backend API | `http://100.115.181.93:8000/api/metrics` |
-| Grafana | `http://100.115.181.93:30000` (admin / secret `GRAFANA_ADMIN_PASSWORD`) |
-| Prometheus | `http://100.115.181.93:30909` |
-| AlertManager | `http://100.115.181.93:30903` |
-| Loki | `http://100.115.181.93:30310` |
+| Frontend (toàn app) | `http://localhost:30080` / `http://100.115.181.93:30080` |
+| Backend API | `http://localhost:30081/api/health` |
 
-> **Note:** `k8s-frontend-portforward.service` (system service, `/etc/systemd/system/`) is superseded by this — socat handles frontend + backend + all monitoring in one place. It'll crash-loop since socat already binds port 30080. Can be disabled if you have sudo: `sudo systemctl disable --now k8s-frontend-portforward.service`.
+> **Lưu ý:** 2 systemd service forward-port cũ đã disable (2026-08-23): `llm-wiki-socat-forward.service` (user) và `k8s-frontend-portforward.service` (system). Nếu sau reboot port 30080 không lên, kiểm tra chúng không bị enable lại.
 
 ### Backend pod báo "No module named..." sau khi thêm file mới
 
@@ -619,7 +586,7 @@ kubectl -n llm-wiki describe sts/postgres
 
 ## DaemonSet — chạy đúng 1 pod trên mỗi node
 
-Dùng cho: log collector (Promtail, Fluentd), monitoring agent, storage daemon.
+Dùng cho: log collector, monitoring agent, storage daemon.
 
 ```bash
 kubectl -n llm-wiki get daemonsets

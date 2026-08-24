@@ -14,10 +14,18 @@ docker build --network=host --target worker -t worker:latest "$PROJECT_DIR"
 echo "=== Building frontend Docker image ==="
 docker build --network=host -t 32_llm_wiki_clean_arch-frontend:latest "$PROJECT_DIR/frontend"
 
-echo "=== Loading images into k3s ==="
-docker save backend:latest | sudo k3s ctr images import -
-docker save worker:latest | sudo k3s ctr images import -
-docker save 32_llm_wiki_clean_arch-frontend:latest | sudo k3s ctr images import -
+echo "=== Loading images into cluster ==="
+if command -v kind >/dev/null 2>&1 && kind get clusters >/dev/null 2>&1 && [ -n "$(kind get clusters)" ]; then
+  CLUSTER_NAME="$(kubectl config current-context 2>/dev/null | sed 's/^kind-//')"
+  [ -n "$CLUSTER_NAME" ] || CLUSTER_NAME="$(kind get clusters | head -1)"
+  echo "Detected kind cluster: ${CLUSTER_NAME} — using kind load"
+  kind load docker-image backend:latest worker:latest 32_llm_wiki_clean_arch-frontend:latest --name "${CLUSTER_NAME}"
+else
+  echo "No kind cluster detected — falling back to k3s ctr import"
+  docker save backend:latest | sudo k3s ctr images import -
+  docker save worker:latest | sudo k3s ctr images import -
+  docker save 32_llm_wiki_clean_arch-frontend:latest | sudo k3s ctr images import -
+fi
 
 echo "=== Deploying backend ==="
 kubectl apply -f "${PROJECT_DIR}/k8s/backend/"
@@ -31,8 +39,12 @@ kubectl apply -f "${PROJECT_DIR}/k8s/wiki-consumer/"
 echo "=== Deploying frontend ==="
 kubectl apply -f "${PROJECT_DIR}/k8s/frontend/"
 
-echo "=== Deploying ingress ==="
-kubectl apply -f "${PROJECT_DIR}/k8s/ingress.yaml"
+if [ -f "${PROJECT_DIR}/k8s/ingress.yaml" ]; then
+  echo "=== Deploying ingress ==="
+  kubectl apply -f "${PROJECT_DIR}/k8s/ingress.yaml"
+else
+  echo "=== Skipping ingress (k8s/ingress.yaml not present) ==="
+fi
 
 echo "=== Restarting deployments ==="
 kubectl rollout restart deployment/backend-v2 -n "$NAMESPACE"

@@ -1,8 +1,17 @@
 # Telemetry Implementation Strategy
 
-> **Last updated:** 2026-07-30
+> **Last updated:** 2026-08-23
 > **Status:** Implemented & deployed
 > **Observability platform:** LangSmith (by LangChain)
+
+---
+
+## 0. Cập nhật 2026-08-23 (chuyển sang personal deployment)
+
+- **Ingestion nay được trace đầy đủ:** `LANGSMITH_*` env đã thêm vào `k8s/cpu-worker/deployment.yaml` và `k8s/wiki-consumer/deployment.yaml` (trước đây chỉ backend-v2 có — workers rơi vào `NullTelemetryAdapter` im lặng).
+- **Span mới `transcript_extract`** trong `cpu_worker.py` — bao quanh bước thu thập transcript (download/whisper/cache), ghi `cached`, `language`, `duration_seconds`, `segments`, `raw_text_length`, và lỗi (`extract: ...`, `extract transient: ...`, `no captions`).
+- **Gỡ monitoring stack** Prometheus/Grafana/Loki/AlertManager + exporter sidecars + `k8s/monitoring/` + 3 scripts. `ENABLE_METRICS=false` trong configmap. LangSmith là nguồn observability duy nhất.
+- Truy cập: frontend `:30080`, backend `:30081` (NodePort + kind port mapping, không cần port-forward). Chi tiết: `docs/observability-guide.md`.
 
 ---
 
@@ -227,7 +236,7 @@ The ingestion pipeline is split across two worker processes. Each creates its **
 ┌─────────────────────────────────────────────┐
 │    cpu_worker: process_cpu_job (chain)      │
 │    ┌─────────────────────────────────────┐  │
-│    │ transcript extraction (not traced)  │  │
+│    │ transcript_extract (tool)           │  │ ← download/whisper/cache (2026-08-23)
 │    ├─────────────────────────────────────┤  │
 │    │ llm_chat_completion_raw (llm)       │  │ ← classifier LLM
 │    ├─────────────────────────────────────┤  │
@@ -341,9 +350,15 @@ The wrapper pattern keeps telemetry orthogonal. A use case calls `self._llm.chat
 
 All LangSmith calls (`start_span`, `end_span`, `add_metadata`, `create_child`, `post`, `patch`, `end`) are wrapped in `try/except` with `logger.debug` on failure. The observable result: traces are missing from LangSmith, but the RAG pipeline continues with zero impact.
 
-### 7.5 Extract stage is intentionally not traced
+### 7.5 Transcript extraction tracing (updated 2026-08-23)
 
-`faster-whisper` transcription and `yt-dlp` download are CPU-bound operations with no structured inputs/outputs suitable for tracing. They would add noise. The extract result is captured indirectly: `process_cpu_job` → `outputs.transcript_segments` records segment count on success, and `error` records the failure reason when it fails.
+Extract stage now has a dedicated child span `transcript_extract` under `process_cpu_job` (added 2026-08-23 for personal use). It records what the opaque download/whisper step actually did:
+
+- inputs: `video_id`, `cached_transcript`
+- outputs (success): `cached`, `language`, `duration_seconds`, `segments`, `raw_text_length`
+- error: `extract: <msg>` (permanent), `extract transient: <msg>`, `no captions` / `no captions_t3_fail`
+
+Span cost is one `start_span`/`end_span` pair per job — negligible next to a 30-60s extract. Before this change, the extract step was opaque: only the root's `outputs.transcript_segments` (success) or `error` (failure) recorded anything.
 
 ---
 

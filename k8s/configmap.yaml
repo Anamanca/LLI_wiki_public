@@ -31,6 +31,6 @@ data:
   LANGSMITH_ENDPOINT: "https://api.smith.langchain.com"
   LANGSMITH_PROJECT: "llm-wiki-rag"
   LANGSMITH_EVALUATOR_MODEL: "deepseek-v4-flash"
-  ENABLE_METRICS: "true"
+  ENABLE_METRICS: "false"
   LOG_FORMAT: "json"
   LOG_LEVEL: "INFO"

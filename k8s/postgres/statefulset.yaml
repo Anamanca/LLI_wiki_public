@@ -51,24 +51,7 @@ spec:
             command: ["pg_isready", "-U", "wiki", "-d", "llm_wiki"]
           initialDelaySeconds: 30
           periodSeconds: 30
-      - name: postgres-exporter
-        image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
-        args:
-        - "--web.listen-address=:9187"
-        env:
-        - name: DATA_SOURCE_URI
-          value: "localhost:5432/llm_wiki?sslmode=disable&user=wiki"
-        - name: DATA_SOURCE_PASS
-          valueFrom:
-            secretKeyRef:
-              name: llm-wiki-secrets
-              key: db-password
-        ports:
-        - containerPort: 9187
-          name: metrics
-        resources:
-          requests: {memory: "32Mi", cpu: "10m"}
-          limits: {memory: "64Mi", cpu: "50m"}
+      volumes:
       volumes:
       - name: dshm
         emptyDir:
