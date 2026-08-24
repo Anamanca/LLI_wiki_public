@@ -142,10 +142,14 @@ _TIME_PATTERNS = [
     (r"(?:the\s+)?(?:past|last)\s+month(?!\s*\d)", lambda m: timedelta(days=30)),
     (r"(?:the\s+)?(?:past|last)\s+week(?!\s*\d)", lambda m: timedelta(days=7)),
     (r"(?:the\s+)?(?:past|last)\s+year(?!\s*\d)", lambda m: timedelta(days=365)),
-    # Vietnamese — compound time phrases (high confidence)
-    (r"trong\s+tháng\s+vừa\s+qua|trong\s+tháng\s+qua", lambda m: timedelta(days=30)),
-    (r"tháng\s+vừa\s+qua", lambda m: timedelta(days=30)),
-    (r"tuần\s+vừa\s+qua", lambda m: timedelta(days=7)),
+    # Vietnamese — bare relative time words (hôm qua, tuần trước, ...)
+    (r"hôm\s+qua|yesterday", lambda m: timedelta(days=1)),
+        (r"tuần\s+trước", lambda m: _prev_calendar_week(m)),
+    (r"tháng\s+trước", lambda m: _prev_calendar_month(m)),
+    (r"năm\s+ngoái", lambda m: _prev_calendar_year(m)),
+    (r"quý\s+(\d)\s+năm\s+(\d{4})", lambda m: _quarter_delta(m)),
+        (r"quý\s+này|this\s+quarter", lambda m: _current_quarter(m)),
+    (r"quý\s+trước|quý\s+vừa\s+qua|last\s+quarter", lambda m: _prev_calendar_quarter(m)),
     # Explicit "this period" — medium confidence, use generous range
     (r"tuần\s*này", lambda m: timedelta(days=7)),
     (r"tháng\s*này", lambda m: timedelta(days=60)),
@@ -216,8 +220,56 @@ def _year_delta(m: re.Match) -> timedelta | None:
     year = int(m.group(1))
     if year < 2000 or year > now().year:
         return None
-    start = datetime(year, 1, 1)
+    start = datetime(year, 1, 1, tzinfo=now().tzinfo)
     return timedelta(days=(now() - start).days + 1)
+
+
+def _prev_calendar_week(_m: re.Match) -> TimeRange | None:
+    """Previous calendar week (Mon 00:00 → Sun 23:59:59.999999)."""
+    today = now()
+    this_monday = (today - timedelta(days=today.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return TimeRange(start=this_monday - timedelta(days=7), end=this_monday - timedelta(microseconds=1))
+
+
+def _current_quarter(_m: re.Match) -> TimeRange | None:
+    """Current calendar quarter start → now."""
+    today = now()
+    q_start_month = ((today.month - 1) // 3) * 3 + 1
+    return TimeRange(start=datetime(today.year, q_start_month, 1, tzinfo=today.tzinfo), end=today)
+
+
+def _prev_calendar_quarter(_m: re.Match) -> TimeRange | None:
+    """Previous calendar quarter boundaries."""
+    today = now()
+    q_start_month = ((today.month - 1) // 3) * 3 + 1
+    start = datetime(today.year, q_start_month, 1, tzinfo=today.tzinfo)
+    prev_end = start - timedelta(microseconds=1)
+    prev_start_month = ((prev_end.month - 1) // 3) * 3 + 1
+    return TimeRange(
+        start=datetime(prev_end.year, prev_start_month, 1, tzinfo=today.tzinfo),
+        end=prev_end,
+    )
+
+
+def _prev_calendar_month(_m: re.Match) -> TimeRange | None:
+    """Previous calendar month boundaries."""
+    today = now()
+    start = datetime(today.year, today.month, 1, tzinfo=today.tzinfo)
+    prev_end = start - timedelta(microseconds=1)
+    return TimeRange(
+        start=datetime(prev_end.year, prev_end.month, 1, tzinfo=today.tzinfo),
+        end=prev_end,
+    )
+
+
+def _prev_calendar_year(_m: re.Match) -> TimeRange | None:
+    """Previous calendar year boundaries."""
+    today = now()
+    start = datetime(today.year, 1, 1, tzinfo=today.tzinfo)
+    prev_end = start - timedelta(microseconds=1)
+    return TimeRange(start=datetime(prev_end.year, 1, 1, tzinfo=today.tzinfo), end=prev_end)
 
 
 _TIME_KEYWORDS = re.compile(
@@ -236,6 +288,8 @@ def _extract_time_range(question: str) -> TimeRange | None:
         try:
             delta = delta_fn(m)
             if delta is not None:
+                if isinstance(delta, TimeRange):
+                    return delta
                 return TimeRange(start=now() - delta, end=now())
         except Exception:
             continue
@@ -932,11 +986,19 @@ class QueryPipeline:
                 )
             return cached_data
 
+        # ── Multi-turn: resolve follow-up pronouns via chat history ─────
+        # The rewritten question drives analysis/retrieval; the original is
+        # kept for user-facing output and cache keys.
+        question = input.question
+        if self._rewriter and input.chat_history:
+            question = await self._rewriter.rewrite(input.question, input.chat_history)
+            logger.debug("Rewritten follow-up: %r → %r", input.question[:80], question[:80])
+
         # ── Guardrail + Intent analysis (single LLM call, no rewrite) ──
         analysis = GuardrailAnalysis()
         if self._analyzer:
             analysis, step_times["analyze"] = await _timed(
-                lambda: self._analyzer.analyze(input.question)
+                lambda: self._analyzer.analyze(question)
             )
 
             # Guardrail rejection: deny immediately, no search
@@ -983,7 +1045,7 @@ class QueryPipeline:
         # ── Embedding with analyzer-optimised text ────────────────────
         # Use embedding_text when available (dense keywords VI+EN); fall back to
         # raw question so the system still works without the analyzer.
-        embed_text = analysis.embedding_text or input.question
+        embed_text = analysis.embedding_text or question
         try:
             query_embedding, step_times["embed"] = await _timed(
                 lambda: self._embedder.embed(embed_text),
@@ -1024,10 +1086,16 @@ class QueryPipeline:
                 )
             return sem_data
 
-        # ── Resolve time_range (analyzer → regex → user-provided) ────
-        # Analyzer-provided time_range takes precedence (LLM understands
-        # temporal intent better than regexes).
-        time_range = analysis.time_range or self._resolve_time_range(input)
+        # ── Resolve time_range (analyzer → regex → LLM fallback) ─────
+        time_range = analysis.time_range
+        if time_range is None:
+            if input.from_date or input.to_date:
+                min_dt = datetime.min.replace(tzinfo=get_system_tz())
+                time_range = TimeRange(start=input.from_date or min_dt, end=input.to_date)
+            else:
+                time_range = _extract_time_range(question)
+                if time_range is None and _may_be_time_related(question):
+                    time_range = await self._extract_time_range_with_llm(question)
         if time_range:
             logger.debug("Time range: %s → %s", time_range.start, time_range.end)
 
@@ -1037,7 +1105,7 @@ class QueryPipeline:
             query_embedding,
             time_range,
             intent=intent,
-            rewritten_question=input.question,
+                rewritten_question=question,
             entities=analysis.entities if analysis.entities else None,
             analysis=analysis,
         )
@@ -1050,6 +1118,16 @@ class QueryPipeline:
         lang = analysis.language or _detect_language(input.question)
         today_str = now().strftime("%Y-%m-%d")
         system_prompt = _build_synthesis_prompt(lang, today_str, intent)
+        if input.chat_history:
+            turns = input.chat_history[-6:]
+            history_text = "\n".join(
+                f"{'User' if t.get('role') == 'user' else 'Assistant'}: {t.get('content', '')}"
+                for t in turns
+            )
+            system_prompt += (
+                "\n\nCuộc hội thoại trước đó (tham khảo để hiểu ngữ cảnh, "
+                "chỉ trả lời câu hỏi MỚI NHẤT):\n" + history_text
+            )
 
         messages = [{"role": "system", "content": system_prompt}]
         messages.append(
@@ -1186,11 +1264,17 @@ class QueryPipeline:
             return
 
         try:
+            # ── Multi-turn: resolve follow-up pronouns via chat history ─
+            question = input.question
+            if self._rewriter and input.chat_history:
+                question = await self._rewriter.rewrite(input.question, input.chat_history)
+                logger.debug("Stream rewritten follow-up: %r → %r", input.question[:80], question[:80])
+
             # ── Guardrail + Intent analysis (single LLM call) ──────────
             analysis = GuardrailAnalysis()
             if self._analyzer:
                 analysis, step_times["analyze"] = await _timed(
-                    lambda: self._analyzer.analyze(input.question)
+                    lambda: self._analyzer.analyze(question)
                 )
 
                 # Guardrail rejection
@@ -1240,7 +1324,7 @@ class QueryPipeline:
                 )
 
             # Embedding with analyzer-optimised text
-            embed_text = analysis.embedding_text or input.question
+            embed_text = analysis.embedding_text or question
             query_embedding, step_times["embed"] = await _timed(
                 lambda: self._embedder.embed(embed_text),
             )
@@ -1267,10 +1351,16 @@ class QueryPipeline:
                     )
                 return
 
-            # ── Resolve time_range (analyzer → regex → user-provided) ────
-            # Analyzer-provided time_range takes precedence (LLM understands
-            # temporal intent better than regexes).
-            time_range = analysis.time_range or self._resolve_time_range(input)
+            # ── Resolve time_range (analyzer → regex → LLM fallback) ─────
+            time_range = analysis.time_range
+            if time_range is None:
+                if input.from_date or input.to_date:
+                    min_dt = datetime.min.replace(tzinfo=get_system_tz())
+                    time_range = TimeRange(start=input.from_date or min_dt, end=input.to_date)
+                else:
+                    time_range = _extract_time_range(question)
+                    if time_range is None and _may_be_time_related(question):
+                        time_range = await self._extract_time_range_with_llm(question)
             if time_range:
                 logger.debug("Extracted time_range: %s → %s", time_range.start, time_range.end)
 
@@ -1280,7 +1370,7 @@ class QueryPipeline:
                 query_embedding,
                 time_range,
                 intent=intent,
-                rewritten_question=input.question,
+                rewritten_question=question,
                 entities=analysis.entities if analysis.entities else None,
                 analysis=analysis,
             )
@@ -1293,6 +1383,16 @@ class QueryPipeline:
             lang_stream = analysis.language or _detect_language(input.question)
             today_str_stream = now().strftime("%Y-%m-%d")
             system_prompt = _build_synthesis_prompt(lang_stream, today_str_stream, intent)
+            if input.chat_history:
+                turns = input.chat_history[-6:]
+                history_text = "\n".join(
+                    f"{'User' if t.get('role') == 'user' else 'Assistant'}: {t.get('content', '')}"
+                    for t in turns
+                )
+                system_prompt += (
+                    "\n\nCuộc hội thoại trước đó (tham khảo để hiểu ngữ cảnh, "
+                    "chỉ trả lời câu hỏi MỚI NHẤT):\n" + history_text
+                )
 
             stream_messages = [{"role": "system", "content": system_prompt}]
             stream_messages.append(

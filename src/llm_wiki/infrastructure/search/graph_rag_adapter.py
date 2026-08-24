@@ -102,6 +102,68 @@ class PostgresGraphRAGAdapter(GraphRAGPort):
                 logger.debug(
                     "GraphRAG: %d events found for entities=%s", len(graph_results), entity_names
                 )
+
+            # ── Entity → Entity relations (64-predicate taxonomy) ──────
+            # Surfaces explicit relationships between matched entities and
+            # their neighbors (e.g. "FED tightens interest_rate",
+            # "VCB belongs_to_sector banking"), which vector search cannot
+            # capture. Read-only expansion — never modifies the graph.
+            try:
+                rel_where = ["(e1.name = ANY(:entity_names) OR e2.name = ANY(:entity_names))"]
+                if time_range:
+                    rel_where.append(
+                        "(ec.normalized_date IS NULL"
+                        " OR (ec.normalized_date >= :start_date"
+                        + (" AND ec.normalized_date <= :end_date" if time_range.end else "")
+                        + "))"
+                    )
+                rel_sql = text(
+                    f"""
+                    SELECT er.id, e1.name AS from_name, e1.type AS from_type,
+                           e2.name AS to_name, e2.type AS to_type,
+                           er.predicate, er.confidence, er.properties,
+                           ec.title AS evidence_event
+                    FROM entity_relations er
+                    JOIN entities e1 ON er.from_entity_id = e1.id
+                    JOIN entities e2 ON er.to_entity_id = e2.id
+                    LEFT JOIN event_canonicals ec ON ec.id = er.source_event_id
+                    WHERE {' AND '.join(rel_where)}
+                    ORDER BY er.confidence DESC NULLS LAST
+                    LIMIT :limit
+                    """
+                )
+                rel_result = await self._session.execute(rel_sql, params)
+                for row in rel_result.mappings().all():
+                    from_name = row["from_name"] or ""
+                    to_name = row["to_name"] or ""
+                    predicate = row["predicate"] or ""
+                    evidence = row.get("evidence_event")
+                    rel_content = f"{from_name} {predicate} {to_name}"
+                    if evidence:
+                        rel_content += f" (bằng chứng: {evidence})"
+                    graph_results.append(
+                        SearchResult(
+                            content_id=f"graph-rel-{row['id']}",
+                            content_type="graph_relation",
+                            title=rel_content,
+                            content=rel_content,
+                            score=float(row.get("confidence") or 0.4),
+                            metadata={
+                                "relation_id": str(row["id"]),
+                                "from_entity": from_name,
+                                "to_entity": to_name,
+                                "predicate": predicate,
+                                "source": "knowledge_graph_relations",
+                            },
+                        )
+                    )
+                logger.debug(
+                    "GraphRAG: %d total graph results (events + relations) for entities=%s",
+                    len(graph_results), entity_names,
+                )
+            except Exception:
+                logger.debug("GraphRAG relation traversal failed, continuing with events", exc_info=True)
+
             return graph_results
 
         except Exception:

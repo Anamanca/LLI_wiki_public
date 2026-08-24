@@ -61,26 +61,38 @@ async def _dedup_exact_key(
     result = await db.execute(stmt)
     rows = result.all()
     for row in rows:
-        if row[0] is not None:
-            canonical = await db.get(orm.EventCanonical, row[0])
-            if canonical and canonical.entities and key[2]:
-                entities = canonical.entities if isinstance(canonical.entities, dict) else {}
-                companies = entities.get("companies", []) if isinstance(entities, dict) else []
-                top_entity = (
-                    companies[0].get("name")
-                    if companies and isinstance(companies[0], dict)
-                    else None
-                )
-                if top_entity and top_entity.lower() == key[2].lower():
-                    return row[0]
-            else:
-                return row[0]
+        if row[0] is None:
+            continue
+        canonical = await db.get(orm.EventCanonical, row[0])
+        if canonical is None:
+            continue
+        # Identity can only be confirmed when BOTH sides carry the same
+        # top entity. Without entity info, merging date+category-only would
+        # conflate different events (e.g. two companies' news on one day).
+        if not key[2]:
+            continue
+        canonical_entities = (
+            canonical.entities if isinstance(canonical.entities, dict) else {}
+        )
+        companies = (
+            canonical_entities.get("companies", [])
+            if isinstance(canonical_entities, dict)
+            else []
+        )
+        top_entity = (
+            companies[0].get("name")
+            if companies and isinstance(companies[0], dict)
+            else None
+        )
+        if top_entity and top_entity.lower() == key[2].lower():
+            return row[0]
     return None
 
 
 async def _dedup_vector(
     embedding: list[float],
-    db: AsyncSession,
+       db: AsyncSession,
+    category: str | None = None,
 ) -> UUID | None:
     if not embedding or all(v == 0.0 for v in embedding):
         return None
@@ -91,11 +103,14 @@ async def _dedup_vector(
         FROM event_canonicals
         WHERE canonical_embedding IS NOT NULL
           AND 1 - (canonical_embedding <=> :vec) >= :threshold
+          AND category IS NOT DISTINCT FROM :cat
         ORDER BY canonical_embedding <=> :vec
         LIMIT 1
         """
     )
-    result = await db.execute(sql, {"vec": vec_str, "threshold": VECTOR_SIM_THRESHOLD})
+    result = await db.execute(
+        sql, {"vec": vec_str, "threshold": VECTOR_SIM_THRESHOLD, "cat": category}
+    )
     row = result.first()
     if row:
         return row[0]
@@ -200,14 +215,26 @@ async def _link_entities_to_event(
     event_data: dict[str, Any],
     event_id: UUID,
     db: AsyncSession,
+    mention_filter: str | None = None,
 ) -> tuple[list[UUID], dict[str, UUID]]:
     """Extract entities from event_data, upsert into entities table, create links.
+
+    When ``mention_filter`` is provided (an event description), only entities
+    whose name appears in it are linked — avoids linking irrelevant entities
+    to every event of the batch. Best-effort: no alias/diacritic resolution.
 
     Returns (linked_entity_ids, entity_map). entity_map maps canonical_name → entity_id.
     """
     entities_raw = event_data if isinstance(event_data, dict) else {}
     if not entities_raw:
         return [], {}
+
+    def _mentioned(name: str) -> bool:
+        if mention_filter is None:
+            return True
+        if not name:
+            return False
+        return name.lower() in mention_filter.lower()
 
     entity_type_map = {
         "companies": "stock_ticker",
@@ -231,7 +258,7 @@ async def _link_entities_to_event(
             if not isinstance(entry, dict):
                 continue
             name = (entry.get("name") or "").strip()
-            if not name:
+            if not name or not _mentioned(name):
                 continue
             ticker = (entry.get("ticker") or "").upper() or None
             canonical = name.lower()
@@ -279,7 +306,7 @@ async def _link_entities_to_event(
             if not isinstance(idx, dict):
                 continue
             name = (idx.get("name") or "").strip()
-            if not name:
+            if not name or not _mentioned(name):
                 continue
             canonical = name.lower()
             etype = idx.get("type") or "market_index"
@@ -414,6 +441,7 @@ async def extract_and_store_events(
     relations_stored = 0
     entity_map: dict[str, UUID] = {}
     first_event_id: UUID | None = None
+    stored_event_ids: list[UUID] = []
 
     for event in events:
         try:
@@ -426,6 +454,8 @@ async def extract_and_store_events(
 
             existing_id = await _dedup_exact_key(event, db)
             if existing_id:
+                if existing_id not in stored_event_ids:
+                    stored_event_ids.append(existing_id)
                 if first_event_id is None:
                     first_event_id = existing_id
                 await _create_observation(
@@ -435,8 +465,10 @@ async def extract_and_store_events(
                 stored += 1
                 continue
 
-            existing_id = await _dedup_vector(embedding, db)
+            existing_id = await _dedup_vector(embedding, db, category=event.get("category"))
             if existing_id:
+                if existing_id not in stored_event_ids:
+                    stored_event_ids.append(existing_id)
                 if first_event_id is None:
                     first_event_id = existing_id
                 await _create_observation(
@@ -447,6 +479,7 @@ async def extract_and_store_events(
                 continue
 
             canonical = await _create_canonical(event, embedding, db)
+            stored_event_ids.append(canonical.id)
             if first_event_id is None:
                 first_event_id = canonical.id
             await _create_observation(
@@ -461,8 +494,21 @@ async def extract_and_store_events(
                 exc,
             )
 
-    if entities_data and first_event_id:
-        _, entity_map = await _link_entities_to_event(entities_data, first_event_id, db)
+    if entities_data and stored_event_ids:
+        # Link entities to EVERY stored event (was: only the first event).
+        # The first event keeps full linking (builds entity_map for relations);
+        # subsequent events link only entities mentioned in their description.
+        _, entity_map = await _link_entities_to_event(entities_data, stored_event_ids[0], db)
+        for canonical_id in stored_event_ids[1:]:
+            try:
+                canonical = await db.get(orm.EventCanonical, canonical_id)
+                if canonical is None:
+                    continue
+                await _link_entities_to_event(
+                    entities_data, canonical_id, db, mention_filter=canonical.title or ""
+                )
+            except Exception as exc:
+                logger.warning("Entity link failed for event %s: %s", canonical_id, exc)
 
     if entity_relations_data and entity_map and first_event_id:
         relations_stored = await _store_entity_relations(

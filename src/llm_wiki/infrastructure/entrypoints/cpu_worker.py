@@ -283,6 +283,15 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
         set_worker_state(WORKER_ID, "processing", item.id, stage, int(get_current_cpu()), error)
 
     # ========== STAGE 0+1: Extract transcript ==========
+    extract_span = await _telemetry.start_span(
+        name="transcript_extract",
+        kind="tool",
+        inputs={
+            "video_id": ctx["video_id"],
+            "cached_transcript": bool(item.transcript_text),
+        },
+        parent=root_span,
+    )
     await _log_event(db, item.id, "extract_start", "Extracting transcript")
     _heartbeat("extracting")
     transcript_dict = None
@@ -301,6 +310,14 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
             "segments": segs,
             "raw_text": cached[:100_000],
         }
+        await _telemetry.end_span(
+            span=extract_span,
+            outputs={
+                "cached": True,
+                "language": cached_json.get("language", "unknown"),
+                "segments": len(segs),
+            },
+        )
     else:
         from llm_wiki.application.use_cases.ingestion.extractor import (
             classify_extract_error,
@@ -326,6 +343,7 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
             err_msg = str(exc)
             new_status, is_permanent = classify_extract_error(err_msg)
             if is_permanent:
+                await _telemetry.end_span(span=extract_span, error=f"extract: {err_msg[:400]}")
                 await _telemetry.end_span(span=root_span, error=f"extract: {err_msg[:400]}")
                 if new_status == "scheduled":
                     # Video not yet published (premiere) — retry after 12h
@@ -358,6 +376,9 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
                 return
             else:
                 await _telemetry.end_span(
+                    span=extract_span, error=f"extract transient: {err_msg[:400]}"
+                )
+                await _telemetry.end_span(
                     span=root_span, error=f"extract transient: {err_msg[:400]}"
                 )
                 logger.warning(
@@ -376,6 +397,7 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
             if transcript_dict is None
             else "No caption segments found"
         )
+        await _telemetry.end_span(span=extract_span, error=log_msg)
         await _telemetry.end_span(span=root_span, error=log_msg)
         item.status = reason
         item.started_at = None
@@ -389,6 +411,16 @@ async def process_job(item: SourceItem, db: AsyncSession) -> None:
         logger.info("Worker %s: Job %s: %s — skipping", WORKER_ID, ctx["video_id"], log_msg)
         return
 
+    await _telemetry.end_span(
+        span=extract_span,
+        outputs={
+            "cached": False,
+            "language": transcript_dict.get("language", "unknown"),
+            "duration_seconds": transcript_dict.get("duration_seconds"),
+            "segments": len(transcript_dict.get("segments", [])),
+            "raw_text_length": len(transcript_dict.get("raw_text", "") or ""),
+        },
+    )
     await _log_event(
         db,
         item.id,
@@ -758,15 +790,25 @@ async def main() -> None:
 
     heartbeat_task = asyncio.create_task(_heartbeat_loop(), name="worker-heartbeat")
 
+    # Stale-recovery sweeper: reclaim stuck processing/wiki_processing items and
+    # re-queue classified items to the wiki queue. Was previously never started
+    # (dead code) — items stuck in 'classified' could block forever.
+    from llm_wiki.application.use_cases.ingestion.stale_recovery import run_sweeper
+
+    sweeper_task = asyncio.create_task(run_sweeper(), name="stale-recovery-sweeper")
+
     try:
         await worker_loop()
     except asyncio.CancelledError:
         pass
     finally:
         _shutdown_requested = True
-        for task in (health_task, heartbeat_task):
+        from llm_wiki.application.use_cases.ingestion.stale_recovery import stop_sweeper
+
+        stop_sweeper()
+        for task in (health_task, heartbeat_task, sweeper_task):
             task.cancel()
-        for task in (health_task, heartbeat_task):
+        for task in (health_task, heartbeat_task, sweeper_task):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 

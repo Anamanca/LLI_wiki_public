@@ -339,7 +339,12 @@ async def _try_extract_subs_to_file(
     """Download subtitles to a file (only called after dump-json confirms they exist)."""
     args = [
         "--skip-download",
-        "--sub-lang", "en,vi",
+                # Prefer the video's ORIGINAL language. The system targets Vietnamese
+        # finance content — for a Vietnamese video, 'vi' auto-captions are the
+        # speaker's actual words while 'en' is machine-translated. Writing the
+        # wiki from translated captions loses fidelity (and produced English
+        # pages for Vietnamese videos).
+        "--sub-lang", "vi,en",
         "--sub-format", "vtt",
         f"--write-{'auto-' if write_auto else ''}subs",
         "--convert-subs", "vtt",
@@ -350,6 +355,8 @@ async def _try_extract_subs_to_file(
         await _run_ytdlp(args, timeout=timeout)
         vtt_files = list(Path(work_dir).glob(f"{video_id}*.vtt"))
         if vtt_files:
+                        # If both vi and en tracks were written, prefer the vi one.
+            vtt_files.sort(key=lambda p: 0 if ".vi." in p.name else 1)
             return vtt_files[0].read_text(encoding="utf-8", errors="replace")
         return None
     except RuntimeError:
