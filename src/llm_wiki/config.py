@@ -58,10 +58,16 @@ class Settings(BaseSettings):
     temporal_precision_enabled: bool = True
     reranker_enabled: bool = Field(default=True, validation_alias="RERANKER_ENABLED")
     cross_encoder_enabled: bool = Field(default=False, validation_alias="CROSS_ENCODER_ENABLED")
-    cross_encoder_model: str = Field(
-        default="BAAI/bge-reranker-v2-m3", validation_alias="CROSS_ENCODER_MODEL"
-    )
     reasoning_enabled: bool = Field(default=True, validation_alias="REASONING_ENABLED")
+
+    # Wiki ingestion feature flags (default OFF — zero behavior change on deploy;
+    # enable individually after canary). Do NOT use reasoning_enabled as the
+    # wiki-only switch — it is global and defaults True.
+    wiki_chunking_enabled: bool = Field(default=False, validation_alias="WIKI_CHUNKING_ENABLED")
+    wiki_write_thinking_enabled: bool = Field(
+        default=False, validation_alias="WIKI_WRITE_THINKING_ENABLED"
+    )
+    wiki_reflect_enabled: bool = Field(default=False, validation_alias="WIKI_REFLECT_ENABLED")
 
     # LangSmith observability & evaluation
     langsmith_tracing_enabled: bool = Field(default=False, validation_alias="LANGSMITH_TRACING")

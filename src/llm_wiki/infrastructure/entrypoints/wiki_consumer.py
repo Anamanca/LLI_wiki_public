@@ -21,6 +21,7 @@ import logging
 import os
 import signal
 import time
+from datetime import timedelta
 from uuid import UUID
 
 from sqlalchemy import delete, select
@@ -47,18 +48,20 @@ from llm_wiki.infrastructure.persistence.redis.wiki_queue import (
     pop_wiki_job,
     push_wiki_job,
 )
-from llm_wiki.infrastructure.telemetry import create_telemetry_adapter
 from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter, set_gauge
 from llm_wiki.infrastructure.telemetry.metrics_collector import get_metrics
-from llm_wiki.presentation.dependencies import traced_embedder, traced_llm
+from llm_wiki.presentation.dependencies import container, traced_embedder, traced_llm
 from llm_wiki.shared.datetime_utils import now
 
 CONSUMER_ID = os.getenv("CONSUMER_ID", settings.consumer_id)
 logger = logging.getLogger(f"wiki-consumer-{CONSUMER_ID}")
 
-# One telemetry adapter per consumer process — reused across all jobs.
-# Each job creates its own root span under this adapter.
-_telemetry = create_telemetry_adapter()
+# MUST use container.telemetry() (the DI singleton) — NOT a fresh adapter.
+# traced_llm/traced_embedder from dependencies use container.telemetry();
+# if the root span were created under a different adapter instance, its
+# parent_run lookup would fail and every nested span would become an
+# isolated root run in LangSmith instead of a child of process_wiki_job.
+_telemetry = container.telemetry()
 
 _shutdown_requested = False
 
@@ -239,6 +242,10 @@ async def _retry_or_fail(
             )
         else:
             item.status = "classified"
+            # Exponential jittered backoff so 429/transient failures do not
+            # burst-retry and exhaust every API key (P6).
+            backoff = min(2 ** min(item.retry_count, 4) * 60, 900)
+            item.retry_after = now() + timedelta(seconds=backoff)
             inc_counter(
                 "ingestion_jobs_total",
                 {"status": "retry", "stage": extra_label, "worker_id": str(CONSUMER_ID)},
@@ -325,6 +332,21 @@ async def process_wiki_job(item_id: UUID) -> None:
             },
         )
 
+        # P6: pipeline observability metadata — generation, chunking, thinking,
+        # reflect flags (from transcript_json + settings) for LangSmith queries.
+        with contextlib.suppress(Exception):
+            await _telemetry.add_metadata(
+                root_span,
+                {
+                    "pipeline_generation": (item.transcript_json or {}).get(
+                        "pipeline_generation", "legacy"
+                    ),
+                    "chunking": settings.wiki_chunking_enabled,
+                    "write_thinking": settings.wiki_write_thinking_enabled,
+                    "reflect": settings.wiki_reflect_enabled,
+                },
+            )
+
         # Retry fast-path: if wiki page already exists from a previous attempt,
         # skip the expensive Pass 1→2→3 pipeline and go straight to embedding.
         cached_page_id = data.get("_wiki_page_id")
@@ -381,9 +403,12 @@ async def process_wiki_job(item_id: UUID) -> None:
                         source_id=item.source_id,
                         source_item_id=_item_pk,
                         published_at=item.published_at,
-                        timeout=1800.0,
+                        # 3600s: chunked map-reduce (up to 12 chunks x ~240s) +
+                        # write + reflect must fit under the job deadline with
+                        # slow LLM API latency (canary-verified 2026-08-24).
+                        timeout=3600.0,
                     ),
-                    timeout=1800.0,
+                    timeout=3600.0,
                 )
             except TimeoutError:
                 logger.error(
@@ -487,8 +512,14 @@ async def process_wiki_job(item_id: UUID) -> None:
             "ingestion_job_duration_seconds", _time.monotonic() - _job_start, {"stage": "wiki"}
         )
 
-        # Clean up snapshots
-        await db.execute(delete(PageSnapshot).where(PageSnapshot.source_item_id == item.id))
+        # Snapshot retention: keep recent snapshots for content rollback
+        # (P6) — purge only snapshots older than 7 days for this item.
+        retention_cutoff = now() - timedelta(days=7)
+        await db.execute(
+            delete(PageSnapshot)
+            .where(PageSnapshot.source_item_id == item.id)
+            .where(PageSnapshot.created_at < retention_cutoff)
+        )
         await db.commit()
 
         await _log_event(

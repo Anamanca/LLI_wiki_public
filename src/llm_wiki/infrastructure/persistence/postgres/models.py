@@ -80,6 +80,7 @@ class SourceItem(Base):
     error_message = Column(Text, nullable=True)
     transcript_text = Column(Text, nullable=True)
     transcript_json = Column(JSONB, nullable=True)
+    pass1_facts = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
 
     __table_args__ = (
@@ -200,6 +201,11 @@ class PageSection(Base):
             postgresql_using="hnsw",
             postgresql_with={"m": 16, "ef_construction": 200},
             postgresql_ops={"section_vector": "vector_cosine_ops"},
+        ),
+        Index(
+            "ix_page_sections_fts_vector_gin",
+            "fts_vector",
+            postgresql_using="gin",
         ),
     )
 
@@ -480,6 +486,11 @@ class EventObservation(Base):
         Index("ix_event_observations_published_at", "source_published_at"),
         Index("ix_event_observations_event_id", "event_id"),
         Index("ix_event_observations_page_id", "page_id"),
+        Index(
+            "ix_event_observations_fts_vector_gin",
+            "fts_vector",
+            postgresql_using="gin",
+        ),
     )
 
 

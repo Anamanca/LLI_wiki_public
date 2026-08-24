@@ -510,6 +510,10 @@ async def restart_item(item_id: str, db: AsyncSession = Depends(get_db)):
         item.status = "pending"
     item.error_message = None
     item.retry_after = None
+    # Explicit restart = fresh attempt: clear retry_count so the stale-recovery
+    # sweeper (which permanently fails classified items with retry_count >= 10)
+    # does not kill the re-queued job before the consumer can process it.
+    item.retry_count = 0
     await db.commit()
     # If reset to "classified", push into Redis wiki queue so wiki-consumer picks it up.
     if item.status == "classified":

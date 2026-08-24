@@ -50,8 +50,10 @@ from llm_wiki.application.use_cases.ingestion.event_linker import (
 )
 from llm_wiki.application.use_cases.ingestion.wiki_prompts import (
     EXTRACT_SYSTEM_PROMPT,
+    REFLECT_SYSTEM_PROMPT,
     WRITE_SYSTEM_PROMPT,
 )
+from llm_wiki.config import settings
 from llm_wiki.infrastructure.persistence.postgres import models as orm
 from llm_wiki.shared.datetime_utils import now
 
@@ -106,6 +108,8 @@ def _validate_wiki_output(data: dict[str, Any]) -> None:
     """
     import os
 
+    if not isinstance(data, dict):
+        raise ValueError(f"Pass output is not a dict (got {type(data).__name__}) — cannot validate")
     strict_mode = os.getenv("WIKI_STRICT_VALIDATION", "false").lower() == "true"
     sections = data.get("sections", [])
     if not sections:
@@ -378,6 +382,32 @@ def _preprocess_transcript(transcript_text: str, lang: str | None = None) -> str
     return " ".join(deduped)
 
 
+_VI_DIACRITIC_CHARS = set(
+    "ăâđêôơưàảãáạằẳẵắặầẩẫấậèẻẽéẹềểễếệìỉĩíịòỏõóọồổỗốộờởỡớợùủũúụừửữứựỳỷỹýỵ"
+)
+
+
+def _detect_transcript_language(text: str) -> str:
+    """Deterministically detect dominant transcript language (vi/en/mixed).
+
+    Uses Vietnamese diacritic density — reliable for Vietnamese speech mixed
+    with English financial terms (tickers, indices). Overrides LLM language
+    drift in classification: flash models tend to mislabel Vietnamese
+    transcripts as English.
+    """
+    if not text:
+        return "vi"
+    alpha = sum(1 for c in text if c.isalpha())
+    if alpha == 0:
+        return "vi"
+    vi_ratio = sum(1 for c in text if c in _VI_DIACRITIC_CHARS) / alpha
+    if vi_ratio >= 0.02:
+        return "vi"
+    if vi_ratio <= 0.001:
+        return "en"
+    return "mixed"
+
+
 def _char_overlap(a: str, b: str) -> float:
     """Simple character-level overlap ratio between two strings."""
     if not a or not b:
@@ -416,6 +446,7 @@ async def _call_llm_json(
     pass_label: str = "LLM",
     max_tokens: int = 16384,
     enable_thinking: bool = False,
+    allow_retry: bool = True,
 ) -> dict[str, Any]:
     """Generic helper: call LLM via port, extract JSON, with retry on parse failure.
 
@@ -424,8 +455,10 @@ async def _call_llm_json(
 
     ``enable_thinking`` defaults to ``False`` for JSON extraction — reasoning
     burns token budget on hidden chain-of-thought, truncating the JSON output.
-    Pass 1 (extract) and Pass 2 (write) produce analysis directly in content.
+    Pass 2 (write) may enable thinking via ``settings.wiki_write_thinking_enabled``.
     """
+    from llm_wiki.infrastructure.telemetry.business_metrics import inc_counter
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
@@ -441,16 +474,25 @@ async def _call_llm_json(
             timeout=timeout,
         )
     except TimeoutError:
+        inc_counter("llm_pass_calls_total", {"pass": pass_label, "status": "error"})
         logger.warning("%s: LLM call timed out after %.1fs", pass_label, timeout)
         raise
 
     content = _content_from_raw(raw_resp)
     if not content.strip():
+        inc_counter("llm_pass_calls_total", {"pass": pass_label, "status": "error"})
         raise ValueError(f"{pass_label}: empty response from LLM")
 
     try:
-        return await asyncio.to_thread(extract_json_from_llm_response, content)
+        parsed = await asyncio.to_thread(extract_json_from_llm_response, content)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{pass_label}: JSON extractor returned non-dict ({type(parsed).__name__})")
+        inc_counter("llm_pass_calls_total", {"pass": pass_label, "status": "ok"})
+        return parsed
     except (ValueError, json.JSONDecodeError) as parse_err:
+        if not allow_retry:
+            raise
+        inc_counter("llm_pass_calls_total", {"pass": pass_label, "status": "parse_retry"})
         logger.warning("%s: JSON parse failed (%s), retrying...", pass_label, str(parse_err)[:120])
         retry_messages = [
             {
@@ -476,9 +518,15 @@ async def _call_llm_json(
         content2 = _content_from_raw(raw_resp2)
         if not content2.strip():
             raise ValueError(f"{pass_label}: empty response from LLM on retry") from None
-        return await asyncio.to_thread(extract_json_from_llm_response, content2)
-
-
+        try:
+            parsed2 = await asyncio.to_thread(extract_json_from_llm_response, content2)
+        except (ValueError, json.JSONDecodeError) as parse_err2:
+            inc_counter("llm_pass_calls_total", {"pass": pass_label, "status": "error"})
+            raise ValueError(
+                f"{pass_label}: retry JSON unparseable: {str(parse_err2)[:120]}"
+            ) from None
+        inc_counter("llm_pass_calls_total", {"pass": pass_label, "status": "ok"})
+        return parsed2
 async def _pass_extract(
     llm: LLMClientPort,
     transcript_text: str,
@@ -486,8 +534,14 @@ async def _pass_extract(
     timeout: float,
     published_at: datetime | None = None,
     temperature: float = 0.0,
+    chunk_range: tuple[float, float] | None = None,
+    video_id: str | None = None,
 ) -> dict[str, Any]:
-    """Pass 1: Extract structured facts from transcript."""
+    """Pass 1: Extract structured facts from transcript.
+
+    ``chunk_range`` scopes extraction to a timestamp window (map step of the
+    chunked pipeline); ``video_id`` is included so facts can cite the source.
+    """
     domain_info = ""
     if classification.get("domain"):
         domain_info = f"- Domain: {classification['domain']}\n"
@@ -514,8 +568,25 @@ async def _pass_extract(
             "Neu khong the quy doi -> de normalized_date = null.\n\n"
         )
 
+    scope_instruction = ""
+    if chunk_range is not None:
+        scope_instruction = (
+            f"PHAM VI TRANSCRIPT NAY: {chunk_range[0]:.0f}s - {chunk_range[1]:.0f}s\n"
+            "CHI trich xuat cac phat bieu co noi dung trong pham vi nay.\n"
+            "Neu phat bieu tham chieu noi dung ngoai pham vi, van ghi phat bieu hien tai "
+            "nhung KHONG tu dien du kien bi thieu; them context_dependency=true va "
+            "reference_start_time neu xac dinh duoc.\n"
+            "start_time la thoi diem phat bieu hien tai, khong phai thoi diem tham chieu.\n\n"
+        )
+    video_info = ""
+    if video_id:
+        video_info = f"VIDEO ID: {video_id}\n"
+
     user_content = (
-        t0_instruction + f"Phan loai:\n- Chu de: {classification.get('main_topic', '')}\n"
+        video_info
+        + t0_instruction
+        + scope_instruction
+        + f"Phan loai:\n- Chu de: {classification.get('main_topic', '')}\n"
         f"{domain_info}{entities_info}"
         f"- Chu de phu: {', '.join(classification.get('subtopics', []))}\n"
         f"- Ngon ngu: {classification.get('language', 'vi')}\n\n"
@@ -529,6 +600,7 @@ async def _pass_extract(
         timeout=timeout,
         temperature=temperature,
         pass_label="Pass1-Extract",
+        max_tokens=32768,
     )
 
 
@@ -579,6 +651,7 @@ async def _pass_write(
     existing_page_content: str | None,
     timeout: float,
     published_at: datetime | None = None,
+    additional_instruction: str = "",
 ) -> dict[str, Any]:
     """Pass 2 (Analyze+Write combined): Compose final wiki page from extracted facts.
 
@@ -636,8 +709,17 @@ async def _pass_write(
             f"Neu transcript khong co gi moi, tra ve sections = [].",
         )
 
+    if additional_instruction:
+        user_parts.append(additional_instruction)
     user_content = "\n\n---\n\n".join(user_parts)
     logger.info("Pass 2/2: Analyze+Write combined (context: %d chars)", len(user_content))
+    write_thinking = settings.wiki_write_thinking_enabled
+    write_max_tokens = 131072 if write_thinking else 65536
+    logger.info(
+        "Pass 2/2: mode=analyze_write thinking=%s max_tokens=%d",
+        write_thinking,
+        write_max_tokens,
+    )
     data = await _call_llm_json(
         llm,
         WRITE_SYSTEM_PROMPT,
@@ -645,7 +727,8 @@ async def _pass_write(
         temperature=0.3,
         timeout=timeout,
         pass_label="Pass2-AnalyzeWrite",
-        max_tokens=65536,
+        enable_thinking=write_thinking,
+        max_tokens=write_max_tokens,
     )
 
     # Structural validation: check ### subsections in each section
@@ -1006,16 +1089,21 @@ async def _run_extraction_pass(
     classification_hint: dict[str, Any] | None = None,
     published_at: datetime | None = None,
     timeout: float = 300.0,
+    segments: list[dict] | None = None,
+    video_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run Pass 1: structured fact extraction from full transcript.
 
-    DeepSeek v4 Flash (1M token context) handles even the longest transcripts
-    (~800K chars / ~500K tokens) in a single pass — no chunking needed.
+    When ``settings.wiki_chunking_enabled`` and timestamped ``segments`` are
+    available, runs a map-reduce pipeline: each chunk is extracted separately
+    (scoped to its time range, with retry + jittered 429 backoff) and the
+    results are merged deterministically by ``fact_merger``. Otherwise falls
+    back to the single-pass extraction.
 
     Returns:
         Tuple of (facts_dict, merged_classification).
-        Raises RuntimeError if classification is completely empty.
     """
+    detected_lang = _detect_transcript_language(transcript_text)
     if classification_hint is None:
         classification_hint = {
             "main_topic": "",
@@ -1025,17 +1113,74 @@ async def _run_extraction_pass(
             "language": "vi",
             "summary_3sentences": "",
         }
+    hint_lang = classification_hint.get("language") or "vi"
+    if detected_lang != "mixed" and hint_lang != detected_lang:
+        logger.info(
+            "Transcript language detected as '%s' (classification hint: '%s') — overriding",
+            detected_lang, hint_lang,
+        )
+        classification_hint["language"] = detected_lang
 
     lang = classification_hint.get("language")
     cleaned = _preprocess_transcript(transcript_text, lang=lang)
 
-    facts = await _pass_extract(
-        llm,
-        cleaned,
-        classification_hint,
-        timeout,
-        published_at=published_at,
+    use_chunked = (
+        settings.wiki_chunking_enabled
+        and segments is not None
+        and len(segments) > 0
     )
+    if use_chunked:
+        from llm_wiki.application.use_cases.ingestion.transcript_chunker import (
+            chunk_transcript,
+        )
+
+        chunks = chunk_transcript(segments)
+        if chunks:
+            facts = await _run_chunked_extraction(
+                llm,
+                cleaned,
+                classification_hint,
+                timeout,
+                published_at,
+                chunks,
+                video_id,
+            )
+            logger.info(
+                "Pass 1 (map-reduce) OK: %d chunks -> %d numbers, %d events, %d claims",
+                len(chunks),
+                len(facts.get("numbers", [])),
+                len(facts.get("events", [])),
+                len(facts.get("key_claims", [])),
+            )
+        else:
+            logger.info(
+                "Chunking skipped (no usable segments or duration < threshold) — single pass"
+            )
+            facts = await _pass_extract(
+                llm,
+                cleaned,
+                classification_hint,
+                timeout,
+                published_at=published_at,
+                video_id=video_id,
+            )
+    else:
+        facts = await _pass_extract(
+            llm,
+            cleaned,
+            classification_hint,
+            timeout,
+            published_at=published_at,
+            video_id=video_id,
+        )
+    # P5: deterministic number normalization (post-merge, pre-persist).
+    try:
+        from llm_wiki.application.use_cases.ingestion.number_normalizer import normalize_facts
+
+        facts = normalize_facts(facts)
+    except Exception as exc:
+        logger.warning("Number normalization skipped: %s", exc)
+
     logger.info(
         "Pass 1 OK: %d companies, %d people, %d numbers, %d events, %d relationships,"
         " %d entity_relations",
@@ -1071,10 +1216,169 @@ async def _run_extraction_pass(
         except Exception as exc:
             logger.warning("Failed to build classification from facts: %s - using hint", exc)
 
+    # Deterministic transcript language wins over LLM drift: flash models often
+    # mislabel Vietnamese transcripts as English, which would force the wiki
+    # page to be written in English.
+    if detected_lang != "mixed":
+        if merged_classification.get("language") != detected_lang:
+            logger.info(
+                "Pass 1 classified language as '%s' — correcting to detected '%s'",
+                merged_classification.get("language"), detected_lang,
+            )
+        merged_classification["language"] = detected_lang
+
     if not merged_classification.get("main_topic"):
         logger.warning("Pass 1 produced empty classification - caller should use cold fallback")
 
     return facts, merged_classification
+
+
+_CLAIM_STOPWORDS = {
+    "của", "với", "cho", "các", "theo", "khi", "này", "đó", "từ", "về",
+    "trên", "dưới", "như", "còn", "đã", "sẽ", "đang", "được", "không",
+    "cũng", "nhưng", "và", "là", "một", "những", "vào", "ra", "lên",
+}
+
+
+def _number_variants(value: str) -> list[str]:
+    """Canonicalize a number string into variants for text search."""
+    v = value.strip().lower()
+    variants = {v, v.replace(" ", ""), v.replace(".", ","), v.replace(",", ".")}
+    return [x for x in variants if x]
+
+
+def _claim_represented(claim_text: str, page_text: str) -> bool:
+    """Heuristic: is a key claim reflected in the page?
+
+    Requires ≥ 40% of the claim's significant words (len ≥ 3, non-stopword)
+    to appear in the page text. Paraphrase-tolerant; substring matching would
+    over-trigger since the LLM rewrites sentences.
+    """
+    words = {
+        w for w in re.findall(r"\w+", claim_text.lower())
+        if len(w) >= 3 and w not in _CLAIM_STOPWORDS
+    }
+    if not words:
+        return True
+    page_lower = page_text.lower()
+    hits = sum(1 for w in words if w in page_lower)
+    return hits / len(words) >= 0.4
+
+
+async def _verify_and_repair(
+    llm: LLMClientPort,
+    transcript_text: str,
+    classification: dict[str, Any],
+    facts: dict[str, Any],
+    data: dict[str, Any],
+    timeout: float,
+    published_at: datetime | None = None,
+    existing_page_content: str | None = None,
+) -> dict[str, Any]:
+    """Post-write quality gates.
+
+    1. Numeric fidelity (warning-only): every Pass-1 number's value should
+       appear in the page. Catches the most dangerous hallucination (wrong
+       financial figures) without blocking on false positives (dates, years).
+    2. Key-claim coverage: if > 30% of extracted speaker claims are not
+       represented, issue ONE bounded repair call to Pass 2 listing nothing
+       extra — the repair simply re-runs with the same facts (the missing
+       claims are re-emphasized by the original prompt). Cost-capped.
+
+    Never raises — warnings and best-effort repair only.
+    """
+    try:
+        sections = data.get("sections", []) or []
+        page_text = " ".join(
+            [data.get("page_title", ""), data.get("summary", "")]
+            + [str(s.get("content_markdown", "")) for s in sections]
+        ).lower()
+
+        numbers = facts.get("numbers") or []
+        if numbers:
+            missing = []
+            for n in numbers:
+                if not isinstance(n, dict):
+                    continue
+                val = str(n.get("value", "")).strip()
+                if not val:
+                    continue
+                if not any(v in page_text for v in _number_variants(val)):
+                    missing.append(val)
+            if missing:
+                logger.warning(
+                    "Numeric fidelity: %d/%d Pass-1 numbers not found in page '%s': %s",
+                    len(missing), len(numbers), data.get("page_title", "?"), missing[:10],
+                )
+
+        # Finance-array values (P3): same numeric fidelity check on the values
+        # of market_snapshots / company_financials / macro_series /
+        # supply_demand / valuations / other_financial_facts.
+        finance_arrays = (
+            "market_snapshots",
+            "company_financials",
+            "macro_series",
+            "supply_demand",
+            "valuations",
+            "other_financial_facts",
+        )
+        finance_values: list[str] = []
+        for arr in finance_arrays:
+            for item in facts.get(arr, []) or []:
+                if not isinstance(item, dict):
+                    continue
+                for field in ("raw_value", "value"):
+                    val = str(item.get(field) or "").strip()
+                    if val:
+                        finance_values.append(val)
+                        break
+        if finance_values:
+            missing_fin = [
+                v for v in finance_values if not any(x in page_text for x in _number_variants(v))
+            ]
+            if missing_fin:
+                logger.warning(
+                    "Numeric fidelity (finance arrays): %d/%d values not found in page '%s': %s",
+                    len(missing_fin),
+                    len(finance_values),
+                    data.get("page_title", "?"),
+                    missing_fin[:10],
+                )
+
+        claims = facts.get("key_claims") or []
+        if claims:
+            missing_claims = [
+                (c.get("claim") or "").strip()
+                for c in claims
+                if isinstance(c, dict) and (c.get("claim") or "").strip()
+                and not _claim_represented(c["claim"], page_text)
+            ]
+            if missing_claims and len(missing_claims) / len(claims) > 0.3:
+                logger.warning(
+                    "Coverage: %d/%d key claims missing from page '%s' — issuing bounded repair",
+                    len(missing_claims), len(claims), data.get("page_title", "?"),
+                )
+                try:
+                    repaired = await _pass_write(
+                        llm,
+                        transcript_text,
+                        classification,
+                        facts,
+                        existing_page_content,
+                        timeout=min(timeout, 300.0),
+                        published_at=published_at,
+                    )
+                    if repaired.get("sections"):
+                        logger.info(
+                            "Coverage repair produced page '%s' (%d sections)",
+                            repaired.get("page_title", "?"), len(repaired.get("sections", [])),
+                        )
+                        return repaired
+                except Exception as exc:
+                    logger.warning("Coverage repair failed, keeping original page: %s", exc)
+    except Exception as exc:
+        logger.warning("Post-write verification skipped: %s", exc)
+    return data
 
 
 async def _run_synthesis_passes(
@@ -1085,15 +1389,27 @@ async def _run_synthesis_passes(
     existing_page_content: str | None = None,
     timeout: float = 450.0,
     published_at: datetime | None = None,
+    segments: list[dict] | None = None,
+    video_id: str | None = None,
+    raw_transcript: str | None = None,
 ) -> dict[str, Any]:
     """Run Pass 2 (Analyze+Write combined) with existing page context.
 
-    Analysis (cause-effect, investment implications, speaker stance) is
-    performed by the LLM internally with reasoning ON — no separate analyze pass.
+    When ``settings.wiki_reflect_enabled``, runs Pass 3 Reflect & Verify
+    (thinking ON, compact JSON delta): number/date/unit corrections applied
+    programmatically, high-priority missing facts filled by one bounded
+    rewrite. Otherwise falls back to the heuristic ``_verify_and_repair``.
+
+    ``raw_transcript`` must be the UNMODIFIED transcript (preprocessing is
+    applied only for the write prompt) so reflect quotes stay verbatim.
 
     Returns:
         Dict with keys: "wiki", "facts", "classification"
     """
+    detected_lang = _detect_transcript_language(transcript_text)
+    if detected_lang != "mixed":
+        classification["language"] = detected_lang
+
     lang = classification.get("language")
     cleaned = _preprocess_transcript(transcript_text, lang=lang)
 
@@ -1116,7 +1432,70 @@ async def _run_synthesis_passes(
         logger.error("Pass 2 (Analyze+Write) failed: %s", exc)
         raise RuntimeError("Wiki page generation failed") from exc
 
+    if settings.wiki_reflect_enabled:
+        try:
+            delta = await _pass_reflect(
+                llm,
+                _draft_to_markdown(data),
+                facts,
+                raw_transcript or transcript_text,
+                segments,
+                video_id,
+                timeout=min(timeout * 0.4, 600.0),
+            )
+            errors = delta.get("errors") or []
+            if errors:
+                data, applied = _apply_corrections(data, errors)
+                logger.info("Reflect: %d corrections applied", applied)
+            high_missing = [
+                m
+                for m in (delta.get("missing_facts") or [])
+                if isinstance(m, dict)
+                and m.get("importance") == "high"
+                and float(m.get("confidence") or 0.0) >= 0.7
+            ]
+            coverage = delta.get("coverage_by_section") or []
+            low_coverage = any(
+                float(c.get("coverage_ratio") or 1.0) < 0.5 for c in coverage if isinstance(c, dict)
+            )
+            if high_missing and low_coverage:
+                topics = "\n".join(
+                    f"- {m.get('topic')} (fact_id={m.get('fact_id')}, "
+                    f"evidence: {m.get('evidence_quote')[:200]}, start_time={m.get('start_time')})"
+                    for m in high_missing[:10]
+                )
+                rewrite = await _pass_write(
+                    llm,
+                    cleaned,
+                    classification,
+                    facts,
+                    _draft_to_markdown(data),
+                    timeout=min(timeout * 0.4, 300.0),
+                    published_at=published_at,
+                    additional_instruction=(
+                        "**BO SUNG CAC SECTION MOI** (kem bang chung evidence_quote + "
+                        f"start_time):\n{topics}\nChi viet cac section CHUA CO trong bai."
+                    ),
+                )
+                data = _merge_rewrite_sections(data, rewrite)
+        except Exception as exc:
+            logger.warning("Reflect & Verify failed, falling back to heuristic: %s", exc)
+            data = await _verify_and_repair(
+                llm, cleaned, classification, facts, data,
+                timeout=timeout * 0.6, published_at=published_at,
+                existing_page_content=existing_page_content,
+            )
+    else:
+        # Post-write quality gates: numeric fidelity (warning-only) and key-claim
+        # coverage (bounded single repair call). See _verify_and_repair.
+        data = await _verify_and_repair(
+            llm, cleaned, classification, facts, data,
+            timeout=timeout * 0.6, published_at=published_at,
+            existing_page_content=existing_page_content,
+        )
+
     return {"wiki": data, "facts": facts, "classification": classification}
+
 
 
 # ---------------------------------------------------------------------------
@@ -1195,17 +1574,30 @@ class WikiIntegrator:
         source_item_id_val = source_item_id or item.id
         published_at_val = published_at or item.published_at
 
-        if db is None:
-            raise ValueError("db (AsyncSession) is required for integration")
-
-        # Step 1: Run Pass 1 extraction -> facts + classification (100% coverage)
+        try:
+            _segments = (item.transcript_json or {}).get("segments") or None
+        except Exception:
+            _segments = None
         facts, effective_classification = await _run_extraction_pass(
             llm=self._llm,
             transcript_text=transcript_text,
             classification_hint=classification,
             published_at=published_at_val,
             timeout=timeout,
+            segments=_segments,
+            video_id=item.external_id,
         )
+
+        # Persist Pass-1 structured facts on the source item (source-scoped,
+        # not page-scoped — pages merge multiple sources and would overwrite).
+        # Enables provenance and post-write numeric/claim verification.
+        if isinstance(facts, dict):
+            try:
+                item.key_claims = facts.get("key_claims") or []
+                item.pass1_numbers = facts.get("numbers") or []
+                item.pass1_facts = facts
+            except Exception as exc:
+                logger.warning("Failed to persist Pass-1 facts on item %s: %s", item.id, exc)
 
         # If Pass 1 failed to classify and caller provided a fallback, use it
         if (
@@ -1296,6 +1688,10 @@ class WikiIntegrator:
                 facts,
                 existing_page_content=existing_page_content,
                 published_at=published_at_val,
+                timeout=timeout,
+                segments=_segments,
+                video_id=item.external_id,
+                raw_transcript=transcript_text,
             )
             llm_data = llm_result["wiki"]
             page = await _update_page(best_match, llm_data, source_id_val, source_item_id_val, db)
@@ -1315,6 +1711,10 @@ class WikiIntegrator:
                 effective_classification,
                 facts,
                 published_at=published_at_val,
+                timeout=timeout,
+                segments=_segments,
+                video_id=item.external_id,
+                raw_transcript=transcript_text,
             )
             llm_data = llm_result["wiki"]
             page = await _create_page(
@@ -1433,3 +1833,227 @@ class WikiIntegrator:
 
         # Detect contradictions against other sources
         await detect_contradictions(page_id=page_id_val, db=db)
+
+
+async def _run_chunked_extraction(
+    llm: LLMClientPort,
+    cleaned_transcript: str,
+    classification_hint: dict[str, Any],
+    timeout: float,
+    published_at: datetime | None,
+    chunks: list,
+    video_id: str | None,
+) -> dict[str, Any]:
+    """Map step of chunked extraction: extract each chunk with retry/backoff.
+
+    A chunk is retried once; if it still fails it is skipped with a warning
+    (partial coverage beats a dead job). If more than half the chunks fail,
+    the whole pass raises so the consumer retries the item.
+    """
+    import random
+
+    from llm_wiki.application.use_cases.ingestion.fact_merger import merge_chunk_facts
+
+    # 300s per chunk: canary-verified LLM API latency is ~200-280s for a
+    # ~10K-char finance chunk; 240s caused frequent timeouts. Still fits the
+    # 3600s job budget (8 chunks x 300s + write + reflect).
+    per_chunk_timeout = min(timeout, 300.0)
+    chunks_facts: list[dict] = []
+    failures = 0
+
+    for idx, chunk in enumerate(chunks):
+        try:
+            chunk_facts = await _pass_extract(
+                llm,
+                chunk.text,
+                classification_hint,
+                per_chunk_timeout,
+                published_at=published_at,
+                chunk_range=(chunk.start_time, chunk.end_time),
+                video_id=video_id,
+            )
+            chunks_facts.append(chunk_facts)
+            logger.info(
+                "Pass 1 chunk %d/%d (%d-%ds): %d numbers, %d events",
+                idx + 1,
+                len(chunks),
+                int(chunk.start_time),
+                int(chunk.end_time),
+                len(chunk_facts.get("numbers", [])),
+                len(chunk_facts.get("events", [])),
+            )
+        except Exception as exc:
+            failures += 1
+            logger.warning(
+                "Pass 1 chunk %d/%d failed (%s) — retrying once",
+                idx + 1,
+                len(chunks),
+                str(exc)[:200],
+            )
+            try:
+                await asyncio.sleep(random.uniform(5.0, 15.0))  # jittered backoff
+                chunk_facts = await _pass_extract(
+                    llm,
+                    chunk.text,
+                    classification_hint,
+                    per_chunk_timeout,
+                    published_at=published_at,
+                    chunk_range=(chunk.start_time, chunk.end_time),
+                    video_id=video_id,
+                )
+                chunks_facts.append(chunk_facts)
+                failures -= 1
+            except Exception as retry_exc:
+                logger.warning(
+                    "Pass 1 chunk %d/%d permanently failed: %s — skipping chunk",
+                    idx + 1,
+                    len(chunks),
+                    str(retry_exc)[:200],
+                )
+
+    if failures > 0 and failures / max(len(chunks), 1) > 0.5:
+        raise RuntimeError(
+            f"Pass 1 map-reduce: {failures}/{len(chunks)} chunks failed"
+        )
+
+    return merge_chunk_facts(chunks_facts, classification_hint)
+
+
+# ---------------------------------------------------------------------------
+# Pass 3: Reflect & Verify helpers
+# ---------------------------------------------------------------------------
+
+
+def _draft_to_markdown(data: dict[str, Any]) -> str:
+    """Serialize a wiki draft dict into the markdown form _pass_write expects.
+
+    Mirrors the storage shape (page_title + summary + sections with
+    ``## title`` headers) so ``_build_page_overview`` and the bounded rewrite
+    can consume it as ``existing_page_content``.
+    """
+    parts: list[str] = []
+    if data.get("page_title"):
+        parts.append(f"# {data['page_title']}")
+    if data.get("summary"):
+        parts.append(f"{data['summary']}\n")
+    for sec in data.get("sections", []) or []:
+        title = sec.get("title") or ""
+        content = sec.get("content_markdown") or ""
+        if not title and not content:
+            continue
+        parts.append(f"## {title}\n\n{content}")
+    return "\n\n".join(parts)
+
+
+def _apply_corrections(draft: dict[str, Any], errors: list[dict]) -> tuple[dict[str, Any], int]:
+    """Apply number/date/unit corrections programmatically, per section.
+
+    A correction is applied only when ``page_says`` matches EXACTLY ONCE within
+    the named section (variant-aware). Ambiguous or absent matches are skipped
+    with a warning — never guess.
+    """
+    applied = 0
+    sections = draft.get("sections", []) or []
+    by_title = {str(s.get("title", "")): s for s in sections}
+    for err in errors:
+        if not isinstance(err, dict):
+            continue
+        page_says = str(err.get("page_says") or "").strip()
+        correct = str(err.get("correct_value") or "").strip()
+        if not page_says or not correct:
+            continue
+        section = str(err.get("section") or "")
+        target = by_title.get(section)
+        if target is None:
+            # Fall back to scanning every section.
+            for sec in sections:
+                if page_says in (sec.get("content_markdown") or ""):
+                    target = sec
+                    break
+        if target is None:
+            logger.warning("Reflect correction skipped (section not found): %s", page_says)
+            continue
+        content = target.get("content_markdown") or ""
+        variants = _number_variants(page_says)
+        matches = [v for v in variants if v in content]
+        if len(matches) == 1 and content.count(matches[0]) == 1:
+            target["content_markdown"] = content.replace(matches[0], correct)
+            applied += 1
+            logger.info(
+                "Reflect correction applied in '%s': %s -> %s", section, matches[0], correct
+            )
+        else:
+            logger.warning(
+                "Reflect correction skipped (match=%d, count per variant) in '%s': %s",
+                len(matches), section, page_says,
+            )
+    if applied:
+        draft["content_markdown"] = _draft_to_markdown(draft)
+    return draft, applied
+
+
+def _merge_rewrite_sections(draft: dict[str, Any], rewrite: dict[str, Any]) -> dict[str, Any]:
+    """Append sections produced by a bounded rewrite, deduplicating by title."""
+    existing_titles = {str(s.get("title", "")).strip() for s in draft.get("sections", []) or []}
+    next_order = len(draft.get("sections", []) or [])
+    added = 0
+    for sec in rewrite.get("sections", []) or []:
+        if not isinstance(sec, dict):
+            continue
+        title = str(sec.get("title", "")).strip()
+        if not title or title in existing_titles:
+            continue
+        new_sec = dict(sec)
+        new_sec["order"] = next_order
+        next_order += 1
+        draft.setdefault("sections", []).append(new_sec)
+        existing_titles.add(title)
+        added += 1
+    if added:
+        logger.info("Reflect rewrite appended %d new section(s)", added)
+        draft["content_markdown"] = _draft_to_markdown(draft)
+    return draft
+
+
+async def _pass_reflect(
+    llm: LLMClientPort,
+    draft_md: str,
+    facts: dict[str, Any],
+    raw_transcript: str,
+    segments: list[dict] | None,
+    video_id: str | None,
+    timeout: float,
+) -> dict[str, Any]:
+    """Pass 3: audit the draft against facts + RAW transcript (thinking ON)."""
+    facts_json = json.dumps(facts, ensure_ascii=False)[:30000]
+    head = raw_transcript[:30000]
+    tail = raw_transcript[-30000:] if len(raw_transcript) > 30000 else ""
+    segment_index = ""
+    if segments:
+        lines = [
+            f"{float(s.get('start', 0)):.0f}s: {(s.get('text') or '')[:160]}"
+            for s in segments[:2000]
+        ]
+        segment_index = "\n".join(lines)
+
+    user_content = "\n\n---\n\n".join(
+        [
+            f"VIDEO ID: {video_id or 'unknown'}\n\nBAN NHAP BAI WIKI:\n{draft_md}",
+            f"KHO DU KIEN (facts):\n{facts_json}",
+            f"TRANSCRIPT GOC (dau):\n{head}",
+            f"TRANSCRIPT GOC (cuoi):\n{tail}" if tail else "",
+            f"SEGMENT INDEX (start_time -> text):\n{segment_index}" if segment_index else "",
+        ]
+    )
+    logger.info("Pass 3/3: Reflect & Verify (context: %d chars)", len(user_content))
+    return await _call_llm_json(
+        llm,
+        REFLECT_SYSTEM_PROMPT,
+        user_content,
+        timeout=timeout,
+        temperature=0.2,
+        max_tokens=16384,
+        enable_thinking=True,
+        allow_retry=False,
+        pass_label="Pass3-Reflect",
+    )

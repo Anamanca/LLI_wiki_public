@@ -130,6 +130,7 @@ class TracedLLMWrapper(LLMClientPort):
                 "messages": _redacted_messages(messages),
                 "temperature": temperature,
                 "max_tokens": max_tokens,
+                "enable_thinking": enable_thinking,
             },
             metadata={"model": self._model},
             parent=self._parent_span,
