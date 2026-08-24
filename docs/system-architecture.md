@@ -272,7 +272,7 @@ See [`frontend/AGENTS.md`](../frontend/AGENTS.md) for Docker build details and e
 | **Multi-provider LLM** | API key rotation (OpenCode Zen, Gemini) with priority and rate-limit tracking |
 | **Temporal filtering** | Parsed `TimeRange` applied to vector and keyword search with recency decay |
 | **Bilingual search** | VI + EN keywords, answer language matches question |
-| **Telemetry** | LangSmith tracing (every pipeline step) + Prometheus metrics + JSON structured logging with `trace_id` |
+| **Telemetry** | LangSmith tracing (every pipeline step) + JSON structured logging with `trace_id`; Prometheus metrics optional (`ENABLE_METRICS`, disabled by default) |
 | **Ports as ABCs** | Every external service behind a port; infrastructure provides adapters |
 | **DI** | `dependency-injector` wires singletons and per-request factories |
 
@@ -282,8 +282,8 @@ See [`frontend/AGENTS.md`](../frontend/AGENTS.md) for Docker build details and e
 
 | Host / Port | Target | Purpose |
 |-------------|--------|---------|
-| `llm-wiki.local` | `/api` → backend, `/` → frontend | Main ingress |
-| `:30080` | NodePort | Direct cluster access |
+| `:30080` | NodePort → frontend | Toàn app (frontend proxy `/api` nội bộ) |
+| `:30081` | NodePort → backend | Backend API trực tiếp |
 | `backend-v2:8000` | FastAPI | Internal backend service |
 | `cpu-worker:8100` | Health API (sidecar) | Worker health / cron-job control |
 
@@ -297,7 +297,10 @@ All settings in `src/llm_wiki/config.py` via `pydantic-settings`. Required vars 
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `REASONING_ENABLED` | `true` | Enables self-reflective retry loop |
+| `REASONING_ENABLED` | `true` | Global model reasoning toggle (not a wiki switch) |
+| `WIKI_CHUNKING_ENABLED` | `false` | Wiki Pass 1 chunked map-reduce extraction (long videos) |
+| `WIKI_WRITE_THINKING_ENABLED` | `false` | Wiki Pass 2 write with thinking ON (large JSON, use cautiously) |
+| `WIKI_REFLECT_ENABLED` | `false` | Wiki Pass 3 Reflect & Verify (thinking ON, bounded corrections) |
 | `CROSS_ENCODER_ENABLED` | `false` | Enables BAAI/bge-reranker-v2-m3 (CPU-slow) |
 | `LANGSMITH_TRACING` | `false` | Sends traces to LangSmith |
 | `ENABLE_METRICS` | `false` | Exposes Prometheus `/api/metrics` |

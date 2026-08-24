@@ -40,4 +40,27 @@ See [`frontend/AGENTS.md`](frontend/AGENTS.md) for details. Key: uses `npm ci` (
 - Backend image: `32_llm_wiki_clean_arch-backend:latest`
 - Cluster context: `kind-llm-wiki`
 - Namespace: `llm-wiki`
-- `/api/admin/cron-jobs` returns real status based on K8s CronJob/Job state and worker heartbeats.
+-
+## Wiki Extraction v2 (2026-08-23)
+
+- Feature flags (default OFF): `WIKI_CHUNKING_ENABLED`, `WIKI_WRITE_THINKING_ENABLED`,
+  `WIKI_REFLECT_ENABLED` (config.py). `REASONING_ENABLED` is global — do NOT use it as the
+  wiki-only switch.
+- Chunked map-reduce extraction: `transcript_chunker.py` (600s chunks, 45s overlap, max 12)
+  + `fact_merger.py` (field-preserving dedup; `relationships` vs `entity_relations` merge
+  separately). Raw segments feed `start_time`/`source_quote` on numbers/events/key_claims.
+- Finance-native schema in `wiki_prompts.py` EXTRACT prompt (7 arrays + fact_id + caps +
+  overflow_facts). Full Pass-1 facts persist to `source_items.pass1_facts` (migration
+  `k8s/migrations/002_add_pass1_facts.sql`; manual psql apply — migrations/ is gitignored
+  per repo convention).
+- Pass 3 Reflect & Verify (`_pass_reflect`, thinking ON, `allow_retry=False`): corrections
+  applied programmatically per-section (unique-match only); bounded rewrite for high-priority
+  gaps; heuristic `_verify_and_repair` is the fallback. Number normalization: `number_normalizer.py`
+  (ambiguous "1,234"/"1.234" never guessed; VND only when explicit).
+- Rollout/reprocess: `scripts/reprocess-wiki.py` (force-reprocess completed items, clears
+  `_wiki_page_id` fast-path marker, bounded batch, audit). Snapshot retention 7 days.
+  Wiki job timeout raised 1800s → 3600s (chunked canary with slow LLM API latency).
+- Runbook: `docs/operations/wiki-extraction-v2-rollout.md` (migration-before-code, flags,
+  canary gates, rollback).
+- Canary (2026-08-23, `u45c_nVV0Sk`): chunk 1/8 alone extracted 17-20 numbers + 8-9 events
+  vs 17 numbers / 5 claims for the whole video on the old single-pass pipeline.

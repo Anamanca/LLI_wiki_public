@@ -14,11 +14,11 @@
 LLM Wiki is a knowledge-aggregation system that:
 
 1. **Ingests** multi-source content (YouTube transcripts, manual upload).
-2. **Converts** raw content into structured wiki pages via a 3-pass LLM integrator.
+2. **Converts** raw content into structured wiki pages via a 3-pass LLM integrator: Pass 1 extracts structured facts (optionally chunked map-reduce for long videos), Pass 2 writes the page, Pass 3 reflects & verifies (numbers/dates/coverage). Feature flags default OFF.
 3. **Extracts** entities, events, and relations into a knowledge graph.
 4. **Answers** natural-language questions through an **agentic RAG pipeline**: hybrid search (pgvector HNSW + tsvector + event search + GraphRAG), RRF fusion, LLM reranking, self-reflective evaluation with retry, and three-tier caching.
-5. **Observes** execution via LangSmith tracing and Prometheus metrics (Port/Adapter pattern).
-6. **Monitors** itself via in-cluster Prometheus + Grafana + Loki + AlertManager with Telegram alerting.
+5. **Observes** execution via LangSmith tracing + JSON structured logging with `trace_id` (Port/Adapter pattern; Prometheus metrics optional, disabled by default).
+6. **Monitors** itself via worker heartbeats in Postgres, `scripts/healthcheck.sh`, ingestion alerts (Web UI + Telegram).
 7. **Exposes** a Next.js admin dashboard: chat, wiki browser, source management, knowledge graph, cron-job and worker administration.
 
 ---
@@ -56,8 +56,8 @@ LLM Wiki is a knowledge-aggregation system that:
 └──────┬──────┘
        │
 ┌──────▼──────────────────────────────────────────────────────────────┐
-│  Monitoring Stack (in-cluster K8s)                                   │
-│  Prometheus + Grafana + Loki + Promtail + AlertManager → Telegram    │
+│  Observability: LangSmith tracing + JSON logs (trace_id)             │
+│  healthcheck.sh + worker heartbeats + Web/Telegram alerts            │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -76,7 +76,7 @@ LLM Wiki is a knowledge-aggregation system that:
 | **Multi-provider LLM** | API key rotation across providers (OpenCode Zen, Gemini) with priority and rate-limit tracking. |
 | **Temporal filtering** | Parsed `TimeRange` applied to search with recency decay. |
 | **Bilingual search + synthesis** | VI + EN keywords; answer language matches question (LLM-detected with regex fallback). |
-| **Telemetry** | LangSmith tracing (full LLM I/O) + Prometheus metrics + JSON structured logging with `trace_id`. |
+| **Telemetry** | LangSmith tracing (full LLM I/O) + JSON structured logging with `trace_id`; Prometheus metrics optional (`ENABLE_METRICS`, disabled by default). |
 | **Ports as ABCs** | Every external service behind a port; infrastructure provides adapters. |
 | **DI** | `dependency-injector` wires singletons (embedder, LLM, cache) and per-request factories (pipeline, repos). |
 
@@ -102,7 +102,7 @@ LLM Wiki is a knowledge-aggregation system that:
 ├── scripts/                             # Dev / deploy helpers
 ├── pyproject.toml                       # Python dependencies & tool config
 ├── pytest.ini, Dockerfile, .env.example
-└── migrations/                          # Alembic migrations
+└── k8s/migrations/                      # SQL migrations (manual apply, e.g. pass1_facts)
 ```
 
 ---
@@ -115,7 +115,8 @@ LLM Wiki is a knowledge-aggregation system that:
 | [`docs/conventions.md`](docs/conventions.md) | Code style, adding concepts/services/APIs, route registration, error handling, env vars, testing, commits |
 | [`docs/search-strategy.md`](docs/search-strategy.md) | Full RAG pipeline: cache, guardrail+intent analysis, 4-stream retrieval, RRF, reranking, synthesis, self-reflective loop |
 | [`docs/telemetry-implementation-strategy.md`](docs/telemetry-implementation-strategy.md) | LangSmith tracing architecture, trace trees, span hierarchy |
-| [`docs/observability-guide.md`](docs/observability-guide.md) | SRE 4-pillar reference: Prometheus, Grafana, Loki, AlertManager |
+| [`docs/observability-guide.md`](docs/observability-guide.md) | Observability: LangSmith tracing, healthcheck, worker heartbeats, alerts (monitoring stack đã gỡ) |
+| [`docs/operations/wiki-extraction-v2-rollout.md`](docs/operations/wiki-extraction-v2-rollout.md) | Wiki Extraction v2 rollout runbook: flags, canary, thresholds, reprocess |
 | [`01_API_list.md`](01_API_list.md) | Complete API reference (all endpoints, request/response shapes) |
 | [`AGENTS.md`](AGENTS.md) | Agent context: Docker builds, cluster context, design constraints |
 | [`frontend/AGENTS.md`](frontend/AGENTS.md) | Frontend Docker build, Next.js config, environment |
@@ -146,13 +147,26 @@ All endpoints under `/api`. See [`01_API_list.md`](01_API_list.md) for full deta
 
 ## 6. Development
 
-### Local dev against K8s services
+### Truy cập cluster (không cần port-forward)
+
+Frontend/backend là NodePort services, kind map host port 30080/30081 → node:
 
 ```bash
-# 1. Port-forward K8s services:
-kubectl port-forward -n llm-wiki svc/postgres 5432:5432 &
-kubectl port-forward -n llm-wiki svc/redis   6379:6379 &
-kubectl port-forward -n llm-wiki svc/ollama  11434:11434 &
+# Frontend (toàn app, proxy /api nội bộ)
+curl http://localhost:30080/               # hoặc http://100.115.181.93:30080 (Tailscale)
+# Backend API trực tiếp
+curl http://localhost:30081/api/health
+# Healthcheck toàn hệ thống
+./scripts/healthcheck.sh
+```
+
+### Local dev chống lại services trong cluster
+
+```bash
+# 1. Truy cập Postgres/Redis/Ollama từ máy host (chỉ khi dev local, không phải lúc chạy cluster):
+kubectl -n llm-wiki port-forward svc/postgres 5432:5432 &
+kubectl -n llm-wiki port-forward svc/redis   6379:6379 &
+kubectl -n llm-wiki port-forward svc/ollama  11434:11434 &
 
 # 2. Create .env from .env.example
 
@@ -174,8 +188,8 @@ npm run dev
 | `./scripts/test-apis.sh [URL]` | Run contract tests against running backend |
 | `./scripts/sync-and-test.sh` | Sync changed files into K8s pods + test |
 | `./scripts/deploy-k8s.sh` | Build images + deploy to K3s |
-| `./scripts/deploy-monitoring.sh` | Deploy monitoring stack to Kind |
-| `./scripts/monitoring-socat-forward.sh` | Expose all services via socat (Kind) |
+| `./scripts/healthcheck.sh` | Healthcheck cluster + app + host resources |
+| `python scripts/reprocess-wiki.py` | Force-reprocess completed wiki items (dry-run, flags `--external-id`, `--generation`) |
 | `python scripts/benchmark_rag.py` | Benchmark RAG pipeline |
 | `python scripts/eval_rag.py` | Evaluate RAG against labeled dataset (LangSmith) |
 
@@ -198,7 +212,7 @@ See [`k8s/README.md`](k8s/README.md) and [`k8s/AGENTS.md`](k8s/AGENTS.md). Key f
 - `backend-v2`, `cpu-worker`, `wiki-consumer` share the same backend image.
 - `cpu-worker` includes an `api` sidecar on port `8100` for cron-job control.
 - Frontend image is standalone; Next.js `rewrites()` proxies `/api/*` to `backend-v2:8000`.
-- Ingress: `llm-wiki.local` → `/api` → backend, `/` → frontend. NodePort `30080`.
+- Truy cập: frontend NodePort `:30080` (toàn app), backend NodePort `:30081` (API trực tiếp). Không cần port-forward.
 
 ---
 
